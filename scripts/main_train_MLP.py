@@ -27,6 +27,10 @@ def train(HyenaDNA_feature_extractor, MLP_head, device, train_loader, optimizer,
         mRNA_seq, miRNA_seq, mRNA_seq_mask, miRNA_seq_mask, target = mRNA_seq.to(device), miRNA_seq.to(device), mRNA_seq_mask.to(device), miRNA_seq_mask.to(device), target.to(device)
         mRNA_hidden_states = HyenaDNA_feature_extractor(device=device, input_ids=mRNA_seq) # (batchsize, mRNA_seq_len, hidden), mask size = (batchsize, mRNA_seq_len)
         miRNA_hidden_states = HyenaDNA_feature_extractor(device=device, input_ids=miRNA_seq) # (batchsize, miRNA_seq_len, hidden), mask size = (batchsize, miRNA_seq_len)
+        # cross attn between mRNA and miRNA embeddings
+        Q, K = mRNA_hidden_states, miRNA_hidden_states
+        V = miRNA_hidden_states
+        
         # remove padding
         mRNA_seq_mask = mRNA_seq_mask.unsqueeze(-1).expand(-1, -1, mRNA_hidden_states.shape[2]) # (batchsize, mRNA_seq_len, hidden_size)
         mRNA_hidden_states = mRNA_hidden_states[mRNA_seq_mask]
@@ -71,9 +75,9 @@ def test(HyenaDNA_feature_extractor, MLP_head, device, test_loader, loss_fn):
             miRNA_hidden_states = HyenaDNA_feature_extractor(device=device, input_ids=miRNA_seq)
             # remove padding
             mRNA_seq_mask = mRNA_seq_mask.unsqueeze(-1).expand(-1, -1, mRNA_hidden_states.shape[2]) # (batchsize, mRNA_seq_len, hidden_size)
-            mRNA_hidden_states = mRNA_hidden_states * mRNA_seq_mask
+            mRNA_hidden_states = mRNA_hidden_states[mRNA_seq_mask]
             miRNA_seq_mask = miRNA_seq_mask.unsqueeze(-1).expand(-1, -1, miRNA_hidden_states.shape[2]) # (batchsize, miRNA_seq_len, hidden_size)
-            miRNA_hidden_states = miRNA_hidden_states * miRNA_seq_mask
+            miRNA_hidden_states = miRNA_hidden_states[miRNA_seq_mask]
             # avg pool on seq_len
             mRNA_hidden_states_pooled = torch.mean(mRNA_hidden_states, dim=1) # (batchsize, hidden)
             miRNA_hidden_states_pooled = torch.mean(miRNA_hidden_states, dim=1) # (batchsize, hidden)
