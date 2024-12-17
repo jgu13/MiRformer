@@ -1,5 +1,6 @@
 import torch.optim as optim
 import torch
+import torch.nn.functional as F
 import json
 import os
 import pandas as pd
@@ -18,6 +19,23 @@ We provide simple training code for the GenomicBenchmark datasets.
 
 PROJ_HOME = os.path.expanduser('~/projects/mirLM')
 
+def compute_cross_attention(Q, K, V, Q_mask, K_mask):
+    d_model = Q.shape[-1]
+    scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_model) # [batchsize, mRNA_seq_len, miRNA_seq_len]
+    # expand K mask to mask out keys, make each query only attend to valid keys
+    K_mask = K_mask.unsqueeze(1).expand(-1, Q.shape[1], -1) # [batchsize, mRNA_seq_len, miRNA_seq_len]
+    scores = scores.masked_fill(K_mask==0, -1e9)
+    # apply softmax on the key dimension
+    attn_weights = F.softmax(scores, dim=-1) # [batchsize, mRNA_seq_len, miRNA_seq_len]
+    cross_attn = torch.matmul(attn_weights, V) # [batchsize, mRNA_seq_len, d_model]
+    # expand Q mask to mask out queries, zero out padded queries
+    valid_counts = Q_mask.sum(dim=1, keepdim=True) # [batchsize, 1] 
+    Q_mask = Q_mask.unsqueeze(-1).expand(-1, -1, d_model) # [batchsize, mRNA_seq_len, d_model]
+    cross_attn = cross_attn * Q_mask
+    # average pool over seq_length
+    cross_attn = cross_attn.sum(dim=1) / valid_counts # [batchsize, d_model]
+    # print("Cross attention shape = ", cross_attn.shape)
+    return cross_attn
 
 def train(HyenaDNA_feature_extractor, MLP_head, device, train_loader, optimizer, epoch, loss_fn, log_interval=10, epoch_loss=0.0, accumulation_step=None):
     """Training loop."""
@@ -28,19 +46,13 @@ def train(HyenaDNA_feature_extractor, MLP_head, device, train_loader, optimizer,
         mRNA_hidden_states = HyenaDNA_feature_extractor(device=device, input_ids=mRNA_seq) # (batchsize, mRNA_seq_len, hidden), mask size = (batchsize, mRNA_seq_len)
         miRNA_hidden_states = HyenaDNA_feature_extractor(device=device, input_ids=miRNA_seq) # (batchsize, miRNA_seq_len, hidden), mask size = (batchsize, miRNA_seq_len)
         # cross attn between mRNA and miRNA embeddings
-        Q, K = mRNA_hidden_states, miRNA_hidden_states
-        V = miRNA_hidden_states
-        
-        # remove padding
-        mRNA_seq_mask = mRNA_seq_mask.unsqueeze(-1).expand(-1, -1, mRNA_hidden_states.shape[2]) # (batchsize, mRNA_seq_len, hidden_size)
-        mRNA_hidden_states = mRNA_hidden_states[mRNA_seq_mask]
-        miRNA_seq_mask = miRNA_seq_mask.unsqueeze(-1).expand(-1, -1, miRNA_hidden_states.shape[2]) # (batchsize, miRNA_seq_len, hidden_size)
-        miRNA_hidden_states = miRNA_hidden_states[miRNA_seq_mask]
-        # avg pool on seq_len
-        mRNA_hidden_states_pooled = torch.mean(mRNA_hidden_states, dim=1) # (batchsize, hidden)
-        miRNA_hidden_states_pooled = torch.mean(miRNA_hidden_states, dim=1) # (batchsize, hidden)
-        concatenated_seq_embedding = torch.cat((mRNA_hidden_states_pooled, miRNA_hidden_states_pooled), dim=1) # (batchsize, 2 * hidden)
-        output = MLP_head(concatenated_seq_embedding) # (batch_size, 1)
+        Q = mRNA_hidden_states # [batchsize, mRNA_seq_len, d_model]
+        K = miRNA_hidden_states # [batchsize, miRNA_seq_len, d_model]
+        V = miRNA_hidden_states # [batchsize, miRNA_seq_len, d_model]
+        Q_mask = mRNA_seq_mask
+        K_mask = miRNA_seq_mask
+        cross_attn = compute_cross_attention(Q=Q, K=K, V=V, Q_mask=Q_mask, K_mask=K_mask)
+        output = MLP_head(cross_attn) # (batch_size, 1)
         loss = loss_fn(output.squeeze().sigmoid(), target.squeeze())
         if accumulation_step is not None:
             loss = loss / accumulation_step
@@ -73,16 +85,13 @@ def test(HyenaDNA_feature_extractor, MLP_head, device, test_loader, loss_fn):
             mRNA_seq, miRNA_seq, mRNA_seq_mask, miRNA_seq_mask, target = mRNA_seq.to(device), miRNA_seq.to(device), mRNA_seq_mask.to(device), miRNA_seq_mask.to(device), target.to(device)
             mRNA_hidden_states = HyenaDNA_feature_extractor(device=device, input_ids=mRNA_seq)
             miRNA_hidden_states = HyenaDNA_feature_extractor(device=device, input_ids=miRNA_seq)
-            # remove padding
-            mRNA_seq_mask = mRNA_seq_mask.unsqueeze(-1).expand(-1, -1, mRNA_hidden_states.shape[2]) # (batchsize, mRNA_seq_len, hidden_size)
-            mRNA_hidden_states = mRNA_hidden_states[mRNA_seq_mask]
-            miRNA_seq_mask = miRNA_seq_mask.unsqueeze(-1).expand(-1, -1, miRNA_hidden_states.shape[2]) # (batchsize, miRNA_seq_len, hidden_size)
-            miRNA_hidden_states = miRNA_hidden_states[miRNA_seq_mask]
-            # avg pool on seq_len
-            mRNA_hidden_states_pooled = torch.mean(mRNA_hidden_states, dim=1) # (batchsize, hidden)
-            miRNA_hidden_states_pooled = torch.mean(miRNA_hidden_states, dim=1) # (batchsize, hidden)
-            concatenated_seq_embedding = torch.cat((mRNA_hidden_states_pooled, miRNA_hidden_states_pooled), dim=1) # (batchsize, 2 * hidden)
-            output = MLP_head(concatenated_seq_embedding) # (batch_size, 1)
+            Q = mRNA_hidden_states # [batchsize, mRNA_seq_len, d_model]
+            K = miRNA_hidden_states # [batchsize, miRNA_seq_len, d_model]
+            V = miRNA_hidden_states # [batchsize, miRNA_seq_len, d_model]
+            Q_mask = mRNA_seq_mask
+            K_mask = miRNA_seq_mask
+            cross_attn = compute_cross_attention(Q=Q, K=K, V=V, Q_mask=Q_mask, K_mask=K_mask)
+            output = MLP_head(cross_attn) # (batch_size, 1)
             probabilities = torch.sigmoid(output.squeeze())
             predictions = (probabilities > 0.5).long()
             correct += predictions.eq(target.squeeze()).sum().item()
@@ -168,7 +177,7 @@ def run_train(mRNA_length, miRNA_max_length, epochs, external_dataset=None):
     learning_rate = backbone_cfg['lr']
     weight_decay = backbone_cfg['weight_decay']
     hidden_sizes = [backbone_cfg['d_model']*2, backbone_cfg['d_model']*2]
-    MLP_head = LinearHead(d_model=backbone_cfg['d_model']*2, d_output=n_classes, hidden_sizes=hidden_sizes)
+    MLP_head = LinearHead(d_model=backbone_cfg['d_model'], d_output=n_classes, hidden_sizes=hidden_sizes)
 
     # create tokenizer
     tokenizer = CharacterTokenizer(
@@ -261,16 +270,16 @@ def run_train(mRNA_length, miRNA_max_length, epochs, external_dataset=None):
 
 
 if __name__ == "__main__":
-    mRNA_length = 5000
+    mRNA_length = 1000
     miRNA_length = 28
-    epochs = 6
+    epochs = 1
     dataset = "mirLM"
     model = "MLP"
     print("Binary Classification -- Start training --")
     print("mRNA length: ", mRNA_length)
     print(f"For {epochs} epochs")
     # load dummmy test dataset
-    external_data_path = os.path.join(PROJ_HOME, 'data', f"training_{mRNA_length}.csv")
+    external_data_path = os.path.join(PROJ_HOME, 'data', f"training_{mRNA_length}_random_256_samples.csv")
 
     # launch it
     start = time.time()
@@ -278,9 +287,9 @@ if __name__ == "__main__":
     time_taken = time.time() - start
     print("Time taken for {} epoch = {} min.".format(epochs, time_taken/60))
     
-    # save test_accuracy
-    perf_dir = os.path.join(PROJ_HOME, "Performance", dataset, model)
-    with open(os.path.join(perf_dir, f"test_accuracy_{mRNA_length}.json"), "w") as fp:
-        json.dump(test_accuracy, fp)
-    with open(os.path.join(perf_dir, f"train_loss_{mRNA_length}.json"), "w") as fp:
-        json.dump(train_average_loss, fp)
+    # # save test_accuracy
+    # perf_dir = os.path.join(PROJ_HOME, "Performance", dataset, model)
+    # with open(os.path.join(perf_dir, f"test_accuracy_{mRNA_length}.json"), "w") as fp:
+    #     json.dump(test_accuracy, fp)
+    # with open(os.path.join(perf_dir, f"train_loss_{mRNA_length}.json"), "w") as fp:
+    #     json.dump(train_average_loss, fp)
