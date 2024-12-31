@@ -8,7 +8,8 @@ data/
 HyenaDNA/
 
 # logs
-output logs/
+output_logs/
+evaluate_logs/
 Performance/
 
 #cache

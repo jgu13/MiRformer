@@ -4,6 +4,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from transformers import Transformer, TransformerConfig
 
+
 # Custom Dataset Class for Sequence Data
 class SequenceDataset(Dataset):
     def __init__(self, input_sequences, target_sequences):
@@ -19,7 +20,9 @@ class SequenceDataset(Dataset):
         return len(self.input_sequences)
 
     def __getitem__(self, idx):
-        return torch.tensor(self.input_sequences[idx]), torch.tensor(self.target_sequences[idx])
+        return torch.tensor(self.input_sequences[idx]), torch.tensor(
+            self.target_sequences[idx]
+        )
 
 
 # Transformer Model Wrapper
@@ -35,7 +38,9 @@ class TransformerForAutoregressiveGeneration(nn.Module):
         """
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, model_dim)
-        self.positional_encoding = self.create_positional_encoding(max_seq_len, model_dim)
+        self.positional_encoding = self.create_positional_encoding(
+            max_seq_len, model_dim
+        )
         self.transformer = nn.Transformer(
             d_model=model_dim,
             nhead=num_heads,
@@ -50,7 +55,10 @@ class TransformerForAutoregressiveGeneration(nn.Module):
         """Creates sinusoidal positional encodings."""
         pe = torch.zeros(max_seq_len, model_dim)
         position = torch.arange(0, max_seq_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, model_dim, 2).float() * -(torch.log(torch.tensor(10000.0)) / model_dim))
+        div_term = torch.exp(
+            torch.arange(0, model_dim, 2).float()
+            * -(torch.log(torch.tensor(10000.0)) / model_dim)
+        )
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         return pe.unsqueeze(0)
@@ -67,21 +75,33 @@ class TransformerForAutoregressiveGeneration(nn.Module):
             logits: Output logits (batch_size, seq_len, vocab_size)
         """
         # Add embeddings and positional encoding
-        input_emb = self.embedding(input_ids) + self.positional_encoding[:, :input_ids.size(1), :]
-        target_emb = self.embedding(target_ids) + self.positional_encoding[:, :target_ids.size(1), :]
+        input_emb = (
+            self.embedding(input_ids)
+            + self.positional_encoding[:, : input_ids.size(1), :]
+        )
+        target_emb = (
+            self.embedding(target_ids)
+            + self.positional_encoding[:, : target_ids.size(1), :]
+        )
 
         # Generate causal mask to prevent future token leakage
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(target_ids.size(1)).to(input_ids.device)
+        tgt_mask = nn.Transformer.generate_square_subsequent_mask(
+            target_ids.size(1)
+        ).to(input_ids.device)
 
         # Pass through the transformer model
         transformer_output = self.transformer(
-            src=input_emb.permute(1, 0, 2),  # Transformer expects (seq_len, batch_size, model_dim)
+            src=input_emb.permute(
+                1, 0, 2
+            ),  # Transformer expects (seq_len, batch_size, model_dim)
             tgt=target_emb.permute(1, 0, 2),
             tgt_mask=tgt_mask,
         )
 
         # Project to vocabulary size
-        logits = self.output_layer(transformer_output.permute(1, 0, 2))  # Back to (batch_size, seq_len, vocab_size)
+        logits = self.output_layer(
+            transformer_output.permute(1, 0, 2)
+        )  # Back to (batch_size, seq_len, vocab_size)
         return logits
 
 
@@ -98,7 +118,10 @@ def train_model():
     num_epochs = 10
 
     # Sample input and target data
-    input_sequences = [[1, 2, 3, 4, 5], [6, 7, 8, 9, 10]]  # Replace with actual tokenized data
+    input_sequences = [
+        [1, 2, 3, 4, 5],
+        [6, 7, 8, 9, 10],
+    ]  # Replace with actual tokenized data
     target_sequences = [[2, 3, 4, 5, 6], [7, 8, 9, 10, 11]]
 
     # Prepare DataLoader
@@ -106,8 +129,10 @@ def train_model():
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # Initialize Model, Loss, and Optimizer
-    model = TransformerForAutoregressiveGeneration(vocab_size, model_dim, num_heads, num_layers, max_seq_len)
-    model = model.to('cuda' if torch.cuda.is_available() else 'cpu')
+    model = TransformerForAutoregressiveGeneration(
+        vocab_size, model_dim, num_heads, num_layers, max_seq_len
+    )
+    model = model.to("cuda" if torch.cuda.is_available() else "cpu")
     criterion = nn.CrossEntropyLoss(ignore_index=0)  # Ignore padding index
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -118,7 +143,9 @@ def train_model():
 
         for batch in dataloader:
             input_ids, target_ids = batch
-            input_ids, target_ids = input_ids.to(model.device), target_ids.to(model.device)
+            input_ids, target_ids = input_ids.to(model.device), target_ids.to(
+                model.device
+            )
 
             # Shift target for teacher forcing
             target_input = target_ids[:, :-1]
@@ -126,7 +153,9 @@ def train_model():
 
             # Forward pass
             logits = model(input_ids, target_input)
-            loss = criterion(logits.view(-1, vocab_size), target_output.view(-1))  # Flatten for loss computation
+            loss = criterion(
+                logits.view(-1, vocab_size), target_output.view(-1)
+            )  # Flatten for loss computation
 
             # Backward pass and optimization
             optimizer.zero_grad()

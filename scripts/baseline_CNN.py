@@ -1,19 +1,27 @@
-import torch
-import numpy as np
-import pandas as pd
-import torch.nn as nn
-import torch.optim as optim
-from torch.utils.data import Dataset, DataLoader
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-import numpy as np
 import os
 import json
 import time
+import torch
+import random
+import argparse
+import numpy as np
+import pandas as pd
+from torch import nn
+from torch import optim
+from torch import distributed as dist
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
+from sklearn.model_selection import train_test_split
 
+PROJ_HOME = os.path.join(os.path.expanduser("~/projects/mirLM"))
 
 class BaselineCNN(nn.Module):
-    def __init__(self, input_size, num_classes, kernel_size=5):
+    '''
+    CNN model to predict sequence classification
+    '''
+    def __init__(self, 
+                 input_size: int, 
+                 num_classes: int, 
+                 kernel_size: int = 5):
         super(BaselineCNN, self).__init__()
         self.conv1 = nn.Conv1d(5, 10, kernel_size=kernel_size, padding=0)
         self.fc1 = nn.Linear(10 * (input_size - kernel_size + 1), 256)
@@ -24,10 +32,13 @@ class BaselineCNN(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x):
-        x = self.conv1(x) # (batch_size, C_out, L_out)
-        x = x.view(x.size(0), -1) # (batch_size, C_out * L_out)
-        x = self.relu(self.fc1(x)) # (batch_size, 100)
-        x = self.bn1(x) # (batch_size, 100)
+        '''
+        Forward pass to train CNN
+        '''
+        x = self.conv1(x)  # (batch_size, C_out, L_out)
+        x = x.view(x.size(0), -1)  # (batch_size, C_out * L_out)
+        x = self.relu(self.fc1(x))  # (batch_size, 100)
+        x = self.bn1(x)  # (batch_size, 100)
         x = self.relu(self.fc2(x))
         x = self.bn2(x)
         x = self.fc3(x)
@@ -52,24 +63,26 @@ class BaselineCNNDataset(Dataset):
         mRNA_seq = self.mRNA_sequences[idx][0]
         miRNA_seq = self.miRNA_sequences[idx][0]
         labels = self.labels[idx]
-        
+
         # pad to max length
         if len(mRNA_seq) < self.mRNA_max_length:
             num_pad = self.mRNA_max_length - len(mRNA_seq)
             # pad with N
-            mRNA_seq = ''.join(list(mRNA_seq) + list('N'*num_pad))
+            mRNA_seq = "".join(list(mRNA_seq) + list("N" * num_pad))
         if len(miRNA_seq) < self.miRNA_max_length:
             num_pad = self.miRNA_max_length - len(miRNA_seq)
             # pad with N
-            miRNA_seq = ''.join(list(miRNA_seq) + list('N'*num_pad))
-        
+            miRNA_seq = "".join(list(miRNA_seq) + list("N" * num_pad))
+
         concat_seq = miRNA_seq + mRNA_seq
         # print("length of concat sequence = ", len(concat_seq))
-        
+
         # to torch tensor
-        encoded_sequences = np.asarray(encode_dna(concat_seq)) # (seq_len, C_in)
+        encoded_sequences = np.asarray(encode_dna(concat_seq))  # (seq_len, C_in)
         # print("encoded RNA sequence length = ", encoded_sequences.shape)
-        encoded_sequences = torch.FloatTensor(encoded_sequences).permute(1, 0) # (C_in, seq_len)
+        encoded_sequences = torch.FloatTensor(encoded_sequences).permute(
+            1, 0
+        )  # (C_in, seq_len)
         # print("RNA tensor shape = ", encoded_sequences.size())
         labels = torch.FloatTensor(labels)
 
@@ -78,27 +91,33 @@ class BaselineCNNDataset(Dataset):
 
 # one-hot DNA encoder
 def encode_dna(seq):
-    encoding = {'A': [1,0,0,0,0], 
-                'C': [0,1,0,0,0], 
-                'G': [0,0,1,0,0], 
-                'T': [0,0,0,1,0],
-                'U': [0,0,0,0,1],
-                'N': [1/4,1/4,1/4,1/4,1/4]}
-    
-    return [encoding.get(base, [0,0,0,0,0]) for base in seq]
+    encoding = {
+        "A": [1, 0, 0, 0, 0],
+        "C": [0, 1, 0, 0, 0],
+        "G": [0, 0, 1, 0, 0],
+        "T": [0, 0, 0, 1, 0],
+        "U": [0, 0, 0, 0, 1],
+        "N": [1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4],
+    }
+
+    return [encoding.get(base, [0, 0, 0, 0, 0]) for base in seq]
 
 
 # load and sequence data
-def load_data(dataset=None, sep=','):
+def load_data(dataset=None, sep=","):
     if dataset:
         # if dataset is a path to a file
         if isinstance(dataset, str):
-            if dataset.endswith('.csv') or dataset.endswith('.txt') or dataset.endswith('.tsv'):
+            if (
+                dataset.endswith(".csv")
+                or dataset.endswith(".txt")
+                or dataset.endswith(".tsv")
+            ):
                 D = pd.read_csv(dataset, sep=sep)
-            elif dataset.endswith('.xlsx'):
+            elif dataset.endswith(".xlsx"):
                 D = pd.read_excel(dataset, sep=sep)
-            elif dataset.endswith('.json'):
-                with open(dataset, 'r') as f:
+            elif dataset.endswith(".json"):
+                with open(dataset, "r") as f:
                     D = json.load(f)
             else:
                 print(f"Unrecognized format of {dataset}")
@@ -115,9 +134,18 @@ def load_data(dataset=None, sep=','):
     return D
 
 
-def train_model(model, train_loader, loss_fn, optimizer, device, epoch, accumulation_step=None):
+def train_model(
+    model: BaselineCNN, 
+    train_loader: DataLoader, 
+    loss_fn: nn.BCELoss, 
+    optimizer: optim.AdamW, 
+    device: torch.device, 
+    epoch: int, 
+    accumulation_step: int = None,
+    ddp: bool = False
+):
     model.train()
-    epoch_loss=0.0
+    epoch_loss = 0.0
     for batch_idx, (sequences, labels) in enumerate(train_loader):
         optimizer.zero_grad()
 
@@ -131,25 +159,40 @@ def train_model(model, train_loader, loss_fn, optimizer, device, epoch, accumula
             loss = loss / accumulation_step
             # calculate gradient
             loss.backward()
-            if batch_idx % accumulation_step == 0:
+            if (batch_idx + 1) % accumulation_step == 0:
                 # backward pass
                 optimizer.step()
                 optimizer.zero_grad()
-                print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\t'.format(
-                    epoch, batch_idx * len(sequences), len(train_loader.dataset),
-                    100. * batch_idx / len(train_loader), loss.item()))
+                if ddp:
+                    print(
+                            f"[Rank {dist.get_rank()}] "
+                            f"Train Epoch: {epoch} "
+                            f"[{batch_idx * len(sequences)}/{len(train_loader.sampler)} "
+                            f"({100.0 * batch_idx / len(train_loader):.0f}%)] "
+                            f"Loss: {loss.item():.6f}\n"
+                        )
+                else:
+                    print(
+                            f"Train Epoch: {epoch} "
+                            f"[{batch_idx * len(sequences)}/{len(train_loader.dataset)} "
+                            f"({100.0 * batch_idx / len(train_loader):.0f}%)] "
+                            f"Loss: {loss.item():.6f}\n"
+                        )
         else:
             loss.backward()
             optimizer.step()
-            optimizer.zero_grad()
-            print('Train Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}\t'.format(
-                epoch, batch_idx * len(sequences), len(train_loader.dataset),
-                100. * batch_idx / len(train_loader), loss.item()))
+            print(
+                    f"[Rank {dist.get_rank()}] "
+                    f"Train Epoch: {epoch} "
+                    f"[{batch_idx * len(sequences)}/{len(train_loader.sampler)} "
+                    f"({100.0 * batch_idx / len(train_loader):.0f}%)] "
+                    f"Loss: {loss.item():.6f}\n"
+                )
         epoch_loss += loss.item()
     avg_loss = epoch_loss / len(train_loader)
     return avg_loss
 
-def evaluate_model(model, test_loader, device):
+def test(model, test_loader, device):
     model.eval()
     correct = 0
     with torch.no_grad():
@@ -159,72 +202,286 @@ def evaluate_model(model, test_loader, device):
             probabilities = torch.sigmoid(outputs.squeeze())
             predictions = (probabilities > 0.5).long()
             correct += predictions.eq(labels.squeeze()).sum().item()
-    
+
     accuracy = 100 * correct / len(test_loader.dataset)
 
-    print('\nTest set: Accuracy: {}/{} ({:.2f}%)\n'.format(
-            correct, len(test_loader.dataset), accuracy))
+    print(
+        "\nTest set: Accuracy: {}/{} ({:.2f}%)\n".format(
+            correct, len(test_loader.dataset), accuracy
+        )
+    )
     return accuracy
 
-def main():
-    batch_size = 16
-    num_epochs = 10
-    num_classes = 1
-    kernel_size = 12
-    accumulation_step = 256 / batch_size
-    mRNA_max_length = 5000
-    miRNA_max_length = 28
-    learning_rate = 3e-4
-    weight_decay = 0.1
+def test_ddp(model, test_loader, device):
+    model.eval()
+    local_correct = 0
+    with torch.no_grad():
+        for sequences, labels in test_loader:
+            sequences, labels = sequences.to(device), labels.to(device)
+            outputs = model(sequences)
+            probabilities = torch.sigmoid(outputs.squeeze())
+            predictions = (probabilities > 0.5).long()
+            local_correct += predictions.eq(labels.squeeze()).sum().item()
+
+    # convert to gpu tensor
+    correct_tensor = torch.tensor(local_correct, dtype=torch.long, device=device)
+    # Sum across all ranks
+    dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+    # Get all correct counts
+    global_correct = correct_tensor.item()
+    # compute global accuracy
+    global_accuracy = 100.0 * global_correct / len(test_loader.dataset)
+    if dist.get_rank() == 0:
+        print(
+            f"Test set: Accuracy: {global_correct}/{len(test_loader.dataset)} "
+            f"({global_accuracy:.2f}%)\n"
+        )
+    return global_accuracy
+
+def save_checkpoint(model, optimizer, epoch, average_loss, accuracy, path):
+    """
+    Helper function for saving model/optimizer state dicts.
+    Only rank 0 should save to avoid file corruption.
+    """
+    # If wrapped in DDP, actual parameters live in model.module
+    model_state_dict = model.module.state_dict() if isinstance(model, nn.parallel.DistributedDataParallel) else model.state_dict()
     
-    dataset = "mirLM"
+    torch.save({
+        "epoch": epoch,
+        "model_state_dict": model_state_dict,
+        "optimizer_state_dict": optimizer.state_dict(),
+        "loss": average_loss,
+        "accuracy": accuracy,
+    }, path)
+
+def seed_everything(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    # for cudnn, if reproducibility is needed:
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+
+def main():
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description="Run training script for binary classification.")
+    parser.add_argument(
+        "--mRNA_max_len",
+        type=int,
+        default=1000,
+        help="Maximum length of mRNA sequences (default: 1000)",
+    )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda:0" if torch.cuda.is_available() else "cpu",
+        help="Device to run training on (default: auto-detected)",
+    )
+    parser.add_argument(
+        "--num_epochs",
+        type=int,
+        default=10,
+        help="Number epochs"
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=16,
+        help="batch size to load dataset"
+    )
+    parser.add_argument(
+        "--dataset_name",
+        type=str,
+        default="training data",
+        help="Name of the folder to save training performance and checkpoints"
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default="path/to/training data",
+        help="Path to training data"
+    )
+    parser.add_argument(
+        "--ddp",
+        action="store_true",
+        help="Use DistributedDataParallel for multi-gpu training"
+    )
+    parser.add_argument(
+        "--resume_ckpt", 
+        type=str, 
+        default=None, 
+        help="Path to checkpoint to resume from."
+    )
+    args = parser.parse_args()
+
+    # Extract arguments
+    mRNA_max_length = args.mRNA_max_len
+    device = torch.device(args.device)
+    num_epochs = args.num_epochs
+    batch_size = args.batch_size
+    dataset_name = args.dataset_name
+    dataset_path = args.dataset_path
+    ddp_flag = args.ddp
+    resume_ckpt = args.resume_ckpt
+    
+    # Other fixed arguments
+    accumulation_step = 256 // batch_size
+    miRNA_max_length = 26
     model_name = "CNN"
     
-    device = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+    # initialize process group if DDP is used
+    if ddp_flag:
+        seed_everything(seed=42)
+        local_rank = int(os.environ["LOCAL_RANK"])
+        dist.init_process_group(backend="nccl", init_method="env://")
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        device = f"cuda:{local_rank}" if (torch.cuda.is_available() and ddp_flag) else "cpu"
+    else:
+        local_rank = 0
+        rank = 0
+        world_size = 1
+        
+    if rank == 0:
+        print("------ CNN Binary Classification starts here------")
+        print(f"mRNA length = {mRNA_max_length}")
+        print(f"On device {device}")
+        print(f"For {num_epochs} epochs")
+        print(f"Using device {device}")
+        print(f"DDP = {ddp_flag}, World size = {world_size}, Rank = {rank}")
+        print(f"Resume from checkpoint path {resume_ckpt}")
+    
+    config_path = os.path.join(PROJ_HOME, "checkpoints", "CNN", "config.json")
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+
+    lr = config["learning_rate"] * world_size
+    weight_decay = config["weight_decay"]
 
     # load and preprocess data
-    PROJ_HOME = os.path.join(os.path.expanduser("~/projects/mirLM"))
-    D = load_data(dataset=os.path.join(PROJ_HOME, f"data/training_{mRNA_max_length}.csv"), sep=",")
-    # D = D.sample(n=62654, random_state=34) # randomly sample 60k samples
+    D = load_data(dataset=dataset_path)
+    # max_mRNA_len = max([len(seq) for seq in D["mRNA sequence"]])
+    # print("Max mRNA sequence len = ", max_mRNA_len)
+    # max_miRNA_len = max([len(seq) for seq in D["miRNA sequence"]])
+    # print("Max miRNA sequence len = ", max_miRNA_len)
 
     # split data
     D_train, D_test = train_test_split(D, test_size=0.2, random_state=34, shuffle=True)
 
     # dataloaders
-    train_dataset = BaselineCNNDataset(dataset=D_train, mRNA_max_length=mRNA_max_length, miRNA_max_length=miRNA_max_length)
-    test_dataset = BaselineCNNDataset(dataset=D_test, mRNA_max_length=mRNA_max_length, miRNA_max_length=miRNA_max_length)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    train_dataset = BaselineCNNDataset(
+        dataset=D_train,
+        mRNA_max_length=mRNA_max_length,
+        miRNA_max_length=miRNA_max_length,
+    )
+    test_dataset = BaselineCNNDataset(
+        dataset=D_test,
+        mRNA_max_length=mRNA_max_length,
+        miRNA_max_length=miRNA_max_length,
+    )
+    
+    # Distributed Samplers
+    if ddp_flag:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        test_sampler = DistributedSampler(test_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+        shuffle_data = False  # Sampler does the shuffling for train
+    else:
+        train_sampler = None
+        test_sampler = None
+        shuffle_data = True
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, shuffle=shuffle_data)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, sampler=test_sampler, shuffle=False)
 
     # init model
-    model = BaselineCNN(input_size=mRNA_max_length + miRNA_max_length, num_classes=num_classes, kernel_size=kernel_size).to(device) # input_size = padded miRNA length + padded mRNA length
-    loss_fn = nn.BCELoss()
-    optimizer = optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
+    model = BaselineCNN(
+        input_size=mRNA_max_length + miRNA_max_length,
+        num_classes=config["num_classes"],
+        kernel_size=config["kernel_size"]
+    ).to(device)  # input_size = padded miRNA length + padded mRNA length
+
+    # DPP wrapper
+    if ddp_flag:
+        model = nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            find_unused_parameters=False
+        )
     
+    loss_fn = nn.BCELoss()
+    optimizer = optim.AdamW(
+        model.parameters(), lr=lr, weight_decay=weight_decay
+    )
+
     train_loss_list = []
     test_accuracy_list = []
     # train model
+    model_checkpoint_dir = os.path.join(PROJ_HOME, "checkpoints", dataset_name, "CNN", str(mRNA_max_length))
+    os.makedirs(model_checkpoint_dir, exist_ok=True)
+    
     start = time.time()
     for epoch in range(num_epochs):
-        train_loss = train_model(model=model, train_loader=train_loader, loss_fn=loss_fn, optimizer=optimizer, device=device, epoch=epoch,  accumulation_step=accumulation_step)
-        accuracy = evaluate_model(model, test_loader, device)
-        train_loss_list.append(train_loss)
-        test_accuracy_list.append(accuracy)
-    time_taken = time.time() - start
-    print("Time taken for {} epoch = {} min.".format(num_epochs, time_taken/60))
-    torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'loss': train_loss,
-                'accuracy': accuracy,
-            }, os.path.join(PROJ_HOME, 'checkpoints', 'mirLM', f'CNN', f'checkpoint_epoch_final.pth'))
+        if ddp_flag:
+            # Important: set epoch for DistributedSampler to shuffle data consistently
+            train_loader.sampler.set_epoch(epoch)
+            
+        train_loss = train_model(
+            model=model,
+            train_loader=train_loader,
+            loss_fn=loss_fn,
+            optimizer=optimizer,
+            device=device,
+            epoch=epoch,
+            accumulation_step=accumulation_step,
+            ddp=ddp_flag
+        )
+        if ddp_flag:
+            accuracy = test_ddp(model=model, test_loader=test_loader, device=device)
+        else:
+            accuracy = test(model=model, test_loader=test_loader, device=device)
+        if rank == 0:
+            train_loss_list.append(train_loss)
+            test_accuracy_list.append(accuracy)
+            cost = time.time() - start
+            remain = (cost / (epoch + 1)) * (num_epochs - epoch - 1) /60 /60
+            print(f"Remaining: {remain} hours")
+        
+        if epoch % 10 == 0 and rank == 0:
+            save_checkpoint(model=model,
+                            optimizer=optimizer,
+                            epoch=epoch,
+                            average_loss=train_loss,
+                            accuracy=accuracy,
+                            path=os.path.join(model_checkpoint_dir, f"checkpoint_epoch_{epoch}.pth"))
+
+    if rank == 0:
+        # save final model
+        save_checkpoint(model=model,
+                        optimizer=optimizer,
+                        epoch=epoch,
+                        average_loss=train_loss,
+                        accuracy=accuracy,
+                        path=os.path.join(model_checkpoint_dir, f"checkpoint_final.pth"))
+        
+        time_taken = time.time() - start
+        print("Time taken for {} epoch = {} min.".format(num_epochs, time_taken / 60))
+
+        # save test_accuracy
+        perf_dir = os.path.join(PROJ_HOME, "Performance", dataset_name, model_name)
+        os.makedirs(perf_dir, exist_ok=True)
+        with open(
+            os.path.join(perf_dir, f"test_accuracy_{mRNA_max_length}.json"), "w"
+        ) as fp:
+            json.dump(test_accuracy_list, fp)
+        with open(
+            os.path.join(perf_dir, f"train_loss_{mRNA_max_length}.json"), "w"
+        ) as fp:
+            json.dump(train_loss_list, fp)
     
-    # save test_accuracy
-    perf_dir = os.path.join(PROJ_HOME, "Performance", dataset, model_name)
-    with open(os.path.join(perf_dir, f"test_accuracy_{mRNA_max_length}.json"), "w") as fp:
-        json.dump(test_accuracy_list, fp)
-    with open(os.path.join(perf_dir, f"train_loss_{mRNA_max_length}.json"), "w") as fp:
-        json.dump(train_loss_list, fp)
+    # destroy process group to clean up
+    if ddp_flag:
+        dist.destroy_process_group()
 
 main()

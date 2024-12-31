@@ -6,6 +6,7 @@ From: https://github.com/dariush-bahrami/character-tokenizer/blob/master/charact
 CharacterTokenzier for Hugging Face Transformers.
 This is heavily inspired from CanineTokenizer in transformers package.
 """
+
 import json
 import os
 from pathlib import Path
@@ -28,7 +29,13 @@ from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
 
 
 class CharacterTokenizer(PreTrainedTokenizer):
-    def __init__(self, characters: Sequence[str], model_max_length: int, padding_side: str='left', **kwargs):
+    def __init__(
+        self,
+        characters: Sequence[str],
+        model_max_length: int,
+        padding_side: str = "left",
+        **kwargs
+    ):
         """Character tokenizer for Hugging Face transformers.
         Args:
             characters (Sequence[str]): List of desired characters. Any character which
@@ -162,7 +169,8 @@ class CharacterTokenizer(PreTrainedTokenizer):
         with open(cfg_file) as f:
             cfg = json.load(f)
         return cls.from_config(cfg)
-    
+
+
 """
 The GenomicBenchmarks dataset will automatically download to /contents on colab.
 There are 8 datasets to choose from.
@@ -172,24 +180,34 @@ There are 8 datasets to choose from.
 from random import random
 import numpy as np
 from pathlib import Path
-from torch.utils.data import DataLoader
-
-from genomic_benchmarks.loc2seq import download_dataset
-from genomic_benchmarks.data_check import is_downloaded
 
 
 # helper functions
 def exists(val):
     return val is not None
 
+
 def coin_flip():
     return random() > 0.5
 
 
-string_complement_map = {'A': 'U', 'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', 'a': 't', 'a': 'u', 'c': 'g', 'g': 'c', 't': 'a'}
+string_complement_map = {
+    "A": "U",
+    "A": "T",
+    "C": "G",
+    "G": "C",
+    "T": "A",
+    "a": "t",
+    "a": "u",
+    "c": "g",
+    "g": "c",
+    "t": "a",
+}
+
+
 # augmentation
 def string_reverse_complement(seq):
-    rev_comp = ''
+    rev_comp = ""
     for base in seq[::-1]:
         if base in string_complement_map:
             rev_comp += string_complement_map[base]
@@ -200,8 +218,7 @@ def string_reverse_complement(seq):
 
 
 class GenomicBenchmarkDataset(torch.utils.data.Dataset):
-
-    '''
+    """
     Loop thru bed file, retrieve (chr, start, end), query fasta file for sequence.
     Returns a generator that retrieves the sequence.
 
@@ -209,15 +226,15 @@ class GenomicBenchmarkDataset(torch.utils.data.Dataset):
     https://github.com/ML-Bioinfo-CEITEC/genomic_benchmarks
 
 
-    '''
+    """
 
     def __init__(
         self,
         split,
         max_length,
-        dataset_name='human_enhancers_cohn',
-        d_output=2, # default binary classification
-        dest_path="/content", # default for colab
+        dataset_name="human_enhancers_cohn",
+        d_output=2,  # default binary classification
+        dest_path="/content",  # default for colab
         tokenizer=None,
         tokenizer_name=None,
         use_padding=None,
@@ -234,12 +251,6 @@ class GenomicBenchmarkDataset(torch.utils.data.Dataset):
         self.add_eos = add_eos
         self.d_output = d_output  # needed for decoder to grab
         self.rc_aug = rc_aug
-
-        if not is_downloaded(dataset_name, cache_path=dest_path):
-            print("downloading {} to {}".format(dataset_name, dest_path))
-            download_dataset(dataset_name, version=0, dest_path=dest_path)
-        else:
-            print("already downloaded {}-{}".format(split, dataset_name))
 
         # use Path object
         base_path = Path(dest_path) / dataset_name / split
@@ -270,11 +281,12 @@ class GenomicBenchmarkDataset(torch.utils.data.Dataset):
         if self.rc_aug and coin_flip():
             x = string_reverse_complement(x)
 
-        seq = self.tokenizer(x,
+        seq = self.tokenizer(
+            x,
             add_special_tokens=False,
             padding="max_length" if self.use_padding else None,
             max_length=self.max_length,
-            truncation=True
+            truncation=True,
         )  # add cls and eos token (+2)
         seq = seq["input_ids"]  # get input_ids
 
@@ -291,16 +303,19 @@ class GenomicBenchmarkDataset(torch.utils.data.Dataset):
 
         return seq, target
 
+
 # Define a custom Dataset class
 class CustomDataset(torch.utils.data.Dataset):
-    def __init__(self,
-                 dataframe,
-                 mRNA_max_length,
-                 miRNA_max_length=25,
-                 tokenizer=None,
-                 use_padding=None,
-                 rc_aug=None,
-                 add_eos=False):
+    def __init__(
+        self,
+        dataframe,
+        mRNA_max_length,
+        miRNA_max_length=25,
+        tokenizer=None,
+        use_padding=None,
+        rc_aug=None,
+        add_eos=False,
+    ):
         self.use_padding = use_padding
         self.mRNA_max_length = mRNA_max_length
         self.miRNA_max_length = miRNA_max_length
@@ -320,46 +335,56 @@ class CustomDataset(torch.utils.data.Dataset):
         # Convert data to PyTorch tensors
         mRNA_seq = self.mRNA_sequences[idx][0]
         miRNA_seq = self.miRNA_sequences[idx][0]
-        labels = self.labels[idx]
+        label = self.labels[idx]
         
+        miRNA_seq = miRNA_seq.replace("U", "T")
+        # print("miRNA seq after replacing U: ", miRNA_seq)
+
         # print("Original sequence length = ", len(mRNA_seq))
 
         # print("mRNA seq shape: ", mRNA_seq.shape)
         # print("miRNA seq shape: ", miRNA_seq.shape)
         
+        # print("index = ", idx)
+        # print("mRNA sequence = ", mRNA_seq)
+        # print("miRNA sequence = ", miRNA_seq)
+        # print("label = ", label)
+
         # apply rc_aug here if using
         if self.rc_aug and coin_flip():
             mRNA_seq = string_reverse_complement(mRNA_seq)
             miRNA_seq = string_reverse_complement(miRNA_seq)
 
-        mRNA_seq_encoding = self.tokenizer(mRNA_seq,
+        mRNA_seq_encoding = self.tokenizer(
+            mRNA_seq,
             add_special_tokens=False,
             padding="max_length" if self.use_padding else None,
             max_length=self.mRNA_max_length,
             truncation=True,
-            return_attention_mask=True
-        ) 
+            return_attention_mask=True,
+        )
         mRNA_seq_tokens = mRNA_seq_encoding["input_ids"]  # get input_ids
-        mRNA_seq_mask = mRNA_seq_encoding["attention_mask"] # get attention mask
+        mRNA_seq_mask = mRNA_seq_encoding["attention_mask"]  # get attention mask
         # print("Tokenized sequence length = ", len(mRNA_seq_tokens))
-        
-        miRNA_seq_encoding = self.tokenizer(miRNA_seq,
+
+        miRNA_seq_encoding = self.tokenizer(
+            miRNA_seq,
             add_special_tokens=False,
             padding="max_length" if self.use_padding else None,
             max_length=self.miRNA_max_length,
             truncation=True,
-            return_attention_mask=True
-        ) 
-        miRNA_seq_tokens = miRNA_seq_encoding["input_ids"]  # get input_ids 
-        miRNA_seq_mask = miRNA_seq_encoding["attention_mask"] # get attention mask
-        
+            return_attention_mask=True,
+        )
+        miRNA_seq_tokens = miRNA_seq_encoding["input_ids"]  # get input_ids
+        miRNA_seq_mask = miRNA_seq_encoding["attention_mask"]  # get attention mask
+
         # need to handle eos here
         if self.add_eos:
             # append list seems to be faster than append tensor
             mRNA_seq_tokens.append(self.tokenizer.sep_token_id)
             miRNA_seq_tokens.append(self.tokenizer.sep_token_id)
-            mRNA_seq_mask.append(1) # do not mask eos token
-            miRNA_seq_mask.append(1) # do not mask eos token
+            mRNA_seq_mask.append(1)  # do not mask eos token
+            miRNA_seq_mask.append(1)  # do not mask eos token
 
         # convert to tensor
         mRNA_seq_tokens = np.asarray(mRNA_seq_tokens)
@@ -370,25 +395,28 @@ class CustomDataset(torch.utils.data.Dataset):
         miRNA_seq_mask = np.asarray(miRNA_seq_mask)
         mRNA_seq_mask = torch.LongTensor(mRNA_seq_mask)
         miRNA_seq_mask = torch.LongTensor(miRNA_seq_mask)
-        
+
         # print("mRNA_seq_tokens shape", mRNA_seq_tokens.size())
         # print("miRNA_seq_tokens shape", miRNA_seq_tokens.size())
 
         # need to wrap in list
-        labels = np.asarray([labels])
-        target = torch.FloatTensor(labels) # (1, 1)
+        labels = np.asarray([label])
+        target = torch.FloatTensor(label)  # (1, 1)
 
         return mRNA_seq_tokens, miRNA_seq_tokens, mRNA_seq_mask, miRNA_seq_mask, target
-    
+
+
 class miRawDataset(torch.utils.data.Dataset):
-    def __init__(self,
-                 dataframe,
-                 mRNA_max_length=40,
-                 miRNA_max_length=26,
-                 tokenizer=None,
-                 use_padding=None,
-                 rc_aug=None,
-                 add_eos=False):
+    def __init__(
+        self,
+        dataframe,
+        mRNA_max_length=40,
+        miRNA_max_length=26,
+        tokenizer=None,
+        use_padding=None,
+        rc_aug=None,
+        add_eos=False,
+    ):
         self.use_padding = use_padding
         self.mRNA_max_length = mRNA_max_length
         self.miRNA_max_length = miRNA_max_length
@@ -409,60 +437,62 @@ class miRawDataset(torch.utils.data.Dataset):
         mRNA_seq = self.mRNA_sequences[idx][0]
         miRNA_seq = self.miRNA_sequences[idx][0]
         labels = self.labels[idx]
-        
+
         # print("Original sequence length = ", len(mRNA_seq))
 
         # print("mRNA seq shape: ", mRNA_seq.shape)
         # print("miRNA seq shape: ", miRNA_seq.shape)
-        
+
         # apply rc_aug here if using
         if self.rc_aug and coin_flip():
             mRNA_seq = string_reverse_complement(mRNA_seq)
             miRNA_seq = string_reverse_complement(miRNA_seq)
 
-        mRNA_seq_encoding = self.tokenizer(mRNA_seq,
+        mRNA_seq_encoding = self.tokenizer(
+            mRNA_seq,
             add_special_tokens=False,
             padding="max_length" if self.use_padding else None,
             max_length=self.mRNA_max_length,
             truncation=True,
-            return_attention_mask=True
-        ) 
+            return_attention_mask=True,
+        )
         mRNA_seq_tokens = mRNA_seq_encoding["input_ids"]  # get input_ids
-        mRNA_seq_mask = mRNA_seq_encoding["attention_mask"] # get attention mask
+        mRNA_seq_mask = mRNA_seq_encoding["attention_mask"]  # get attention mask
         # print("Tokenized sequence length = ", len(mRNA_seq_tokens))
-        
-        miRNA_seq_encoding = self.tokenizer(miRNA_seq,
+
+        miRNA_seq_encoding = self.tokenizer(
+            miRNA_seq,
             add_special_tokens=False,
             padding="max_length" if self.use_padding else None,
             max_length=self.miRNA_max_length,
             truncation=True,
-            return_attention_mask=True
-        ) 
-        miRNA_seq_tokens = miRNA_seq_encoding["input_ids"]  # get input_ids 
-        miRNA_seq_mask = miRNA_seq_encoding["attention_mask"] # get attention mask
-        
+            return_attention_mask=True,
+        )
+        miRNA_seq_tokens = miRNA_seq_encoding["input_ids"]  # get input_ids
+        miRNA_seq_mask = miRNA_seq_encoding["attention_mask"]  # get attention mask
+
         # need to handle eos here
         if self.add_eos:
             # append list seems to be faster than append tensor
             mRNA_seq_tokens.append(self.tokenizer.sep_token_id)
             miRNA_seq_tokens.append(self.tokenizer.sep_token_id)
-            mRNA_seq_mask.append(1) # do not mask eos token
-            miRNA_seq_mask.append(1) # do not mask eos token
+            mRNA_seq_mask.append(1)  # do not mask eos token
+            miRNA_seq_mask.append(1)  # do not mask eos token
 
         # concatenate miRNA and mRNA tokens
-        concat_seq_tokens=miRNA_seq_tokens + mRNA_seq_tokens
-        concat_seq_mask=miRNA_seq_mask + mRNA_seq_mask
+        concat_seq_tokens = miRNA_seq_tokens + mRNA_seq_tokens
+        concat_seq_mask = miRNA_seq_mask + mRNA_seq_mask
         # convert to tensor
         concat_seq_tokens = np.asarray(concat_seq_tokens)
         concat_seq_tokens = torch.LongTensor(concat_seq_tokens)
         concat_seq_mask = np.asarray(concat_seq_mask)
         concat_seq_mask = torch.LongTensor(concat_seq_mask)
-        
+
         # print("mRNA_seq_tokens shape", mRNA_seq_tokens.size())
         # print("miRNA_seq_tokens shape", miRNA_seq_tokens.size())
 
         # need to wrap in list
         labels = np.asarray([labels])
-        target = torch.FloatTensor(labels) # (1, 1)
+        target = torch.FloatTensor(labels)  # (1, 1)
 
         return concat_seq_tokens, concat_seq_mask, target
