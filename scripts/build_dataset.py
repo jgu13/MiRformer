@@ -30,37 +30,32 @@ print("Number of positive pairs = ", len(positive_pairs_set))
 # _____________________________
 # Generate positive pairs
 # _____________________________
-mRNA_length = 5000
+mRNA_length = 1000
 with open(os.path.join(data_path, "miRNA dictionary.json"), "r") as fp:
     miRNA_seq_dict = json.load(fp)
-with open(os.path.join(data_path, f"mRNA {mRNA_length} dictionary reverse.json"), "r") as fp:
+with open(os.path.join(data_path, f"mRNA {mRNA_length} dictionary.json"), "r") as fp:
     mRNA_seq_dict = json.load(fp)
 
 positive_samples = []
 print("Generate positive samples: ")
 for miRNA_id, mRNA_symbol in positive_pairs_set:
-    miRNA_seq = miRNA_seq_dict.get(miRNA_id)
-    mRNA_seq = mRNA_seq_dict.get(mRNA_symbol)
+    miRNA_seq_ls = miRNA_seq_dict.get(miRNA_id)
+    mRNA_seq_ls = mRNA_seq_dict.get(mRNA_symbol)
 
-    if miRNA_seq and mRNA_seq:
-        # Append to positive samples
-        positive_samples.append(
-            {
-                "miRNA": miRNA_id,
-                "mRNA": mRNA_symbol,
-                "miRNA sequence": miRNA_seq,
-                "mRNA sequence": mRNA_seq,
-                "label": 1,  # Positive label
-            }
-        )
-#     else: # record either missing miRNA or mRNA
-#         missing_pairs["miRNA id"].append(miRNA_id)
-#         missing_pairs["mRNA symbol"].append(mRNA_symbol)
-#         missing_pairs["miRNA sequence"].append(miRNA_seq)
-#         missing_pairs["mRNA sequence"].append(mRNA_seq)
+    if miRNA_seq_ls and mRNA_seq_ls:
+        for miRNA_seq in miRNA_seq_ls:
+            for mRNA_seq in mRNA_seq_ls:
+                # Append to positive samples
+                positive_samples.append(
+                    {
+                        "miRNA": miRNA_id,
+                        "mRNA": mRNA_symbol,
+                        "miRNA sequence": miRNA_seq,
+                        "mRNA sequence": mRNA_seq,
+                        "label": 1,  # Positive label
+                    }
+                )
 
-# missing_pairs_df = pd.DataFrame(missing_pairs)
-# missing_pairs_df.to_csv(os.path.join(data_path, "missing_miRNA_mRNA_pairs.csv"), sep=',', index=False)
 
 # ________________________
 # Generate negative pairs
@@ -86,15 +81,15 @@ while len(negative_pairs_set) < num_negative_samples:
 negative_samples = []
 print("Generate negative samples: ")
 for miRNA_id, gene_symbol in negative_pairs_set:
-    miRNA_seq = miRNA_seq_dict.get(miRNA_id)
-    mRNA_seq = mRNA_seq_dict.get(gene_symbol)
-    if miRNA_seq and mRNA_seq:
+    miRNA_seq_ls = miRNA_seq_dict.get(miRNA_id)
+    mRNA_seq_ls = mRNA_seq_dict.get(gene_symbol)
+    if miRNA_seq_ls and mRNA_seq_ls:
         negative_samples.append(
             {
                 "miRNA": miRNA_id,
                 "mRNA": gene_symbol,
-                "miRNA sequence": miRNA_seq,
-                "mRNA sequence": mRNA_seq,
+                "miRNA sequence": miRNA_seq_ls[0],
+                "mRNA sequence": mRNA_seq_ls[0],
                 "label": 0,  # Negative label
             }
         )
@@ -111,5 +106,5 @@ training_set = pd.concat([positive_df, negative_df], ignore_index=True)
 # save to csv
 print("Save to csv file: ")
 training_set.to_csv(
-    os.path.join(data_path, f"training_{mRNA_length}_reverse.csv"), sep=",", index=False
+    os.path.join(data_path, f"training_{mRNA_length}.csv"), sep=",", index=False
 )

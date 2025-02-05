@@ -4,68 +4,68 @@ import numpy as np
 import json
 
 # test accuracy on mirTarBase dataset
-linear_test_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM/Performance/mirLM/MLP"), "test_accuracy_1000.json")
-finetune_Hyena_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM/Performance/mirLM/HyenaDNA"), "test_accuracy_1000_continued_training.json")
-cnn_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM/Performance/mirLM/CNN"), "test_accuracy_1000.json")
-
-with open(linear_test_accuracy, "r") as fp:
-    linear_test_accuracy = json.load(fp)
-
-with open(finetune_Hyena_accuracy, "r") as fp:
-    finetune_Hyena_accuracy = json.load(fp)
-
-with open(cnn_accuracy, "r") as fp:
-    cnn_accuracy = json.load(fp)
-
-print("length of linear accuracy = ", len(linear_test_accuracy))
-print("length of finetuned hyena accuracy = ", len(finetune_Hyena_accuracy))
-print("length of cnn accuracy = ", len(cnn_accuracy))
-
-fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(8,5))
-ax.plot(np.arange(len(linear_test_accuracy)), linear_test_accuracy, 'o-', color='orange', label='HyenaDNA-MLP-CrossAttn')
-ax.plot(np.arange(len(finetune_Hyena_accuracy[:50])), finetune_Hyena_accuracy[:50], 'o-', color='green', label='Finetuned HyenaDNA-MLP')
-ax.plot(np.arange(len(cnn_accuracy)), cnn_accuracy, 'o-', color='blue', label='baseline CNN-MLP')
-ax.set_xlabel("epoch")
-ax.set_ylabel("Accuracy (%)")
-ax.set_title("Test accuracy vs epochs on mRNA = 1000nts")
-ax.legend()
-
-plot_path = os.path.join(os.path.expanduser("~/projects/mirLM"), "Peformance_1000_epochs_50_accuracy_comparison.png")
-
-plt.savefig(plot_path)
-
-# test accuracy on miRAW dataset
-# linear_test_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM"), "test_accuracy_miRAW_2MLP_revmasked.json")
-# finetune_Hyena_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM"), "test_accuracy_miRAW_finetune_Hyena.json")
-# cnn_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM"), "test_accuracy_CNN_miRAW_batchsize_256.json")
+# linear_test_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM/Performance/mirLM/MLP"), "test_accuracy_1000.json")
+# finetune_Hyena_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM/Performance/mirLM/HyenaDNA"), "test_accuracy_1000_continued_training.json")
+# cnn_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM/Performance/mirLM/CNN"), "test_accuracy_1000.json")
 
 # with open(linear_test_accuracy, "r") as fp:
-#     linear_test_accuracy = json.load(fp) # epoch 50
+#     linear_test_accuracy = json.load(fp)
 
 # with open(finetune_Hyena_accuracy, "r") as fp:
-#     finetune_Hyena_accuracy = json.load(fp) # epoch 100
+#     finetune_Hyena_accuracy = json.load(fp)
 
 # with open(cnn_accuracy, "r") as fp:
-#     cnn_accuracy = json.load(fp) # epoch 100
+#     cnn_accuracy = json.load(fp)
 
-# lower_bound = len(linear_test_accuracy)
-
-# # print("length of linear accuracy = ", len(linear_test_accuracy))
-# # print("length of finetuned hyena accuracy = ", len(finetune_Hyena_accuracy))
-# # print("length of cnn accuracy = ", len(cnn_accuracy))
+# print("length of linear accuracy = ", len(linear_test_accuracy))
+# print("length of finetuned hyena accuracy = ", len(finetune_Hyena_accuracy))
+# print("length of cnn accuracy = ", len(cnn_accuracy))
 
 # fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(8,5))
-# ax.plot(np.arange(len(linear_test_accuracy)), linear_test_accuracy, 'o-', color='orange', label='Trained 3-layer MLP')
-# ax.plot(np.arange(len(finetune_Hyena_accuracy[:lower_bound])), finetune_Hyena_accuracy[:lower_bound], 'o-', color='green', label='Finetuned Hyena + 3-layer MLP')
-# ax.plot(np.arange(len(cnn_accuracy[:lower_bound])), cnn_accuracy[:lower_bound], 'o-', color='blue', label='Trained CNN + 3-layer MLP')
+# ax.plot(np.arange(len(linear_test_accuracy)), linear_test_accuracy, 'o-', color='orange', label='HyenaDNA-MLP-CrossAttn')
+# ax.plot(np.arange(len(finetune_Hyena_accuracy[:50])), finetune_Hyena_accuracy[:50], 'o-', color='green', label='Finetuned HyenaDNA-MLP')
+# ax.plot(np.arange(len(cnn_accuracy)), cnn_accuracy, 'o-', color='blue', label='baseline CNN-MLP')
 # ax.set_xlabel("epoch")
 # ax.set_ylabel("Accuracy (%)")
-# ax.set_title("Test accuracy vs epochs")
+# ax.set_title("Test accuracy vs epochs on mRNA = 1000nts")
 # ax.legend()
 
-# plot_path = os.path.join(os.path.expanduser("~/projects/mirLM"), "Peformance_miRAW_epochs_50_accuracy_comparison.png")
+# plot_path = os.path.join(os.path.expanduser("~/projects/mirLM"), "Peformance_1000_epochs_50_accuracy_comparison.png")
 
 # plt.savefig(plot_path)
+
+# test accuracy on miRAW dataset
+linear_test_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM"), "test_accuracy_miRAW_2MLP_revmasked.json")
+finetune_Hyena_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM"), "test_accuracy_miRAW_finetune_Hyena.json")
+cnn_accuracy = os.path.join(os.path.expanduser("~/projects/mirLM"), "test_accuracy_CNN_miRAW_batchsize_256.json")
+
+with open(linear_test_accuracy, "r") as fp:
+    linear_test_accuracy = json.load(fp) # epoch 50
+
+with open(finetune_Hyena_accuracy, "r") as fp:
+    finetune_Hyena_accuracy = json.load(fp) # epoch 100
+
+with open(cnn_accuracy, "r") as fp:
+    cnn_accuracy = json.load(fp) # epoch 100
+
+lower_bound = len(linear_test_accuracy)
+
+# print("length of linear accuracy = ", len(linear_test_accuracy))
+# print("length of finetuned hyena accuracy = ", len(finetune_Hyena_accuracy))
+# print("length of cnn accuracy = ", len(cnn_accuracy))
+
+fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(8,5))
+ax.plot(np.arange(len(linear_test_accuracy)), linear_test_accuracy, 'o-', color='orange', label='Trained 3-layer MLP')
+ax.plot(np.arange(len(finetune_Hyena_accuracy[:lower_bound])), finetune_Hyena_accuracy[:lower_bound], 'o-', color='green', label='Finetuned Hyena + 3-layer MLP')
+ax.plot(np.arange(len(cnn_accuracy[:lower_bound])), cnn_accuracy[:lower_bound], 'o-', color='blue', label='Trained CNN + 3-layer MLP')
+ax.set_xlabel("epoch")
+ax.set_ylabel("Accuracy (%)")
+ax.set_title("Test accuracy vs epochs")
+ax.legend()
+
+plot_path = os.path.join(os.path.expanduser("~/projects/mirLM"), "Peformance_miRAW_epochs_50_accuracy_comparison.png")
+
+plt.savefig(plot_path)
 
 # # test accuracy on 1000/2000/3000/4000-nt mirTarBase dataset
 # Perf_dir = os.path.expanduser("~/projects/mirLM/Performance/mirLM")

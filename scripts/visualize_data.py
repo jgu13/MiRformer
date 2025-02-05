@@ -25,79 +25,103 @@ mirna_path = os.path.join(data_path, "mature.fa.gz")
 # num_record_to_iter = 150
 # # Parse the miRNA FASTA file
 # with gzip.open(mirna_path, "rt") as handle:
-#     for record in islice(SeqIO.parse(handle, "fasta"), num_record_to_iter):
+#     for record in SeqIO.parse(handle, "fasta"):
 #         # Extract miRNA ID from the record (e.g., 'hsa-miR-20a-5p')
 #         miRNA_id = record.name.split()[0]  # In case there are spaces
-#         if miRNA_id.startswith("hsa-miR"):  # only store miRNAseq of homo sapiens
-#             # check for duplicates
-#             if miRNA_id not in miRNA_seq_dict:
-#                 miRNA_seq = str(record.seq)
-#                 if miRNA_seq != "Sequenceunavailable":
-#                     # Store the sequence
-#                     miRNA_seq_dict[miRNA_id] = miRNA_seq.replace("U", "T")
-#                 else:
-#                     print(f"Sequence for miRNA [{miRNA_id}] is not available.")
+#         miRNA_seq = str(record.seq)
+#         if (miRNA_id != "") and (miRNA_id.startswith("hsa-miR")):  # only store miRNAseq of homo sapiens
+#             if miRNA_seq != "Sequenceunavailable":
+#                 # check for duplicates
+#                 if miRNA_id not in miRNA_seq_dict:
+#                     miRNA_seq_dict[miRNA_id] = []
+#                 # Store the sequence
+#                 miRNA_seq_dict[miRNA_id].append(miRNA_seq.replace("U", "T"))
 #             else:
-#                 print(
-#                     f"Sequence for miRNA [{miRNA_id}] is duplicated. Keeping the existing sequence."
-#                 )
+#                 print(f"Sequence for miRNA [{miRNA_id}] is not available.")
+#         else:
+#             print(f"miRNA id is invalid: {miRNA_id}.")
+#             # else:
+#             #     print(
+#             #         f"Sequence for miRNA [{miRNA_id}] is duplicated. Keeping the existing sequence."
+#             #     )
 
-# _______________________
-# Parse mRNA sequences
-# _______________________
+# save_path = os.path.join(data_path, "miRNA dictionary.json")
+# with open(save_path, "w") as fp:
+#     json.dump(miRNA_seq_dict, fp, indent=4)
+# print(f"Saved miRNA sequences to {save_path}.")
+
+# # _______________________
+# # Parse mRNA sequences
+# # _______________________
+# mRNA_length = 32870
 # mRNA_seq_dict = {}
 
-# num_record_to_iter = 5
 # with gzip.open(mRNAseq_path, "rt") as handle:
-#     for record in islice(SeqIO.parse(handle, "fasta"), num_record_to_iter):
+#     for record in SeqIO.parse(handle, "fasta"):
 #         # Extract gene symbol name for the record (e.g.: 'CTAGE4')
 #         gene_symbol = record.id.split("|")[2]
-#         if gene_symbol not in mRNA_seq_dict:
-#             mRNA_seq = str(record.seq)
+#         mRNA_seq = str(record.seq) # full-length mRNA seq
+#         if (gene_symbol != ""):
 #             if mRNA_seq != "Sequenceunavailable":
-#                 # Store the sequence
-#                 mRNA_seq_dict[gene_symbol] = mRNA_seq
+#                 if gene_symbol not in mRNA_seq_dict:
+#                     mRNA_seq_dict[gene_symbol] = []
+#                 # check for duplicated transcripts
+#                 if mRNA_seq not in mRNA_seq_dict[gene_symbol]:
+#                     # Store the sequence
+#                     mRNA_seq_dict[gene_symbol].append(mRNA_seq.replace("U", "T"))
+#                 else:
+#                     print(f"Transcript for gene [{gene_symbol}] is duplicated. Copies are dropped.")
 #             else:
 #                 print(f"Transcript for gene [{gene_symbol}] is not available.")
 #         else:
-#             print(
-#                 f"Transcript for gene [{gene_symbol}] is duplicated. Keeping the existing sequence."
-#             )
+#             print(f"Gene symbol for id {record.id} is not found.")
+#         # else:
+#         #     print(
+#         #         f"Transcript for gene [{gene_symbol}] is duplicated. Keeping the existing sequence."
+#         #     )
 
+# save_path = os.path.join(data_path, f"mRNA {mRNA_length} dictionary.json")
+# with open(save_path, "w", encoding="utf-8") as fp:
+#     json.dump(mRNA_seq_dict, fp, indent=4)
+# print(f"Saved mRNA sequence of {mRNA_length} max length to {save_path}.")
 
 # _______________________________________
 # Parse mRNA sequence to specifc length
 # _______________________________________
-mRNA_length = 5000
+mRNA_length = 10000
 mRNA_seq_dict = {}
 
-# Store a 500nt version of mRNA for fast experiments
+# Store mRNA for fast experiments
 with gzip.open(mRNAseq_path, "rt") as handle:
     for record in SeqIO.parse(handle, "fasta"):
         # Extract gene symbol name for the record (e.g.: 'CTAGE4')
         gene_symbol = record.id.split("|")[2]
-        if gene_symbol not in mRNA_seq_dict:
-            mRNA_seq = str(record.seq)
+        mRNA_seq = str(record.seq)
+        mRNA_seq = mRNA_seq[:mRNA_length].replace("U","T")
+        if (gene_symbol != ""):
             if mRNA_seq != "Sequenceunavailable":
-                # Store the sequence
-                mRNA_seq_dict[gene_symbol] = mRNA_seq[-mRNA_length:] # get sequence from the 3' UTR end
+                if gene_symbol not in mRNA_seq_dict:
+                    mRNA_seq_dict[gene_symbol] = []
+                # check for duplicated transcripts
+                if mRNA_seq not in mRNA_seq_dict[gene_symbol]:
+                    # Store the sequence
+                    mRNA_seq_dict[gene_symbol].append(mRNA_seq)
+                else:
+                    print(f"Transcript for gene [{gene_symbol}] of length {mRNA_length} is duplicated. Copies are dropped.")
             else:
                 print(f"Transcript for gene [{gene_symbol}] is not available.")
         else:
-            print(
-                f"Transcript for gene [{gene_symbol}] is duplicated. Keeping the existing sequence."
-            )
+            print(f"Gene symbol for id {record.id} is not found.")
+        # else:
+        #     print(
+        #         f"Transcript for gene [{gene_symbol}] is duplicated. Keeping the existing sequence."
+        #     )
 
-# with open(os.path.join(data_path, "miRNA dictionary.json"), "w") as fp:
-#     json.dump(miRNA_seq_dict, fp, indent=4)
-
-# with open(os.path.join(data_path, "mRNA dictionary.json"), "w") as fp:
-#     json.dump(mRNA_seq_dict, fp, indent=4)
-
-save_path = os.path.join(data_path, f"mRNA {mRNA_length} dictionary reverse.json")
-with open(save_path, "w", encoding='utf-8') as fp:
+save_path = os.path.join(data_path, f"mRNA {mRNA_length} dictionary.json")
+with open(save_path, "w", encoding="utf-8") as fp:
     json.dump(mRNA_seq_dict, fp, indent=4)
 print(f"Saved mRNA sequence of {mRNA_length} max length to {save_path}.")
+
 
 def build_dmiso_dataset(MTI_path, mRNAseq_path, miRNAseq_path):
     """

@@ -4,7 +4,10 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import roc_curve, auc
 import argparse
 
-def plot_auc(json_files, method_names=None, output_file=None):
+def plot_auc(json_files: list[str], 
+             method_names=None, 
+             title=None,
+             output_file=None):
     """
     Load prediction/true-label pairs from a list of JSON files,
     compute ROC curves, and plot them on a single figure with AUROC in the legend.
@@ -47,7 +50,7 @@ def plot_auc(json_files, method_names=None, output_file=None):
     plt.ylim([0.0, 1.05])
     plt.xlabel("False Positive Rate")
     plt.ylabel("True Positive Rate")
-    plt.title("Comparison of Classification Methods (ROC Curve)")
+    plt.title(title)
     plt.legend(loc="lower right")
     plt.tight_layout()
     # Save or show the plot
@@ -80,6 +83,12 @@ def main():
         help="Names of the methods to display in the legend. Defaults to Method 1, Method 2, ..."
     )
     parser.add_argument(
+        "--plot_title",
+        type=str,
+        required=False,
+        default="Comparison on Classification (ROC)"
+    )
+    parser.add_argument(
         "--output_file",
         type=str,
         required=False,
@@ -88,7 +97,10 @@ def main():
     args = parser.parse_args()
 
     # Call the plotting function
-    plot_auc(args.json_files, args.method_names, args.output_file)
+    plot_auc(args.json_files, 
+             args.method_names, 
+             args.plot_title,
+             args.output_file)
 
 
 if __name__ == "__main__":

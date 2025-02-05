@@ -131,7 +131,7 @@ def main():
     max_length = miRNA_max_length + mRNA_max_length + 2
     
     tokenizer = CharacterTokenizer(
-        characters=["A", "C", "G", "T", "U", "N"],  # add RNA characters, N is uncertain
+        characters=["A", "C", "G", "T", "N"],  # add RNA characters, N is uncertain
         model_max_length=max_length,
         add_special_tokens=False,  # we handle special tokens elsewhere
         padding_side="left",  # since HyenaDNA is causal, we pad on the left

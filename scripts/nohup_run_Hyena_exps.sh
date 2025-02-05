@@ -67,3 +67,29 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 #     --dataset_name miRAW \
 #     --dataset_path $data_dir/miRAW_dataset.csv \
 #     > output_logs/output_hyena_miraw_50.log 2>&1 &
+
+# train on miRAW data
+# nohup python \
+#     scripts/main_finetune_Hyena_ddp.py \
+#     --mRNA_max_len 40 \
+#     --miRNA_max_len 26 \
+#     --device cuda:1 \
+#     --num_epochs 10 \
+#     --batch_size 64\
+#     --dataset_name miRAW_noL_noMissing \
+#     --train_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_train.csv \
+#     --val_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_validation.csv \
+#     > output_logs/output_hyena_miRaw_noL_noMissing_epoch_10.log 2>&1 &
+
+# train on synthetic dataset
+nohup python \
+    scripts/main_finetune_Hyena_ddp.py \
+    --mRNA_max_len 40 \
+    --miRNA_max_len 26 \
+    --device cuda:2 \
+    --num_epochs 50 \
+    --batch_size 64\
+    --dataset_name selected_perfect_seed_match_w_linker \
+    --train_dataset_path $data_dir/selected_perfect_seed_match_train.csv \
+    --val_dataset_path $data_dir/selected_perfect_seed_match_validation.csv \
+    > output_logs/output_hyena_selected_perfect_seed_match_w_linker.log 2>&1 &

@@ -42,11 +42,35 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 # nohup python scripts/baseline_CNN.py --mRNA_max_len 5000 --device cuda:2 --batch_size 256 --num_epochs 50 > output_logs/output_CNN_5000_50.log 2>&1 &
 
 # train on miRAW dataset
+# nohup python scripts/baseline_CNN.py \
+#     --mRNA_max_len 40 \
+#     --device cuda:2 \
+#     --num_epochs 10 \
+#     --batch_size 64 \
+#     --dataset_name miRAW \
+#     --dataset_path $data_dir/miRAW_dataset.csv\
+#     > output_logs/output_CNN_miRAW_50.log 2>&1 & # requires parameter changes before running
+
+# train on completely random miRAW dataset
+# nohup python scripts/baseline_CNN.py \
+#     --mRNA_max_len 40 \
+#     --miRNA_max_len 26 \
+#     --device cuda:1 \
+#     --num_epochs 10 \
+#     --batch_size 64 \
+#     --dataset_name miRAW_noL_noMissing \
+#     --train_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_train.csv \
+#     --val_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_validation.csv \
+#     > output_logs/output_CNN_miRaw_noL_noMissing_epoch_10.log 2>&1 & # requires parameter changes before running
+
+# train on synthetic dataset
 nohup python scripts/baseline_CNN.py \
     --mRNA_max_len 40 \
-    --device cuda:7 \
+    --miRNA_max_len 26 \
+    --device cuda:2 \
     --num_epochs 50 \
     --batch_size 64 \
-    --dataset_name miRAW \
-    --dataset_path $data_dir/miRAW_dataset.csv\
-    > output_logs/output_CNN_miRAW_50.log 2>&1 & # requires parameter changes before running
+    --dataset_name selected_perfect_seed_match \
+    --train_dataset_path $data_dir/selected_perfect_seed_match_train.csv \
+    --val_dataset_path $data_dir/selected_perfect_seed_match_validation.csv \
+    > output_logs/output_CNN_selected_perfect_seed_match.log 2>&1 &

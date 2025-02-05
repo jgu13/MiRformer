@@ -46,7 +46,12 @@ def compute_cross_attention(Q: torch.tensor,
     cross_attn = cross_attn.sum(dim=1) / valid_counts  # [batchsize, d_model]
     return cross_attn
 
-def evaluate(HyenaDNA_feature_extractor, MLP_head, device, test_loader):
+def evaluate(HyenaDNA_feature_extractor, 
+             MLP_head,
+             Q_layer,
+             KV_layer, 
+             device, 
+             test_loader):
     """Evaluation loop."""
     MLP_head.eval()
     HyenaDNA_feature_extractor.eval()
@@ -67,13 +72,17 @@ def evaluate(HyenaDNA_feature_extractor, MLP_head, device, test_loader):
             miRNA_hidden_states = HyenaDNA_feature_extractor(
                 device=device, input_ids=miRNA_seq, use_only_miRNA=False
             )
-            Q = mRNA_hidden_states  # [batchsize, mRNA_seq_len, d_model]
-            K = miRNA_hidden_states  # [batchsize, miRNA_seq_len, d_model]
-            V = miRNA_hidden_states  # [batchsize, miRNA_seq_len, d_model]
+            Q = Q_layer(miRNA_hidden_states)  # [batchsize, mRNA_seq_len, d_model]
+            K = KV_layer(mRNA_hidden_states)  # [batchsize, miRNA_seq_len, d_model]
+            V = KV_layer(mRNA_hidden_states)  # [batchsize, miRNA_seq_len, d_model]
             Q_mask = mRNA_seq_mask
             K_mask = miRNA_seq_mask
             cross_attn = compute_cross_attention(
-                Q=Q, K=K, V=V, Q_mask=Q_mask, K_mask=K_mask
+                Q=Q,
+                K=K, 
+                V=V, 
+                Q_mask=Q_mask, 
+                K_mask=K_mask
             )
             output = MLP_head(cross_attn)  # (batch_size, 1)
             probabilities = torch.sigmoid(output.squeeze()).cpu().numpy().tolist()
@@ -135,7 +144,7 @@ def main():
     test_dataset_path=args.dataset_path
 
     # Other fixed parameters
-    miRNA_max_length = 28
+    miRNA_max_length = 26
     model_name = "MLP"
     test_dataset_name = os.path.basename(test_dataset_path).split('.')[0]
     backbone_cfg = None
@@ -184,19 +193,27 @@ def main():
     MLP_head = LinearHead(
         d_model=backbone_cfg["d_model"], d_output=n_classes, hidden_sizes=hidden_sizes
     )
-    ckpt_path = os.path.join(PROJ_HOME, "checkpoints", dataset_name, f"mirLM-{mRNA_max_length}", "checkpoint_epoch_final.pth")
+    Q_layer = nn.Linear(backbone_cfg["d_model"], backbone_cfg["d_model"])
+    KV_layer = nn.Linear(backbone_cfg["d_model"], backbone_cfg["d_model"])
+    
+    # load checkpoint
+    ckpt_path = os.path.join(PROJ_HOME, "checkpoints", dataset_name, "MLP", "checkpoint_epoch_final.pth")
     loaded_data = torch.load(ckpt_path, map_location=device)
     print("Loaded checkpoint from ", ckpt_path)
     MLP_head.load_state_dict(loaded_data["model_state_dict"])
+    Q_layer.load_state_dict(loaded_data["Q_layer_state_dict"])
+    KV_layer.load_state_dict(loaded_data["KV_layer_state_dict"])
     
     HyenaDNA_feature_extractor.to(device)
     MLP_head.to(device)
+    Q_layer.to(device)
+    KV_layer.to(device)
 
     D = pd.read_csv(test_dataset_path)
     assert all(col in D.columns for col in ['miRNA sequence', 'mRNA sequence']), "column names must contain 'mRNA sequence' and 'miRNA sequence'."
     
     tokenizer = CharacterTokenizer(
-        characters=["A", "C", "G", "T", "U", "N"],
+        characters=["A", "C", "G", "T", "N"],
         model_max_length=mRNA_max_length + miRNA_max_length + 2,
         add_special_tokens=False,
         padding_side="left",
@@ -217,6 +234,8 @@ def main():
     predictions, true_labels = evaluate(
         HyenaDNA_feature_extractor=HyenaDNA_feature_extractor,
         MLP_head=MLP_head,
+        Q_layer=Q_layer,
+        KV_layer=KV_layer,
         device=device,
         test_loader=test_loader,
     )
