@@ -2,102 +2,42 @@ import os
 import math
 import json
 import torch
+from typing import List
 import torch.nn as nn
 from torch.nn import functional as F
 import torch.distributed as dist
 # Local imports
+from mirLM import mirLM
 from Hyena_layer import HyenaDNAPreTrainedModel, HyenaDNAModel, LinearHead
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 
-class TwoTowerMLP(nn.Module):
+class TwoTowerMLP(mirLM):
     def __init__(
         self,
-        pretrained_model_name,
-        device,
-        backbone_cfg=None,
-        n_classes=1,
-        use_head=False,
-        download=False,
-        hidden_sizes=None,
+        hidden_sizes: List[int]=None,
+        **kwargs,
     ):
         """
         Args:
-            pretrained_model_name (str): Name of the pretrained model.
-            backbone_cfg (dict): Configuration for the backbone model.
-            n_classes (int): Number of output classes.
-            use_head (bool): Whether to use the head of the pretrained model.
-            device (str): Device to use (e.g., "cuda" or "cpu").
-            download (bool): Whether to download the pretrained model.
             hidden_sizes (list): Hidden sizes for the MLP head.
         """
-        super(TwoTowerMLP, self).__init__()
-        
-        # instantiate the model (pretrained here)
-        if pretrained_model_name in [
-            "hyenadna-tiny-1k-seqlen",
-            "hyenadna-small-32k-seqlen",
-            "hyenadna-medium-160k-seqlen",
-            "hyenadna-medium-450k-seqlen",
-            "hyenadna-large-1m-seqlen",
-        ]:
-            path = f"{PROJ_HOME}/checkpoints"
-            # use the pretrained Huggingface wrapper instead
-            self.hyena = HyenaDNAPreTrainedModel.from_pretrained(
-                                        path,
-                                        pretrained_model_name,
-                                        download=download,
-                                        config=backbone_cfg,
-                                        device=device,
-                                        use_head=use_head,
-                                        n_classes=n_classes,
-                                    )
-            pretrained_model_name_or_path = os.path.join(path, pretrained_model_name)
-            if os.path.isdir(pretrained_model_name_or_path):
-                if backbone_cfg is None:
-                    with open(
-                        os.path.join(pretrained_model_name_or_path, "config.json"),
-                        "r",
-                        encoding="utf-8",
-                    ) as f:
-                        backbone_cfg = json.load(f)
-                elif isinstance(backbone_cfg, str) and backbone_cfg.endswith(".json"):
-                    with open(backbone_cfg, "r", encoding="utf-8") as f:
-                        backbone_cfg = json.load(f)
-                else:
-                    assert isinstance(
-                        backbone_cfg, dict
-                    ), "self-defined backbone config must be a dictionary."
-        # from scratch
-        else:
-            try:
-                if isinstance(backbone_cfg, str) and backbone_cfg.endswith(".json"):
-                    with open(backbone_cfg, "r", encoding="utf-8") as f:
-                        backbone_cfg = json.load(f)
-                else:
-                    assert isinstance(
-                        backbone_cfg, dict
-                    ), "self-defined backbone config must be a dictionary."
-                self.hyena = HyenaDNAModel(
-                    **backbone_cfg, 
-                    use_head=use_head, 
-                    n_classes=n_classes,
-                )
-            except TypeError as exc:
-                raise TypeError("backbone_cfg must not be NoneType.") from exc
+        super().__init__(
+            **kwargs,
+        )
 
         # Initialize the MLP head
         if hidden_sizes is None:
-            hidden_sizes = [backbone_cfg["d_model"] * 2, backbone_cfg["d_model"] * 2]
+            hidden_sizes = [self.backbone_cfg["d_model"] * 2, self.backbone_cfg["d_model"] * 2]
         self.mlp_head = LinearHead(
-            d_model=backbone_cfg["d_model"], 
-            d_output=n_classes, 
+            d_model=self.backbone_cfg["d_model"], 
+            d_output=self.n_classes, 
             hidden_sizes=hidden_sizes,
         )
 
         # Initialize Q and KV layers
-        self.q_layer = nn.Linear(backbone_cfg["d_model"], backbone_cfg["d_model"])
-        self.kv_layer = nn.Linear(backbone_cfg["d_model"], backbone_cfg["d_model"])
+        self.q_layer = nn.Linear(self.backbone_cfg["d_model"], self.backbone_cfg["d_model"])
+        self.kv_layer = nn.Linear(self.backbone_cfg["d_model"], self.backbone_cfg["d_model"])
      
     def compute_cross_attention(
             self,
@@ -130,9 +70,187 @@ class TwoTowerMLP(nn.Module):
         cross_attn = cross_attn.sum(dim=1) / valid_counts  # [batchsize, d_model]
         # print("Cross attention shape = ", cross_attn.shape)
         return cross_attn
+
+    def run_training(
+        self,
+        train_loader,
+        optimizer,
+        epoch,
+        loss_fn,
+        log_interval=10,
+        epoch_loss=0.0,
+    ):
+        """Training loop."""
+        self.mlp_head.train()
+        self.q_layer.train()
+        self.kv_layer.train()
+        self.hyena.train()
         
+        loss_ls = []
+        for batch_idx, (
+            mRNA_seq,
+            miRNA_seq,
+            mRNA_seq_mask,
+            miRNA_seq_mask,
+            target,
+        ) in enumerate(train_loader):
+            mRNA_seq, miRNA_seq, mRNA_seq_mask, miRNA_seq_mask, target = (
+                mRNA_seq.to(self.device),
+                miRNA_seq.to(self.device),
+                mRNA_seq_mask.to(self.device),
+                miRNA_seq_mask.to(self.device),
+                target.to(self.device),
+            )
+            output = self.forward(
+                            mRNA_seq=mRNA_seq,
+                            miRNA_seq=miRNA_seq,
+                            mRNA_seq_mask=mRNA_seq_mask,
+                            miRNA_seq_mask=miRNA_seq_mask
+                            )  # (batch_size, 1)
+            loss = loss_fn(output.squeeze().sigmoid(), target.squeeze())
+
+            if self.accumulation_step is not None:
+                loss = loss / self.accumulation_step
+                loss_ls.append(loss.item())
+                loss.backward()
+                if (batch_idx + 1) % self.accumulation_step == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    if self.ddp:
+                        print(
+                            f"[Rank {dist.get_rank()}] "
+                            f"Train Epoch: {epoch} "
+                            f"[{(batch_idx + 1) * len(mRNA_seq)}/{len(train_loader.sampler)} "
+                            f"({100.0 * (batch_idx + 1) / len(train_loader):.0f}%)]\t"
+                            f"Avg Loss: {sum(loss_ls) / len(loss_ls):.6f}\t", 
+                            flush=True
+                        )
+                    else:
+                        print(
+                            f"Train Epoch: {epoch} "
+                            f"[{(batch_idx + 1) * len(mRNA_seq)}/{len(train_loader.dataset)} "
+                            f"({100.0 * (batch_idx + 1) / len(train_loader):.0f}%)]\t"
+                            f"Avg Loss: {sum(loss_ls) / len(loss_ls):.6f}\t", 
+                            flush=True
+                        )
+                    loss_ls = []
+            else:
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                if (batch_idx + 1) % log_interval == 0:
+                    if self.ddp:
+                        print(
+                            f"[Rank {dist.get_rank()}] "
+                            f"Train Epoch: {epoch} "
+                            f"[{(batch_idx + 1) * len(mRNA_seq)}/{len(train_loader.sampler)} "
+                            f"({100.0 * (batch_idx + 1) / len(train_loader):.0f}%)] "
+                            f"Loss: {loss.item():.6f}\n",
+                            flush=True
+                        )
+                    else:
+                        print(
+                            f"Train Epoch: {epoch} "
+                            f"[{(batch_idx + 1) * len(mRNA_seq)}/{len(train_loader.dataset)} "
+                            f"({100.0 * (batch_idx + 1) / len(train_loader):.0f}%)]\t"
+                            f"Loss: {loss.item():.6f}\t",
+                            flush=True
+                        )
+            epoch_loss += loss.item()
+        average_loss = epoch_loss / len(train_loader)
+        return average_loss
+    
+    def run_testing(
+         self,
+         test_loader):
+        """Test loop."""
+        self.mlp_head.eval()
+        self.q_layer.eval()
+        self.kv_layer.eval()
+        self.hyena.eval()
+        
+        if self.ddp:
+            local_correct = 0
+        else:
+            correct = 0
+        with torch.no_grad():
+            for mRNA_seq, miRNA_seq, mRNA_seq_mask, miRNA_seq_mask, target in test_loader:
+                mRNA_seq, miRNA_seq, mRNA_seq_mask, miRNA_seq_mask, target = (
+                    mRNA_seq.to(self.device),
+                    miRNA_seq.to(self.device),
+                    mRNA_seq_mask.to(self.device),
+                    miRNA_seq_mask.to(self.device),
+                    target.to(self.device),
+                )
+                output = self.forward(
+                            mRNA_seq=mRNA_seq,
+                            miRNA_seq=miRNA_seq,
+                            mRNA_seq_mask=mRNA_seq_mask,
+                            miRNA_seq_mask=miRNA_seq_mask
+                            )  # (batch_size, 1)
+                probabilities = torch.sigmoid(output.squeeze())
+                predictions = (probabilities > 0.5).long()
+                if self.ddp:
+                    local_correct += predictions.eq(target.squeeze()).sum().item()
+                else:
+                    correct += predictions.eq(target.squeeze()).sum().item()
+        if self.ddp:
+            # convert to gpu tensor
+            correct_tensor = torch.tensor(local_correct, dtype=torch.long, device=self.device)
+            # Sum across all ranks
+            dist.all_reduce(correct_tensor, op=dist.ReduceOp.SUM)
+            # Get all correct counts
+            global_correct = correct_tensor.item()
+            # compute global accuracy
+            global_accuracy = 100.0 * global_correct / len(test_loader.dataset)
+            if dist.get_rank() == 0:
+                print(
+                    f"Test set: Accuracy: {global_correct}/{len(test_loader.dataset)} "
+                    f"({global_accuracy:.2f}%)\n"
+                )
+            return global_accuracy
+        else:                       
+            accuracy = 100.0 * correct / len(test_loader.dataset)
+            print(
+                f"\nTest set: Accuracy: {correct}/{len(test_loader.dataset)} "
+                f"({accuracy:2f})"
+            )
+            return accuracy       
+
+    def run_evaluating(
+            self,
+            test_loader):
+        """Test loop."""
+        self.mlp_head.eval()
+        self.q_layer.eval()
+        self.kv_layer.eval()
+        self.hyena.eval()
+        
+        predictions = []
+        true_labels = []
+        with torch.no_grad():
+            for mRNA_seq, miRNA_seq, mRNA_seq_mask, miRNA_seq_mask, target in test_loader:
+                mRNA_seq, miRNA_seq, mRNA_seq_mask, miRNA_seq_mask, target = (
+                    mRNA_seq.to(self.device),
+                    miRNA_seq.to(self.device),
+                    mRNA_seq_mask.to(self.device),
+                    miRNA_seq_mask.to(self.device),
+                    target.to(self.device),
+                )
+                output = self.forward(
+                            mRNA_seq=mRNA_seq,
+                            miRNA_seq=miRNA_seq,
+                            mRNA_seq_mask=mRNA_seq_mask,
+                            miRNA_seq_mask=miRNA_seq_mask
+                            )  # (batch_size, 1)
+                probabilities = torch.sigmoid(output.squeeze()).cpu().numpy().tolist()
+                targets = target.cpu().view(-1).numpy().tolist()
+                predictions.extend(probabilities)
+                true_labels.extend(targets)
+
+        return predictions, true_labels
+    
     def forward(self, 
-                device,
                 mRNA_seq,
                 miRNA_seq,
                 mRNA_seq_mask=None,
@@ -152,16 +270,18 @@ class TwoTowerMLP(nn.Module):
         """
         # Extract mRNA and miRNA hidden states
         mRNA_hidden_states = self.hyena(
-            device=device,
             input_ids=mRNA_seq,
-            use_only_miRNA=False
+            use_only_miRNA=False,
+            max_mRNA_length=self.mRNA_max_len,
+            max_miRNA_length=self.miRNA_max_len
         )  # (batch_size, mRNA_seq_len, d_model)
         miRNA_hidden_states = self.hyena(
-            device=device,
             input_ids=miRNA_seq, 
-            use_only_miRNA=False
+            use_only_miRNA=False,
+            max_mRNA_length=self.mRNA_max_len,
+            max_miRNA_length=self.miRNA_max_len
         )  # (batch_size, miRNA_seq_len, d_model)
-
+        
         # Compute Q, K, V for cross-attention
         Q = self.q_layer(miRNA_hidden_states)  # (batch_size, miRNA_seq_len, d_model)
         K = self.kv_layer(mRNA_hidden_states)  # (batch_size, mRNA_seq_len, d_model)

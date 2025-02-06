@@ -303,98 +303,6 @@ class GenomicBenchmarkDataset(torch.utils.data.Dataset):
 
         return seq, target
 
-
-# Define a custom Dataset class
-class CustomDataset(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        dataframe,
-        mRNA_max_length,
-        miRNA_max_length=25,
-        tokenizer=None,
-        use_padding=None,
-        rc_aug=None,
-        add_eos=False,
-    ):
-        self.use_padding = use_padding
-        self.mRNA_max_length = mRNA_max_length
-        self.miRNA_max_length = miRNA_max_length
-        self.tokenizer = tokenizer
-        self.rc_aug = rc_aug
-        self.add_eos = add_eos
-        self.data = dataframe
-        # Assuming the last column is the label, adjust this if needed
-        self.mRNA_sequences = self.data[["mRNA sequence"]].values
-        self.miRNA_sequences = self.data[["miRNA sequence"]].values
-        self.labels = self.data[["label"]].values
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        # Convert data to PyTorch tensors
-        mRNA_seq = self.mRNA_sequences[idx][0]
-        miRNA_seq = self.miRNA_sequences[idx][0]
-        label = self.labels[idx]
-        
-        miRNA_seq = miRNA_seq.replace("U", "T")
-
-        # apply rc_aug here if using
-        if self.rc_aug and coin_flip():
-            mRNA_seq = string_reverse_complement(mRNA_seq)
-            miRNA_seq = string_reverse_complement(miRNA_seq)
-
-        mRNA_seq_encoding = self.tokenizer(
-            mRNA_seq,
-            add_special_tokens=False,
-            padding="max_length" if self.use_padding else None,
-            max_length=self.mRNA_max_length,
-            truncation=True,
-            return_attention_mask=True,
-        )
-        mRNA_seq_tokens = mRNA_seq_encoding["input_ids"]  # get input_ids
-        mRNA_seq_mask = mRNA_seq_encoding["attention_mask"]  # get attention mask
-        # print("Tokenized sequence length = ", len(mRNA_seq_tokens))
-
-        miRNA_seq_encoding = self.tokenizer(
-            miRNA_seq,
-            add_special_tokens=False,
-            padding="max_length" if self.use_padding else None,
-            max_length=self.miRNA_max_length,
-            truncation=True,
-            return_attention_mask=True,
-        )
-        miRNA_seq_tokens = miRNA_seq_encoding["input_ids"]  # get input_ids
-        miRNA_seq_mask = miRNA_seq_encoding["attention_mask"]  # get attention mask
-
-        # need to handle eos here
-        if self.add_eos:
-            # append list seems to be faster than append tensor
-            mRNA_seq_tokens.append(self.tokenizer.sep_token_id)
-            miRNA_seq_tokens.append(self.tokenizer.sep_token_id)
-            mRNA_seq_mask.append(1)  # do not mask eos token
-            miRNA_seq_mask.append(1)  # do not mask eos token
-
-        # convert to tensor
-        mRNA_seq_tokens = np.asarray(mRNA_seq_tokens)
-        miRNA_seq_tokens = np.asarray(miRNA_seq_tokens)
-        mRNA_seq_tokens = torch.LongTensor(mRNA_seq_tokens)
-        miRNA_seq_tokens = torch.LongTensor(miRNA_seq_tokens)
-        mRNA_seq_mask = np.asarray(mRNA_seq_mask)
-        miRNA_seq_mask = np.asarray(miRNA_seq_mask)
-        mRNA_seq_mask = torch.LongTensor(mRNA_seq_mask)
-        miRNA_seq_mask = torch.LongTensor(miRNA_seq_mask)
-
-        # print("mRNA_seq_tokens shape", mRNA_seq_tokens.size())
-        # print("miRNA_seq_tokens shape", miRNA_seq_tokens.size())
-
-        # need to wrap in list
-        label = np.asarray([label])
-        target = torch.FloatTensor(label)  # (1, 1)
-
-        return mRNA_seq_tokens, miRNA_seq_tokens, mRNA_seq_mask, miRNA_seq_mask, target
-
-
 class miRawDataset(torch.utils.data.Dataset):
     def __init__(
         self,
@@ -478,36 +386,23 @@ class miRawDataset(torch.utils.data.Dataset):
             if self.add_linker:
                 linker = [self.tokenizer._convert_token_to_id("N")] * 6
                 concat_seq_tokens = mRNA_seq_tokens + linker + miRNA_seq_tokens
-                linker_mask = [1,1,1,1,1,1]
+                linker_mask = [1] * 6
                 concat_seq_mask = mRNA_seq_mask + linker_mask + miRNA_seq_mask
             else:
                 # concatenate miRNA and mRNA tokens
                 concat_seq_tokens = mRNA_seq_tokens + miRNA_seq_tokens
                 concat_seq_mask = mRNA_seq_mask + miRNA_seq_mask
             # convert to tensor
-            concat_seq_tokens = np.asarray(concat_seq_tokens)
-            concat_seq_tokens = torch.LongTensor(concat_seq_tokens)
-            concat_seq_mask = np.asarray(concat_seq_mask)
-            concat_seq_mask = torch.LongTensor(concat_seq_mask)
-
-            # need to wrap in list
-            labels = np.asarray([labels])
-            target = torch.FloatTensor(labels)  # (1, 1)
+            concat_seq_tokens = torch.tensor(concat_seq_tokens, dtype=torch.long)
+            concat_seq_mask = torch.tensor(concat_seq_mask, dtype=torch.long)
+            target = torch.tensor([labels], dtype=torch.float)
 
             return concat_seq_tokens, concat_seq_mask, target
         else:
             # convert to tensor
-            mRNA_seq_tokens = np.asarray(mRNA_seq_tokens)
-            miRNA_seq_tokens = np.asarray(miRNA_seq_tokens)
-            mRNA_seq_tokens = torch.LongTensor(mRNA_seq_tokens)
-            miRNA_seq_tokens = torch.LongTensor(miRNA_seq_tokens)
-            mRNA_seq_mask = np.asarray(mRNA_seq_mask)
-            miRNA_seq_mask = np.asarray(miRNA_seq_mask)
-            mRNA_seq_mask = torch.LongTensor(mRNA_seq_mask)
-            miRNA_seq_mask = torch.LongTensor(miRNA_seq_mask)
-
-            # need to wrap in list
-            labels = np.asarray([labels])
-            target = torch.FloatTensor(labels)  # (1, 1)
-
+            mRNA_seq_tokens = torch.tensor(mRNA_seq_tokens, dtype=torch.long)
+            miRNA_seq_tokens = torch.tensor(miRNA_seq_tokens, dtype=torch.long)
+            mRNA_seq_mask = torch.tensor(mRNA_seq_mask, dtype=torch.long)
+            miRNA_seq_mask = torch.tensor(miRNA_seq_mask, dtype=torch.long)
+            target = torch.tensor([labels], dtype=torch.float)
             return mRNA_seq_tokens, miRNA_seq_tokens, mRNA_seq_mask, miRNA_seq_mask, target

@@ -87,3 +87,23 @@ Traceback (most recent call last):
   File "/home/mcb/users/jgu13/.conda/envs/HyenaDNA/lib/python3.10/site-packages/torch/serialization.py", line 753, in raise_err_msg
     raise type(e)(msg)
 AttributeError: 'NoneType' object has no attribute 'seek'. You can only torch.load from a file that is seekable. Please pre-load the data into a buffer like io.BytesIO and try to load from it instead.
+/home/mcb/users/jgu13/projects/mirLM/scripts/Hyena_layer.py:1305: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  loaded_ckpt = torch.load(
+/home/mcb/users/jgu13/projects/mirLM/scripts/main_evaluate_MLP.py:213: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  loaded_data = torch.load(ckpt_path, map_location=device)
+Evaluation -- Start --
+mRNA length: 40
+Using device: cuda:2
+Loaded pretrained weights ok!
+Loaded checkpoint from  /home/mcb/users/jgu13/projects/mirLM/checkpoints/miRAW-random/mirLM-40/checkpoint_epoch_final.pth
+Traceback (most recent call last):
+  File "/home/mcb/users/jgu13/projects/mirLM/scripts/main_evaluate_MLP.py", line 264, in <module>
+    main()
+  File "/home/mcb/users/jgu13/projects/mirLM/scripts/main_evaluate_MLP.py", line 215, in main
+    MLP_head.load_state_dict(loaded_data["model_state_dict"])
+  File "/home/mcb/users/jgu13/.conda/envs/HyenaDNA/lib/python3.10/site-packages/torch/nn/modules/module.py", line 2584, in load_state_dict
+    raise RuntimeError(
+RuntimeError: Error(s) in loading state_dict for LinearHead:
+	Unexpected key(s) in state_dict: "output_transform.2.weight", "output_transform.2.bias", "output_transform.4.weight", "output_transform.4.bias". 
+	size mismatch for output_transform.0.weight: copying a param with shape torch.Size([512, 256]) from checkpoint, the shape in current model is torch.Size([1, 256]).
+	size mismatch for output_transform.0.bias: copying a param with shape torch.Size([512]) from checkpoint, the shape in current model is torch.Size([1]).

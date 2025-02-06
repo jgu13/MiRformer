@@ -1139,23 +1139,23 @@ class HyenaDNAModel(nn.Module):
 
     def forward(
         self,
-        device,
         input_ids,
+        max_mRNA_length:int,
+        max_miRNA_length:int,
         input_mask=None,
         use_only_miRNA=False,
-        max_mRNA_length=None,
-        max_miRNA_length=None,
         add_linker=False,
-        linker_len = 6,
+        linker_len=6,
         position_ids=None,
         state=None,
+        epsilon=1e-8,
     ):  # state for the repo interface
         """
         use_only_miRNA: used only when the input sequence is concatenation of miRNA + mRNA
         """
 
         hidden_states = self.backbone(input_ids, position_ids=position_ids)
-        hidden_states = hidden_states.to(device)
+        # hidden_states = hidden_states.to(device)
         if use_only_miRNA:
             if add_linker:
                 hidden_states = hidden_states[:, max_mRNA_length + linker_len:, :] # exclude linker
@@ -1163,7 +1163,7 @@ class HyenaDNAModel(nn.Module):
                 hidden_states = hidden_states[:, max_mRNA_length:, :]
             assert (
                 hidden_states.shape[1] == max_miRNA_length
-            ), "trunkated hidden states sequence length must equal to max miRNA length."
+            ), "Truncated hidden states sequence length must equal to max miRNA length."
         if self.use_head:
             if input_mask is not None:
                 if use_only_miRNA:
@@ -1173,18 +1173,17 @@ class HyenaDNAModel(nn.Module):
                         input_mask = input_mask[:, max_mRNA_length:]
                     assert (
                         input_mask.shape[1] == max_miRNA_length
-                    ), "trunkated mask sequence length must equal to max miRNA length."
+                    ), "Truncated mask sequence length must equal to max miRNA length."
                 # print("input_mask = ", input_mask)
                 # remove padding
                 input_mask = input_mask.unsqueeze(-1).expand(
                     -1, -1, hidden_states.shape[2]
                 )  # (batchsize, seq_len, hidden_size)
-                input_mask = input_mask.to(device)
-                valid_counts = input_mask.sum(dim=1)  # (batchsize, hidden_size)
-                valid_counts.to(device)
+                # input_mask = input_mask.to(self.device)
+                valid_counts = input_mask[:,:,0].sum(dim=1, keepdim=True)  # (batchsize, hidden_size)
                 hidden_states = hidden_states * input_mask  # (batchsize, seq_len, hidden_size)
                 # avg pool on seq_len
-                hidden_states_pooled = hidden_states.sum(dim=1) / valid_counts  # (batchsize, hidden_size)
+                hidden_states_pooled = hidden_states.sum(dim=1) / (valid_counts + epsilon)  # (batchsize, hidden_size)
             else:
                 hidden_states_pooled = hidden_states.mean(dim=1) # (batchsize, hidden_size)
             # # CNN
