@@ -202,8 +202,8 @@ def run(
     add_eos = True  # add end of sentence token
 
     # for fine-tuning, only the 'tiny' model can fit on colab
-    # pretrained_model_name = "hyenadna-small-32k-seqlen"  # use None if training from scratch
-    pretrained_model_name = None
+    pretrained_model_name = "hyenadna-small-32k-seqlen"  # use None if training from scratch
+    # pretrained_model_name = None
 
     # we need these for the decoder head, if using
     use_head = False
