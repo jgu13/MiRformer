@@ -150,11 +150,6 @@ class mirLM(nn.Module):
                 self.basemodel_cfg = json.load(f)
             self.learning_rate = self.basemodel_cfg["lr"] * self.world_size # scale learning rate accordingly
             self.weight_decay = self.basemodel_cfg["weight_decay"]
-            if self.base_model_name == "HyenaDNA":
-                self.alpha = self.basemodel_cfg["alpha"]
-                self.margin = self.basemodel_cfg["margin"]
-                print("Alpha = ", self.alpha)
-                print("Margin = ", self.margin)
             print("learning rate = ", self.learning_rate)
             print("weight decay = ", self.weight_decay)
 
@@ -310,8 +305,6 @@ class mirLM(nn.Module):
                     D_train,
                     mRNA_max_length=self.mRNA_max_len,
                     miRNA_max_length=self.miRNA_max_len,
-                    seed_start_col="seed start",
-                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
@@ -323,8 +316,6 @@ class mirLM(nn.Module):
                     D_val,
                     mRNA_max_length=self.mRNA_max_len,
                     miRNA_max_length=self.miRNA_max_len,
-                    seed_start_col="seed start",
-                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
@@ -466,9 +457,6 @@ class mirLM(nn.Module):
                     optimizer=optimizer,
                     epoch=epoch,
                     loss_fn=loss_fn,
-                    tokenizer=tokenizer,
-                    margin=self.margin,
-                    alpha=self.alpha,
                 )
                 accuracy = self.run_testing(
                     model=model,

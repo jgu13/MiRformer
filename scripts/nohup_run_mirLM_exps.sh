@@ -42,7 +42,7 @@ nohup python scripts/main.py \
     --dataset_name TargetScan \
     --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_train.csv \
     --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_validation.csv \
-    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig2.json \
+    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
     --use_head \
     --accumulation_step 8 \
     > output_logs/output_HyenaDNA_TargetScan_short.log 2>&1 &
