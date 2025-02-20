@@ -3,6 +3,7 @@ checkpoints/
 
 # data
 data/
+TargetScan_dataset/
 
 # virtual env
 HyenaDNA/
@@ -11,6 +12,11 @@ HyenaDNA/
 output_logs/
 evaluate_logs/
 Performance/
+optuna_logs/
+*.log
+
+# database
+optuna_database/
 
 #cache
 scripts/__pycache__/
@@ -21,3 +27,5 @@ scripts/__pycache__/
 #other
 build_dataset_output.txt
 dmiso_pairs.txt
+*.out
+unused_data.tar.gz

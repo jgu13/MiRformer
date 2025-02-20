@@ -57,15 +57,21 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 
 # # evaluate miraw
 # nohup python \
-#     scripts/main_finetune_Hyena_ddp.py \
-#     --mRNA_max_len 40 \
-#     --miRNA_max_len 26 \
+#     scripts/main.py \
+#     --mRNA_max_length 40 \
+#     --miRNA_max_length 26 \
 #     --device cuda:2 \
+#     --epochs 100 \
 #     --batch_size 64 \
+#     --base_model_name HyenaDNA \
+#     --model_name HyenaDNA \
 #     --dataset_name miRAW_noL_noMissing \
 #     --test_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_test.csv \
+#     --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
+#     --use_head \
+#     --accumulation_step 8 \
 #     --evaluate \
-#     > evaluate_logs/evaluate_Hyena_miRAW_noL_noMissing.log 2>&1 &
+#     > evaluate_logs/evaluate_HyenaDNA_miRaw_noL_noMissing.log 2>&1 &
 
 # evaluate synthetic dataset
 # nohup python \
@@ -80,13 +86,55 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 #     > evaluate_logs/evaluate_Hyena_selected_perfect_seed_match.log 2>&1 &
 
 # evaluate selected seed match dataset
+# nohup python \
+#     scripts/main.py \
+#     --mRNA_max_length 40 \
+#     --miRNA_max_length 26 \
+#     --device cuda:2 \
+#     --epochs 100 \
+#     --batch_size 64 \
+#     --base_model_name HyenaDNA \
+#     --model_name HyenaDNA \
+#     --dataset_name selected_perfect_seed_match \
+#     --test_dataset_path $data_dir/selected_perfect_seed_match_test.csv \
+#     --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
+#     --use_head \
+#     --accumulation_step 8 \
+#     --evaluate \
+#     > evaluate_logs/evaluate_HyenaDNA_selected_perfect_seed_match.log 2>&1 &
+
+# evaluate selected ISM dataset
+# nohup python \
+#     scripts/main.py \
+#     --mRNA_max_length 40 \
+#     --miRNA_max_length 26 \
+#     --device cuda:2 \
+#     --epochs 100 \
+#     --batch_size 64 \
+#     --base_model_name HyenaDNA \
+#     --model_name HyenaDNA \
+#     --dataset_name miRAW_noL_noMissing \
+#     --test_dataset_path $data_dir/ISM_data_mutant_miRNA_seed.csv \
+#     --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
+#     --use_head \
+#     --accumulation_step 8 \
+#     --evaluate \
+#     > evaluate_logs/evaluate_HyenaDNA_ISM_miRNA_seed.log 2>&1 &
+
+# evaluate on TargetScan dataset
 nohup python \
-    scripts/main_finetune_Hyena_ddp.py \
-    --mRNA_max_len 40 \
-    --miRNA_max_len 26 \
+    scripts/main.py \
+    --mRNA_max_length 20371 \
+    --miRNA_max_length 24 \
     --device cuda:2 \
-    --batch_size 64 \
-    --dataset_name selected_perfect_seed_match_w_linker \
-    --test_dataset_path $data_dir/ISM_data_mutant_miRNA_nonseed.csv \
+    --epochs 100 \
+    --batch_size 8 \
+    --base_model_name HyenaDNA \
+    --model_name HyenaDNA_w_linker_revmiRNA \
+    --dataset_name TargetScan \
+    --test_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_full_length_test.csv \
+    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
+    --use_head \
+    --accumulation_step 8 \
     --evaluate \
-    > evaluate_logs/evaluate_Hyena_ISM_mutant_miRNA_nonseed.log 2>&1 &
+    > evaluate_logs/evaluate_HyenaDNA_TargetScan_full_length.log 2>&1 &

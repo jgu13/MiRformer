@@ -1,6 +1,7 @@
 import os
 import json
 import argparse
+from typing import List
 import matplotlib.pyplot as plt
 
 def plot_performance(
@@ -9,16 +10,22 @@ def plot_performance(
     model_dirs,
     model_names=None,
     training_loss_save_path=None,
-    test_acc_save_path=None
+    test_acc_save_path=None,
+    mRNA_max_lengths=None,
 ):
     """
     Load training losses and test accuracies from list of JSON files,
     plot them in two figures
     """
     performance_dir = os.path.join(os.path.expanduser("~/projects/mirLM/Performance"), dataset_name)
-    model_paths = [os.path.join(performance_dir, model_dir) for model_dir in model_dirs]
-    training_loss_paths = [os.path.join(model_path, f"train_loss_{mRNA_max_len}.json") for model_path in model_paths]
-    test_acc_paths = [os.path.join(model_path, f"test_accuracy_{mRNA_max_len}.json") for model_path in model_paths]
+    if mRNA_max_lengths:
+        model_paths = [os.path.join(performance_dir, model_dirs[0])] * len(mRNA_max_lengths)
+        training_loss_paths = [os.path.join(model_paths[0], f"train_loss_{mRNA_max_len}.json") for mRNA_max_len in mRNA_max_lengths]
+        test_acc_paths = [os.path.join(model_paths[0], f"evaluation_accuracy_{mRNA_max_len}.json") for mRNA_max_len in mRNA_max_lengths]
+    else:
+        model_paths = [os.path.join(performance_dir, model_dir) for model_dir in model_dirs]
+        training_loss_paths = [os.path.join(model_path, f"train_loss_{mRNA_max_len}.json") for model_path in model_paths]
+        test_acc_paths = [os.path.join(model_path, f"evaluation_accuracy_{mRNA_max_len}.json") for model_path in model_paths]
     
     if model_names is None:
         # if model_names are not given, model_names takes the folder name of the model
@@ -75,7 +82,14 @@ if __name__ == '__main__':
         "--mRNA_max_len",
         type=int,
         default=1000,
-        help="Maximum length of mRNA sequences (default: 1000)"
+        help="Maximum length of mRNA sequences (default: 1000)",
+        required=False,
+    )
+    argparser.add_argument(
+        "--mRNA_max_lengths",
+        nargs='+',
+        required=False,
+        help="If you want to compare across differnt lengths of mRNA, give the lengths as integers."
     )
     argparser.add_argument(
         "--dataset_name",
@@ -109,6 +123,7 @@ if __name__ == '__main__':
     args = argparser.parse_args()
     
     mRNA_max_len = args.mRNA_max_len
+    mRNA_max_lengths = args.mRNA_max_lengths
     dataset_name = args.dataset_name
     model_dirs = args.model_dirs
     model_names = args.model_names_in_plot
@@ -117,6 +132,7 @@ if __name__ == '__main__':
     
     plot_performance(
         mRNA_max_len=mRNA_max_len,
+        mRNA_max_lengths=mRNA_max_lengths,
         dataset_name=dataset_name,
         model_dirs=model_dirs,
         model_names=model_names,

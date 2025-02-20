@@ -1181,7 +1181,7 @@ class HyenaDNAModel(nn.Module):
                 )  # (batchsize, seq_len, hidden_size)
                 # input_mask = input_mask.to(self.device)
                 valid_counts = input_mask[:,:,0].sum(dim=1, keepdim=True)  # (batchsize, hidden_size)
-                hidden_states = hidden_states * input_mask  # (batchsize, seq_len, hidden_size)
+                hidden_states = hidden_states * input_mask.float()  # (batchsize, seq_len, hidden_size)
                 # avg pool on seq_len
                 hidden_states_pooled = hidden_states.sum(dim=1) / (valid_counts + epsilon)  # (batchsize, hidden_size)
             else:

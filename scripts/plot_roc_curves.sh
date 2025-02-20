@@ -78,11 +78,17 @@ mirtar_clip_dir=/home/mcb/users/jgu13/projects/mirLM/Performance/DeepMirTar-par-
 #     --method_names TwoTower-HyenaDNA-MLP-CrossAttn Finetuned-HyenaDNA-MLP Baseline-CNN \
 #     --output_file $syn_data/selected_perfect_seed_match_ROC.png
 
+# python scripts/plot_roc_curves.py \
+#     --json_files /home/mcb/users/jgu13/projects/mirLM/Performance/ISM_data_mutant_mRNA_seed/CNN/predictions_40.json \
+#                 /home/mcb/users/jgu13/projects/mirLM/Performance/ISM_data_mutant_mRNA_nonseed/CNN/predictions_40.json \
+#                 /home/mcb/users/jgu13/projects/mirLM/Performance/ISM_data_mutant_miRNA_seed/CNN/predictions_40.json \
+#                 /home/mcb/users/jgu13/projects/mirLM/Performance/ISM_data_mutant_miRNA_nonseed/CNN/predictions_40.json \
+#     --method_names ISM-mRNA-seed ISM-mRNA-nonseed ISM-miRNA-seed ISM-miRNA-nonseed \
+#     --plot_title "CNN on Classifying In-Silico Pertubed mRNA or miRNA pairs" \
+#     --output_file /home/mcb/users/jgu13/projects/mirLM/Performance/CNN_ISM_ROC.png
+
 python scripts/plot_roc_curves.py \
-    --json_files /home/mcb/users/jgu13/projects/mirLM/Performance/ISM_data_mutant_mRNA_seed/CNN/predictions_40.json \
-                /home/mcb/users/jgu13/projects/mirLM/Performance/ISM_data_mutant_mRNA_nonseed/CNN/predictions_40.json \
-                /home/mcb/users/jgu13/projects/mirLM/Performance/ISM_data_mutant_miRNA_seed/CNN/predictions_40.json \
-                /home/mcb/users/jgu13/projects/mirLM/Performance/ISM_data_mutant_miRNA_nonseed/CNN/predictions_40.json \
-    --method_names ISM-mRNA-seed ISM-mRNA-nonseed ISM-miRNA-seed ISM-miRNA-nonseed \
-    --plot_title "CNN on Classifying In-Silico Pertubed mRNA or miRNA pairs" \
-    --output_file /home/mcb/users/jgu13/projects/mirLM/Performance/CNN_ISM_ROC.png
+    --json_files /home/mcb/users/jgu13/projects/mirLM/Performance/TargetScan_test/HyenaDNA_w_linker_revmiRNA/predictions_30.json \
+    --method_names Finetuned-HyenaDNA \
+    --plot_title "HyenaDNA performance on mRNA-miRNA pair classification" \
+    --output_file /home/mcb/users/jgu13/projects/mirLM/Performance/TargetScan_test/HyenaDNA_w_linker_revmiRNA/ROC.png

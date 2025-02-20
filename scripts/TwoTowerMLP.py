@@ -1,6 +1,7 @@
 import os
 import math
 import json
+import numpy as np
 import torch
 from typing import List
 import torch.nn as nn
@@ -15,7 +16,6 @@ PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 class TwoTowerMLP(mirLM):
     def __init__(
         self,
-        hidden_sizes: List[int]=None,
         **kwargs,
     ):
         """
@@ -27,15 +27,20 @@ class TwoTowerMLP(mirLM):
         )
 
         # Initialize the MLP head
-        if hidden_sizes is None:
-            hidden_sizes = [self.backbone_cfg["d_model"] * 2, self.backbone_cfg["d_model"] * 2]
+        hidden_size = self.basemodel_cfg.get("hidden_size", "")
+        num_hidden_layers = self.basemodel_cfg.get("num_hidden_layers", "")
+        if hidden_size and num_hidden_layers:
+            hidden_sizes = [hidden_size] * num_hidden_layers
+        elif self.basemodel_cfg.get("hidden_sizes", ""):
+            hidden_sizes = self.basemodel_cfg["hidden_sizes"]
+        print("Hidden size = ", hidden_sizes)
         self.mlp_head = LinearHead(
             d_model=self.backbone_cfg["d_model"], 
             d_output=self.n_classes, 
             hidden_sizes=hidden_sizes,
         )
 
-        # Initialize Q and KV layers
+        # Initialize Q and KV hidden_
         self.q_layer = nn.Linear(self.backbone_cfg["d_model"], self.backbone_cfg["d_model"])
         self.kv_layer = nn.Linear(self.backbone_cfg["d_model"], self.backbone_cfg["d_model"])
      
@@ -73,19 +78,18 @@ class TwoTowerMLP(mirLM):
 
     def run_training(
         self,
+        model,
         train_loader,
         optimizer,
         epoch,
         loss_fn,
+        accumulation_step=1,
         log_interval=10,
-        epoch_loss=0.0,
     ):
         """Training loop."""
-        self.mlp_head.train()
-        self.q_layer.train()
-        self.kv_layer.train()
-        self.hyena.train()
-        
+        # set the entire model to train mode
+        model.train()
+        epoch_loss=0.0
         loss_ls = []
         for batch_idx, (
             mRNA_seq,
@@ -102,11 +106,11 @@ class TwoTowerMLP(mirLM):
                 target.to(self.device),
             )
             output = self.forward(
-                            mRNA_seq=mRNA_seq,
-                            miRNA_seq=miRNA_seq,
-                            mRNA_seq_mask=mRNA_seq_mask,
-                            miRNA_seq_mask=miRNA_seq_mask
-                            )  # (batch_size, 1)
+                mRNA_seq=mRNA_seq,
+                miRNA_seq=miRNA_seq,
+                mRNA_seq_mask=mRNA_seq_mask,
+                miRNA_seq_mask=miRNA_seq_mask
+            )  # (batch_size, 1)
             loss = loss_fn(output.squeeze().sigmoid(), target.squeeze())
 
             if self.accumulation_step is not None:
@@ -162,12 +166,10 @@ class TwoTowerMLP(mirLM):
     
     def run_testing(
          self,
+         model,
          test_loader):
         """Test loop."""
-        self.mlp_head.eval()
-        self.q_layer.eval()
-        self.kv_layer.eval()
-        self.hyena.eval()
+        model.eval()
         
         if self.ddp:
             local_correct = 0
@@ -217,14 +219,22 @@ class TwoTowerMLP(mirLM):
             )
             return accuracy       
 
-    def run_evaluating(
+    @staticmethod
+    def assess_acc(predictions, targets, thresh=0.5):
+        y = np.asarray(targets)
+        y_hat = np.asarray(predictions)
+        y_hat = np.uint8(y_hat > thresh)
+        correct = np.sum(y == y_hat)
+        acc = correct / len(y)
+        return acc
+    
+    def run_evaluation(
             self,
-            test_loader):
+            model,
+            test_loader,
+            ):
         """Test loop."""
-        self.mlp_head.eval()
-        self.q_layer.eval()
-        self.kv_layer.eval()
-        self.hyena.eval()
+        model.eval()
         
         predictions = []
         true_labels = []
@@ -247,8 +257,9 @@ class TwoTowerMLP(mirLM):
                 targets = target.cpu().view(-1).numpy().tolist()
                 predictions.extend(probabilities)
                 true_labels.extend(targets)
-
-        return predictions, true_labels
+        
+        acc = self.assess_acc(predictions=predictions, targets=true_labels)
+        return acc, predictions, true_labels
     
     def forward(self, 
                 mRNA_seq,

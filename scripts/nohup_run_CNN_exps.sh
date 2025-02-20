@@ -56,21 +56,35 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 #     --mRNA_max_len 40 \
 #     --miRNA_max_len 26 \
 #     --device cuda:1 \
-#     --num_epochs 10 \
+#     --num_epochs 100 \
 #     --batch_size 64 \
 #     --dataset_name miRAW_noL_noMissing \
 #     --train_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_train.csv \
 #     --val_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_validation.csv \
-#     > output_logs/output_CNN_miRaw_noL_noMissing_epoch_10.log 2>&1 & # requires parameter changes before running
+#     > output_logs/output_CNN_miRaw_noL_noMissing.log 2>&1 & # requires parameter changes before running
 
-# train on synthetic dataset
+# continue train on selceted perfect seed match 
+# nohup python scripts/baseline_CNN.py \
+#     --mRNA_max_len 40 \
+#     --miRNA_max_len 26 \
+#     --device cuda:2 \
+#     --num_epochs 50 \
+#     --batch_size 64 \
+#     --dataset_name selected_perfect_seed_match \
+#     --train_dataset_path $data_dir/selected_perfect_seed_match_train.csv \
+#     --val_dataset_path $data_dir/selected_perfect_seed_match_validation.csv \
+#     --resume_ckpt /home/mcb/users/jgu13/projects/mirLM/checkpoints/miRAW_noL_noMissing/CNN/40/checkpoint_epoch_final.pth \
+#     > output_logs/output_CNN_selected_perfect_seed_match.log 2>&1 &
+
+# continue train on TargetScan
 nohup python scripts/baseline_CNN.py \
-    --mRNA_max_len 40 \
-    --miRNA_max_len 26 \
-    --device cuda:2 \
-    --num_epochs 50 \
+    --mRNA_max_len 994 \
+    --miRNA_max_len 24 \
+    --device cuda:1 \
+    --num_epochs 100 \
     --batch_size 64 \
-    --dataset_name selected_perfect_seed_match \
-    --train_dataset_path $data_dir/selected_perfect_seed_match_train.csv \
-    --val_dataset_path $data_dir/selected_perfect_seed_match_validation.csv \
-    > output_logs/output_CNN_selected_perfect_seed_match.log 2>&1 &
+    --dataset_name TargetScan \
+    --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_1024_train.csv \
+    --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_1024_validation.csv \
+    --accumulation_step 2\
+    > output_logs/output_CNN_TargetScan_w_linker_revmiRNA.log 2>&1 &

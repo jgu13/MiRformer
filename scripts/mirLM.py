@@ -11,7 +11,6 @@ import torch.distributed as dist
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, DistributedSampler
 import pandas as pd
-from sklearn.model_selection import train_test_split
 
 # Local imports
 from Hyena_layer import HyenaDNAPreTrainedModel, HyenaDNAModel
@@ -24,15 +23,15 @@ class mirLM(nn.Module):
         self,
         mRNA_max_length: int,
         miRNA_max_length: int,
-        train_dataset_path: str,
-        val_dataset_path: str,
-        test_dataset_path:str,
-        dataset_name: str,
-        base_model_name: str,
-        evaluate: bool,
-        device: str,
-        epochs:int,
-        batch_size:int,
+        train_dataset_path: str=None,
+        val_dataset_path: str=None,
+        test_dataset_path:str=None,
+        dataset_name: str="",
+        base_model_name: str="",
+        evaluate: bool=False,
+        device: str='cuda',
+        epochs:int=100,
+        batch_size:int=64,
         ddp:bool=False,
         resume_ckpt:str=None,
         model_name: str=None,
@@ -41,8 +40,10 @@ class mirLM(nn.Module):
         rc_aug:bool = False, # reverse complement augmentation
         add_eos:bool = False, # add end of sentence token
         use_head:bool = True,
+        accumulation_step:int=1,
         n_classes:int = 1,
         backbone_cfg=None,
+        basemodel_cfg=None,
         **kwargs,
     ):
         super().__init__()
@@ -78,13 +79,14 @@ class mirLM(nn.Module):
         self.use_padding = use_padding
         self.rc_aug = rc_aug  
         self.add_eos = add_eos  
-        self.accumulation_step = max(1, 256 // self.batch_size)  # effectively change batch size to 256
+        self.accumulation_step = accumulation_step  # effectively change batch size to 256
         if self.rank == 0:
             print("Batch size == ", self.batch_size)
 
         # model to be used for training
         pretrained_model_name = "hyenadna-small-32k-seqlen"  # use None if training from scratch
-
+        # pretrained_model_name = None
+        
         # we need these for the decoder head, if using
         self.use_head = use_head
         self.n_classes = n_classes
@@ -143,8 +145,18 @@ class mirLM(nn.Module):
             except TypeError as exc:
                 raise TypeError("backbone_cfg must not be NoneType.") from exc
         
-        self.learning_rate = self.backbone_cfg["lr"] * self.world_size # scale learning rate accordingly
-        self.weight_decay = self.backbone_cfg["weight_decay"]  
+        if basemodel_cfg:
+            with open(basemodel_cfg, "r", encoding="utf-8") as f:
+                self.basemodel_cfg = json.load(f)
+            self.learning_rate = self.basemodel_cfg["lr"] * self.world_size # scale learning rate accordingly
+            self.weight_decay = self.basemodel_cfg["weight_decay"]
+            if self.base_model_name == "HyenaDNA":
+                self.alpha = self.basemodel_cfg["alpha"]
+                self.margin = self.basemodel_cfg["margin"]
+                print("Alpha = ", self.alpha)
+                print("Margin = ", self.margin)
+            print("learning rate = ", self.learning_rate)
+            print("weight decay = ", self.weight_decay)
 
     @classmethod
     def create_model(cls, **kwargs):
@@ -223,7 +235,7 @@ class mirLM(nn.Module):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
     
-    def run(self):
+    def run(self, model):
         self.seed_everything(seed=42) 
            
         if self.rank == 0:
@@ -241,11 +253,8 @@ class mirLM(nn.Module):
             #     f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES','(unset)')} "
             #     f"device={device}, torch.cuda.current_device()={torch.cuda.current_device()}"
             # )
-            print("learning rate = ", self.learning_rate)
-            print("weight decay = ", self.weight_decay)
         
         # wrap self with a local variable, call training, testing, evaluting on model instead of self
-        model = self
         
         if self.evaluate_flag:
             ckpt_path = os.path.join(PROJ_HOME, 
@@ -255,7 +264,7 @@ class mirLM(nn.Module):
                                      str(self.mRNA_max_len), 
                                      "checkpoint_epoch_final.pth")
             loaded_data = torch.load(ckpt_path, map_location=self.device)
-            self.load_state_dict(loaded_data["model_state_dict"])
+            model.load_state_dict(loaded_data["model_state_dict"])
             print(f"Loaded checkpoint from {ckpt_path}")
 
         # create tokenizer
@@ -278,6 +287,7 @@ class mirLM(nn.Module):
                     rc_aug=self.rc_aug,
                     add_eos=self.add_eos,
                     concat=True,
+                    add_linker=True,
                 )
             elif self.base_model_name == 'TwoTowerMLP':
                 ds_test = miRawDataset(
@@ -300,27 +310,35 @@ class mirLM(nn.Module):
                     D_train,
                     mRNA_max_length=self.mRNA_max_len,
                     miRNA_max_length=self.miRNA_max_len,
+                    seed_start_col="seed start",
+                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
                     add_eos=self.add_eos,
                     concat=True,
+                    add_linker=True,
                 )
                 ds_val = miRawDataset(
                     D_val,
                     mRNA_max_length=self.mRNA_max_len,
                     miRNA_max_length=self.miRNA_max_len,
+                    seed_start_col="seed start",
+                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
                     add_eos=self.add_eos,
                     concat=True,
+                    add_linker=True,
                 )
             elif self.base_model_name == 'TwoTowerMLP':
                 ds_train = miRawDataset(
                     D_train,
                     mRNA_max_length=self.mRNA_max_len,
                     miRNA_max_length=self.miRNA_max_len,
+                    seed_start_col="seed start",
+                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
@@ -331,6 +349,8 @@ class mirLM(nn.Module):
                     D_val,
                     mRNA_max_length=self.mRNA_max_len,
                     miRNA_max_length=self.miRNA_max_len,
+                    seed_start_col="seed start",
+                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
@@ -363,10 +383,13 @@ class mirLM(nn.Module):
                                      shuffle=False) 
         
         if self.evaluate_flag:
+            model.to(self.device)
             test_dataset_name = os.path.basename(self.test_dataset_path).split('.')[0]
-            predictions, true_labels = model.run_evaluating(
+            acc, predictions, true_labels = model.run_evaluation(
+                model=model,
                 test_loader = test_loader,
             )
+            print("Evaluation Accuracy = ", acc)
             # Save predictions and true labels
             output_path = os.path.join(PROJ_HOME, "Performance", test_dataset_name, self.model_name)
             os.makedirs(output_path, exist_ok=True)
@@ -378,7 +401,7 @@ class mirLM(nn.Module):
             # ---------- DDP Wrapping -----------
             if self.ddp:
                 model = nn.parallel.DistributedDataParallel(
-                        self,
+                        model,
                         device_ids=[self.local_rank],
                         output_device=self.local_rank,
                         find_unused_parameters=False,
@@ -389,7 +412,7 @@ class mirLM(nn.Module):
 
             # create optimizer
             optimizer = optim.AdamW(
-                model.parameters()#, lr=self.learning_rate, weight_decay=self.weight_decay
+                model.parameters(), lr=self.learning_rate, weight_decay=self.weight_decay
             )
 
             # start training or evaluation
@@ -405,10 +428,11 @@ class mirLM(nn.Module):
                 loaded_data = torch.load(self.resume_ckpt, map_location=self.device)
                 start_epoch = loaded_data["epoch"] + 1  # e.g., if ckpt epoch=20, we start at 21
                 # Because we wrapped with DDP, load into model.module if it's DDP
-                if isinstance(self, nn.parallel.DistributedDataParallel):
+                if isinstance(model, nn.parallel.DistributedDataParallel):
                     model.module.load_state_dict(loaded_data["model_state_dict"])
                 else:
                     model.load_state_dict(loaded_data["model_state_dict"])
+                    
                 optimizer.load_state_dict(loaded_data["optimizer_state_dict"])
                 # If DDP, broadcast the states from rank=0 to all ranks
                 if self.ddp:
@@ -430,18 +454,24 @@ class mirLM(nn.Module):
             os.makedirs(model_checkpoints_dir, exist_ok=True)
             
             start = time.time()
-
+            best_acc = 0
             for epoch in range(start_epoch, final_epoch):
                 if self.ddp:
                     # Important: set epoch for DistributedSampler to shuffle data consistently
-                    train_loader.sampler.set_epoch(epoch)       
-                average_loss = model.run_training(
+                    train_loader.sampler.set_epoch(epoch)  
+                         
+                average_loss = self.run_training(
+                    model=model,
                     train_loader=train_loader,
                     optimizer=optimizer,
                     epoch=epoch,
                     loss_fn=loss_fn,
+                    tokenizer=tokenizer,
+                    margin=self.margin,
+                    alpha=self.alpha,
                 )
-                accuracy = model.run_testing(
+                accuracy = self.run_testing(
+                    model=model,
                     test_loader=test_loader,
                 )
                 
@@ -449,11 +479,11 @@ class mirLM(nn.Module):
                     average_loss_list.append(average_loss)
                     accuracy_list.append(accuracy)
                 
-                # save checkpoints on cuda:0 only
-                if (epoch + 1) % 10 == 0 and self.rank == 0:
+                # only save the best checkpoint
+                if accuracy > best_acc and self.rank == 0:
                     # Save the model checkpoint
                     checkpoint_path = os.path.join(model_checkpoints_dir, 
-                                                   f"checkpoint_epoch_{epoch}.pth")
+                                                   f"checkpoint_best.pth")
                     
                     self.save_checkpoint(optimizer, 
                                          epoch, 
@@ -461,13 +491,13 @@ class mirLM(nn.Module):
                                          accuracy, 
                                          checkpoint_path)
 
-                    cost = time.time() - start
-                    remain = cost/(epoch + 1) * (final_epoch - epoch - 1) /3600
-                    print(f'still remain: {remain} hrs.')
-            # save the final model
+                cost = time.time() - start
+                remain = cost/(epoch + 1) * (final_epoch - epoch - 1) /3600
+                print(f'still remain: {remain} hrs.')
+
             if self.rank == 0:
-                final_ckpt_path = os.path.join(model_checkpoints_dir, "checkpoint_epoch_final.pth")
-                self.save_checkpoint(optimizer, final_epoch - 1, average_loss, accuracy, final_ckpt_path)
+            #     final_ckpt_path = os.path.join(model_checkpoints_dir, "checkpoint_epoch_final.pth")
+            #     self.save_checkpoint(optimizer, final_epoch - 1, average_loss, accuracy, final_ckpt_path)
                 time_taken = time.time() - start
                 print(f"Time taken for {self.epochs} epochs = {(time_taken / 60):.2f} min.")
                 
@@ -476,7 +506,7 @@ class mirLM(nn.Module):
                 os.makedirs(perf_dir, exist_ok=True)
 
                 with open(
-                    os.path.join(perf_dir, f"test_accuracy_{self.mRNA_max_len}.json"),
+                    os.path.join(perf_dir, f"evaluation_accuracy_{self.mRNA_max_len}.json"),
                     "w",
                     encoding="utf-8"
                 ) as fp:
