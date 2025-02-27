@@ -9,8 +9,9 @@ def plot_performance(
     dataset_name,
     model_dirs,
     model_names=None,
-    training_loss_save_path=None,
+    train_loss_save_path=None,
     test_acc_save_path=None,
+    test_loss_save_path=None,
     mRNA_max_lengths=None,
 ):
     """
@@ -20,23 +21,22 @@ def plot_performance(
     performance_dir = os.path.join(os.path.expanduser("~/projects/mirLM/Performance"), dataset_name)
     if mRNA_max_lengths:
         model_paths = [os.path.join(performance_dir, model_dirs[0])] * len(mRNA_max_lengths)
-        training_loss_paths = [os.path.join(model_paths[0], f"train_loss_{mRNA_max_len}.json") for mRNA_max_len in mRNA_max_lengths]
+        train_loss_paths = [os.path.join(model_paths[0], f"train_loss_{mRNA_max_len}.json") for mRNA_max_len in mRNA_max_lengths]
         test_acc_paths = [os.path.join(model_paths[0], f"evaluation_accuracy_{mRNA_max_len}.json") for mRNA_max_len in mRNA_max_lengths]
     else:
-        model_paths = [os.path.join(performance_dir, model_dir) for model_dir in model_dirs]
-        training_loss_paths = [os.path.join(model_path, f"train_loss_{mRNA_max_len}.json") for model_path in model_paths]
-        test_loss_paths = [os.path.join(model_path, f"evaluation_loss_{mRNA_max_len}.json") for model_path in model_paths]
+        model_paths = [os.path.join(performance_dir, model_dir, str(10)) for model_dir in model_dirs]
+        train_loss_paths = [os.path.join(model_path, f"train_loss_{mRNA_max_len}.json") for model_path in model_paths]
         test_acc_paths = [os.path.join(model_path, f"evaluation_accuracy_{mRNA_max_len}.json") for model_path in model_paths]
+        test_loss_paths = [os.path.join(model_path, f"test_loss_{mRNA_max_len}.json") for model_path in model_paths]
     
     if model_names is None:
         # if model_names are not given, model_names takes the folder name of the model
         model_names = model_dirs
     
-    plt.figure(figsize=(9,6))
-    for json_file, method_name in zip(training_loss_paths, model_names):
+    plt.figure(figsize=(7,5))
+    for json_file, method_name in zip(train_loss_paths, model_names):
         with open(json_file, "r", encoding='utf-8') as f:
             training_loss = json.load(f)
-        
         epochs = range(len(training_loss))
         plt.plot(epochs, training_loss, label=f"{method_name}")
     
@@ -48,13 +48,14 @@ def plot_performance(
     plt.tight_layout()
     
     # save or show the plot
-    if training_loss_save_path:
-        plt.savefig(training_loss_save_path, dpi=500, bbox_inches="tight")
-        print(f"Training loss plot is saved to {training_loss_save_path}")
+    if train_loss_save_path:
+        plt.savefig(train_loss_save_path, dpi=500, bbox_inches="tight")
+        print(f"Training loss plot is saved to {train_loss_save_path}")
     else:
         plt.show()
     
-    plt.figure(figsize=(9,6))
+    # plot accuracy
+    plt.figure(figsize=(7,5))
     for json_file, method_name in zip(test_acc_paths, model_names):
         with open(json_file, "r", encoding='utf-8') as f:
             test_acc = json.load(f)
@@ -63,8 +64,8 @@ def plot_performance(
         plt.plot(epochs, test_acc, label=f"{method_name} (Highest = {max_accuracy:.2f})")
     
     plt.xlabel('Epochs')
-    plt.ylabel('Test Accuracy (%)')
-    plt.title('Test Accuracy Comparison')
+    # plt.ylabel('Test Accuracy (%)')
+    plt.title('Test Accuracy')
     plt.legend(loc="lower right")
     plt.grid(True)
     plt.tight_layout()
@@ -76,26 +77,25 @@ def plot_performance(
     else:
         plt.show()
     
-    # plot 
-    plt.figure(figsize=(9,6))
-    for json_file, method_name in zip(test_acc_paths, model_names):
+    # plot test loss
+    plt.figure(figsize=(7,5))
+    for json_file, method_name in zip(test_loss_paths, model_names):
         with open(json_file, "r", encoding='utf-8') as f:
-            test_acc = json.load(f)
-        max_accuracy = max(test_acc)
-        epochs = range(len(test_acc))
-        plt.plot(epochs, test_acc, label=f"{method_name} (Highest = {max_accuracy:.2f})")
+            test_loss = json.load(f)
+        epochs = range(len(test_loss))
+        plt.plot(epochs, test_loss, label=f"{method_name}")
     
     plt.xlabel('Epochs')
-    plt.ylabel('Test Accuracy (%)')
-    plt.title('Test Accuracy Comparison')
+    plt.ylabel('')
+    plt.title('Evaluation Loss')
     plt.legend(loc="lower right")
     plt.grid(True)
     plt.tight_layout()
     
     # save or show the plot
-    if test_acc_save_path:
-        plt.savefig(test_acc_save_path, dpi=500, bbox_inches="tight")
-        print(f"Test accuracy plot is saved to {test_acc_save_path}")
+    if test_loss_save_path:
+        plt.savefig(test_loss_save_path, dpi=500, bbox_inches="tight")
+        print(f"Test accuracy plot is saved to {test_loss_save_path}")
     else:
         plt.show()
     
@@ -127,7 +127,7 @@ if __name__ == '__main__':
         help="Name of the folder to each model of which performance is plotted"
     )
     argparser.add_argument(
-        "--model_names_in_plot",
+        "--model_names",
         nargs='+',
         required=False,
         help="Name of the model to be used in the plot legend"
@@ -143,23 +143,16 @@ if __name__ == '__main__':
         type=str,
         required=False,
         help="Path to save test accuracy plot"
+    )   
+    argparser.add_argument(
+        "--test_loss_save_path",
+        type=str,
+        required=False,
+        help="Path to save test loss plot"
     )
     args = argparser.parse_args()
-    
-    mRNA_max_len = args.mRNA_max_len
-    mRNA_max_lengths = args.mRNA_max_lengths
-    dataset_name = args.dataset_name
-    model_dirs = args.model_dirs
-    model_names = args.model_names_in_plot
-    train_loss_save_path = args.train_loss_save_path
-    test_acc_save_path = args.test_acc_save_path
+    arg_dict = vars(args)
     
     plot_performance(
-        mRNA_max_len=mRNA_max_len,
-        mRNA_max_lengths=mRNA_max_lengths,
-        dataset_name=dataset_name,
-        model_dirs=model_dirs,
-        model_names=model_names,
-        training_loss_save_path=train_loss_save_path,
-        test_acc_save_path=test_acc_save_path,
-        )
+        **arg_dict
+    )

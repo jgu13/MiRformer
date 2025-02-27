@@ -2,11 +2,11 @@ nohup python \
     scripts/single_base_perturbation.py \
     --mRNA_max_length 30 \
     --miRNA_max_length 24 \
-    --device cuda:2 \
+    --device cuda:3 \
     --base_model_name HyenaDNA \
-    --model_name HyenaDNA_w_linker_revmiRNA \
+    --model_name HyenaDNA_miRNA_alpha_0.5 \
     --dataset_name TargetScan \
-    --test_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_validation.csv \
+    --test_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_train.csv \
     --use_head \
-    --save_plot_dir /home/mcb/users/jgu13/projects/mirLM/Performance/TargetScan_test/viz_seq_perturbation/7 \
+    --save_plot_dir /home/mcb/users/jgu13/projects/mirLM/Performance/TargetScan_test/viz_seq_perturbation/10 \
     > single_base_perturbation.out 2>&1 &

@@ -32,6 +32,7 @@ nohup python scripts/hyperparams_tuning.py \
     --mRNA_max_len 10000 \
     --miRNA_max_len 24 \
     --device cuda:1 \
+    --device cuda:1 \
     --epochs 100 \
     --batch_size 4 \
     --base_model_name HyenaDNA \

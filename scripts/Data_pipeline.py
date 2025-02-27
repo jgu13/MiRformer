@@ -311,6 +311,10 @@ class miRawDataset(torch.utils.data.Dataset):
         miRNA_max_length=26,
         mRNA_col="mRNA sequence",
         miRNA_col="miRNA sequence",
+        mRNA_seed_start_col=None,
+        mRNA_seed_end_col=None,
+        miRNA_seed_start_col=None,
+        miRNA_seed_end_col=None,
         tokenizer=None,
         use_padding=None,
         rc_aug=None,
@@ -331,6 +335,18 @@ class miRawDataset(torch.utils.data.Dataset):
         self.mRNA_sequences = self.data[[mRNA_col]].values
         self.miRNA_sequences = self.data[[miRNA_col]].values
         self.labels = self.data[["label"]].values
+        if mRNA_seed_start_col is not None and mRNA_seed_end_col is not None:
+            self.mRNA_seed_starts = self.data[[mRNA_seed_start_col]].values
+            self.mRNA_seed_ends = self.data[[mRNA_seed_end_col]].values
+        else:
+            self.mRNA_seed_starts = None
+            self.mRNA_seed_ends = None
+        if miRNA_seed_start_col is not None and miRNA_seed_end_col is not None:
+            self.miRNA_seed_starts = self.data[[miRNA_seed_start_col]].values
+            self.miRNA_seed_ends = self.data[[miRNA_seed_end_col]].values
+        else:
+            self.miRNA_seed_starts = None
+            self.miRNA_seed_ends = None
 
     def __len__(self):
         return len(self.data)
@@ -340,7 +356,18 @@ class miRawDataset(torch.utils.data.Dataset):
         mRNA_seq = self.mRNA_sequences[idx][0]
         miRNA_seq = self.miRNA_sequences[idx][0]
         labels = self.labels[idx]
-
+        if self.mRNA_seed_starts is not None and self.mRNA_seed_ends is not None:
+            mRNA_seed_start = self.mRNA_seed_starts[idx][0]
+            mRNA_seed_end = self.mRNA_seed_ends[idx][0]
+        else:
+            mRNA_seed_start = None
+            mRNA_seed_end = None
+        if self.miRNA_seed_starts is not None and self.miRNA_seed_ends is not None:
+            miRNA_seed_start = self.miRNA_seed_starts[idx][0]
+            miRNA_seed_end = self.miRNA_seed_ends[idx][0]
+        else:
+            miRNA_seed_start = None
+            miRNA_seed_end = None        
         # replace U with T
         miRNA_seq = miRNA_seq.replace("U", "T")[::-1]
 
@@ -395,7 +422,7 @@ class miRawDataset(torch.utils.data.Dataset):
             concat_seq_mask = torch.tensor(concat_seq_mask, dtype=torch.long)
             target = torch.tensor([labels], dtype=torch.float)
             
-            return concat_seq_tokens, concat_seq_mask, target
+            return concat_seq_tokens, concat_seq_mask, mRNA_seed_start, mRNA_seed_end, miRNA_seed_start, miRNA_seed_end, target
         else:
             # convert to tensor
             mRNA_seq_tokens = torch.tensor(mRNA_seq_tokens, dtype=torch.long)
@@ -403,4 +430,4 @@ class miRawDataset(torch.utils.data.Dataset):
             mRNA_seq_mask = torch.tensor(mRNA_seq_mask, dtype=torch.long)
             miRNA_seq_mask = torch.tensor(miRNA_seq_mask, dtype=torch.long)
             target = torch.tensor([labels], dtype=torch.float)
-            return mRNA_seq_tokens, miRNA_seq_tokens, mRNA_seq_mask, miRNA_seq_mask, target
+            return mRNA_seq_tokens, miRNA_seq_tokens, mRNA_seq_mask, miRNA_seq_mask, mRNA_seed_start, mRNA_seed_end, miRNA_seed_start, miRNA_seed_end, target

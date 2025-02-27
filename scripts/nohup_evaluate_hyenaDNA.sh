@@ -124,17 +124,16 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 # evaluate on TargetScan dataset
 nohup python \
     scripts/main.py \
-    --mRNA_max_length 20371 \
+    --mRNA_max_length 500 \
     --miRNA_max_length 24 \
-    --device cuda:2 \
+    --device cuda:3 \
     --epochs 100 \
-    --batch_size 8 \
+    --batch_size 32 \
     --base_model_name HyenaDNA \
-    --model_name HyenaDNA_w_linker_revmiRNA \
+    --model_name HyenaDNA_miRNA_500 \
     --dataset_name TargetScan \
-    --test_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_full_length_test.csv \
-    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
+    --test_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_test_500.csv \
+    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyena_long_config.json \
     --use_head \
-    --accumulation_step 8 \
     --evaluate \
-    > evaluate_logs/evaluate_HyenaDNA_TargetScan_full_length.log 2>&1 &
+    > evaluate_logs/evaluate_HyenaDNA_TargetScan_500.log 2>&1 &

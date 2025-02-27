@@ -93,8 +93,8 @@ miRNA_df = pd.read_csv(path, sep='\t')
 # filter for human
 miRNA_df = miRNA_df[miRNA_df["Species ID"] == 9606]
 
-print("Putting together positive samples: ")
-mRNA_len = 10000
+# print("Putting together positive samples: ")
+mRNA_len = 924
 miRNA_len = 24
 linker_len = 6
 seed_len = 8
@@ -144,87 +144,88 @@ print("Time take to put together positive samples = ", (time.time() - start_time
 positive_df = pd.DataFrame(positive_samples)
 print(f"Number of positive samples = {len(positive_df)}.")
 print(f"Maximum mRNA length = {max_len}.")
-positive_df.to_csv(os.path.join(data_dir, "positive_samples_10k.csv"), sep="\t", index=False)
+positive_df.to_csv(os.path.join(data_dir, "positive_samples_long.csv"), sep="\t", index=False)
+
 
 # assemble negative pairs
-# print("Putting together negative samples: ")
-# start_time = time.time()
-# seg_len = total - linker_len - miRNA_len
-# print(f"Segment length = {seg_len}")
+print("Putting together negative samples: ")
+start_time = time.time()
+seg_len = total - linker_len - miRNA_len
+print(f"Segment length = {seg_len}")
 
-# negative_samples = []
-# max_length = 0
-# for negative_pair in negative_pairs:
-#     target_gene = negative_pair.get("Gene Symbol", "")
-#     target_gene_id = negative_pair.get("Gene ID", "")
-#     miRNA_ID = negative_pair.get("miRNA", "")
-#     tran_id = negative_pair.get("Transcript ID", "")
-#     if miRNA_ID: 
-#         miRNA_seq = miRNA_df.loc[miRNA_df["MiRBase ID"] == miRNA_ID, "Mature sequence"]
-#         miRNA_seq=miRNA_seq.values[0]
-#     if target_gene_id and tran_id:
-#         # target_gene_id = target_gene_id.split(".")[0]
-#         # tran_id = tran_id.split(".")[0]
-#         mRNA_seq = mRNA_df.loc[(mRNA_df["Gene ID"] == target_gene_id) & (mRNA_df["Transcript ID"] == tran_id), "mRNA sequence"]
-#         if len(mRNA_seq) > 0:    
-#             mRNA_seq = mRNA_seq.values[0]
-#             # randomly select seg_len-nt mRNA segment
-#             if len(mRNA_seq) < seg_len:
-#                 mRNA_seg = mRNA_seq
-#                 negative_samples.append({"Gene ID": target_gene_id, 
-#                                     "Transcript ID": tran_id,
-#                                     "Gene Symbol": target_gene,
-#                                     "miRNA ID": miRNA_ID,
-#                                     "miRNA sequence": miRNA_seq,
-#                                     "mRNA sequence": mRNA_seg,
-#                                     "seed start": -1,
-#                                     "seed end": -1,
-#                                     "label": 0})
-#             else:
-#                 start = random.randint(0, len(mRNA_seq)-seg_len)
-#                 end = min(start + seg_len, len(mRNA_seq))
-#                 mRNA_seg = mRNA_seq[start:end]
-#                 match = check_complementarity(miRNA_seq, mRNA_seg)
-#                 if match:
-#                     print("Found complementarity in negative samples, re-sampling mRNA segment...")
-#                     max_try = 100 # try for max times
-#                     for i in range(max_try):
-#                         start = random.randint(0, len(mRNA_seq)-seg_len)
-#                         end = min(start + seg_len, len(mRNA_seq))
-#                         mRNA_seg = mRNA_seq[start:end]
-#                         match = check_complementarity(miRNA_seq, mRNA_seg)
-#                         if not match:
-#                             negative_samples.append({"Gene ID": target_gene_id, 
-#                                     "Transcript ID": tran_id,
-#                                     "Gene Symbol": target_gene,
-#                                     "miRNA ID": miRNA_ID,
-#                                     "miRNA sequence": miRNA_seq,
-#                                     "mRNA sequence": mRNA_seg,
-#                                     "seed start": -1,
-#                                     "seed end": -1,
-#                                     "label": 0})
-#                     if i==max_try:
-#                         print(f"Tried for a maximum {max_try} times. Failed to find mRNA segment.")
-#                 else:
-#                     negative_samples.append({"Gene ID": target_gene_id, 
-#                                     "Transcript ID": tran_id,
-#                                     "Gene Symbol": target_gene,
-#                                     "miRNA ID": miRNA_ID,
-#                                     "miRNA sequence": miRNA_seq,
-#                                     "mRNA sequence": mRNA_seg,
-#                                     "seed start": -1,
-#                                     "seed end": -1,
-#                                     "label": 0})
-#                 if len(mRNA_seg) > max_length:
-#                     max_length = len(mRNA_seg)    
-#         else:
-#             print(f"Cannot find mRNA seq for gene id: [{target_gene_id}] and transcript id: [{tran_id}].", flush=True)
+negative_samples = []
+max_length = 0
+for negative_pair in negative_pairs:
+    target_gene = negative_pair.get("Gene Symbol", "")
+    target_gene_id = negative_pair.get("Gene ID", "")
+    miRNA_ID = negative_pair.get("miRNA", "")
+    tran_id = negative_pair.get("Transcript ID", "")
+    if miRNA_ID: 
+        miRNA_seq = miRNA_df.loc[miRNA_df["MiRBase ID"] == miRNA_ID, "Mature sequence"]
+        miRNA_seq=miRNA_seq.values[0]
+    if target_gene_id and tran_id:
+        # target_gene_id = target_gene_id.split(".")[0]
+        # tran_id = tran_id.split(".")[0]
+        mRNA_seq = mRNA_df.loc[(mRNA_df["Gene ID"] == target_gene_id) & (mRNA_df["Transcript ID"] == tran_id), "mRNA sequence"]
+        if len(mRNA_seq) > 0:    
+            mRNA_seq = mRNA_seq.values[0]
+            # randomly select seg_len-nt mRNA segment
+            if len(mRNA_seq) < seg_len:
+                mRNA_seg = mRNA_seq
+                negative_samples.append({"Gene ID": target_gene_id, 
+                                    "Transcript ID": tran_id,
+                                    "Gene Symbol": target_gene,
+                                    "miRNA ID": miRNA_ID,
+                                    "miRNA sequence": miRNA_seq,
+                                    "mRNA sequence": mRNA_seg,
+                                    "seed start": -1,
+                                    "seed end": -1,
+                                    "label": 0})
+            else:
+                start = random.randint(0, len(mRNA_seq)-seg_len)
+                end = min(start + seg_len, len(mRNA_seq))
+                mRNA_seg = mRNA_seq[start:end]
+                match = check_complementarity(miRNA_seq, mRNA_seg)
+                if match:
+                    print("Found complementarity in negative samples, re-sampling mRNA segment...")
+                    max_try = 100 # try for max times
+                    for i in range(max_try):
+                        start = random.randint(0, len(mRNA_seq)-seg_len)
+                        end = min(start + seg_len, len(mRNA_seq))
+                        mRNA_seg = mRNA_seq[start:end]
+                        match = check_complementarity(miRNA_seq, mRNA_seg)
+                        if not match:
+                            negative_samples.append({"Gene ID": target_gene_id, 
+                                    "Transcript ID": tran_id,
+                                    "Gene Symbol": target_gene,
+                                    "miRNA ID": miRNA_ID,
+                                    "miRNA sequence": miRNA_seq,
+                                    "mRNA sequence": mRNA_seg,
+                                    "seed start": -1,
+                                    "seed end": -1,
+                                    "label": 0})
+                    if i==max_try:
+                        print(f"Tried for a maximum {max_try} times. Failed to find mRNA segment.")
+                else:
+                    negative_samples.append({"Gene ID": target_gene_id, 
+                                    "Transcript ID": tran_id,
+                                    "Gene Symbol": target_gene,
+                                    "miRNA ID": miRNA_ID,
+                                    "miRNA sequence": miRNA_seq,
+                                    "mRNA sequence": mRNA_seg,
+                                    "seed start": -1,
+                                    "seed end": -1,
+                                    "label": 0})
+                if len(mRNA_seg) > max_length:
+                    max_length = len(mRNA_seg)    
+        else:
+            print(f"Cannot find mRNA seq for gene id: [{target_gene_id}] and transcript id: [{tran_id}].", flush=True)
 
-# negative_df = pd.DataFrame(negative_samples)
-# print("Number of negative samples = ", len(negative_df))
-# print("Maximum mRNA length = ", max_length)
-# negative_df.to_csv(os.path.join(data_dir, "negative_samples_10k.csv"), sep="\t", index=False)
-# print("Time taken for putting together negative samples = ", (time.time() - start_time)/60)
+negative_df = pd.DataFrame(negative_samples)
+print("Number of negative samples = ", len(negative_df))
+print("Maximum mRNA length = ", max_length)
+negative_df.to_csv(os.path.join(data_dir, "negative_samples_long.csv"), sep="\t", index=False)
+print("Time taken for putting together negative samples = ", (time.time() - start_time)/60)
 
 positive_samples = pd.read_csv(os.path.join(data_dir, "positive_samples_10k.csv"), sep='\t')
 negative_samples = pd.read_csv(os.path.join(data_dir, "negative_samples_10k.csv"), sep='\t')

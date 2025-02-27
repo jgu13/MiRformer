@@ -23,7 +23,7 @@ def predict(model,
         if model.base_model_name == 'HyenaDNA':
             seq = kwargs["seq"]
             seq_mask = kwargs["seq_mask"]
-            output = model(seq, seq_mask)
+            output = model(seq, seq_mask, perturb=False)
         elif model.base_model_name == 'TwoTower':
             mRNA_seq = kwargs["mRNA_seq"]
             miRNA_seq = kwargs["miRNA_seq"]
@@ -94,7 +94,7 @@ def load_model(**args_dict):
                             model.dataset_name, 
                             model.model_name, 
                             str(model.mRNA_max_len), 
-                            "checkpoint_epoch_final.pth")
+                            "checkpoint_epoch_19.pth")
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data["model_state_dict"])
     print(f"Loaded checkpoint from {ckpt_path}")
@@ -154,7 +154,7 @@ def main():
     labels = test_data[["label"]].values
     
     # Testing the first sequence
-    i=423
+    i=1899
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]

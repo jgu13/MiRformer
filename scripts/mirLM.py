@@ -150,8 +150,14 @@ class mirLM(nn.Module):
                 self.basemodel_cfg = json.load(f)
             self.learning_rate = self.basemodel_cfg["lr"] * self.world_size # scale learning rate accordingly
             self.weight_decay = self.basemodel_cfg["weight_decay"]
+            self.accumulation_step = self.basemodel_cfg["accumulation_step"]
             print("learning rate = ", self.learning_rate)
             print("weight decay = ", self.weight_decay)
+            if self.base_model_name == "HyenaDNA":
+                self.alpha = self.basemodel_cfg["alpha"]
+                self.margin = self.basemodel_cfg["margin"]
+                print("Alpha = ", self.alpha)
+                print("Margin = ", self.margin)
 
     @classmethod
     def create_model(cls, **kwargs):
@@ -277,6 +283,8 @@ class mirLM(nn.Module):
                     D_test,
                     mRNA_max_length=self.mRNA_max_len, # pad to mRNA max length
                     miRNA_max_length=self.miRNA_max_len, # pad to miRNA max length
+                    seed_start_col="seed start",
+                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
@@ -289,6 +297,8 @@ class mirLM(nn.Module):
                     D_test,
                     mRNA_max_length=self.mRNA_max_len, # pad to mRNA max length
                     miRNA_max_length=self.miRNA_max_len, # pad to miRNA max length
+                    seed_start_col="seed start",
+                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
@@ -305,6 +315,8 @@ class mirLM(nn.Module):
                     D_train,
                     mRNA_max_length=self.mRNA_max_len,
                     miRNA_max_length=self.miRNA_max_len,
+                    seed_start_col="seed start",
+                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
@@ -316,6 +328,8 @@ class mirLM(nn.Module):
                     D_val,
                     mRNA_max_length=self.mRNA_max_len,
                     miRNA_max_length=self.miRNA_max_len,
+                    seed_start_col="seed start",
+                    seed_end_col="seed end",
                     tokenizer=tokenizer,
                     use_padding=self.use_padding,
                     rc_aug=self.rc_aug,
@@ -434,6 +448,7 @@ class mirLM(nn.Module):
             
             average_loss_list = []
             accuracy_list = []
+            average_diff = []
             
             model_checkpoints_dir = os.path.join(
                         PROJ_HOME, 
@@ -446,6 +461,8 @@ class mirLM(nn.Module):
             
             start = time.time()
             best_acc = 0
+            counter = 0 # counts epochs with no improvement
+            patience = 10
             for epoch in range(start_epoch, final_epoch):
                 if self.ddp:
                     # Important: set epoch for DistributedSampler to shuffle data consistently
@@ -457,35 +474,48 @@ class mirLM(nn.Module):
                     optimizer=optimizer,
                     epoch=epoch,
                     loss_fn=loss_fn,
+                    tokenizer=tokenizer,
+                    margin=self.margin,
+                    alpha=self.alpha,
                 )
-                accuracy = self.run_testing(
+                accuracy, diff_score, _ = self.run_testing(
                     model=model,
                     test_loader=test_loader,
+                    tokenizer=tokenizer,
+                    loss_fn=loss_fn,
+                    alpha=self.alpha,
+                    margin=self.margin,
                 )
                 
                 if self.rank == 0: 
                     average_loss_list.append(average_loss)
                     accuracy_list.append(accuracy)
+                    average_diff.append(diff_score)
                 
-                # only save the best checkpoint
-                if accuracy > best_acc and self.rank == 0:
+                if (epoch + 1) % 50 == 0 and self.rank == 0:
                     # Save the model checkpoint
                     checkpoint_path = os.path.join(model_checkpoints_dir, 
-                                                   f"checkpoint_best.pth")
-                    
+                                                   f"checkpoint_epoch_{epoch+1}.pth")
                     self.save_checkpoint(optimizer, 
                                          epoch, 
                                          average_loss, 
                                          accuracy, 
                                          checkpoint_path)
+                # else:
+                #     counter += 1
+                
+                # Check if early stopping condition is met.
+                # if counter >= patience and self.rank == 0:
+                #     print(f"Early stopping triggered at epoch {epoch}. No improvement for {patience} consecutive epochs.")
+                #     break
 
                 cost = time.time() - start
                 remain = cost/(epoch + 1) * (final_epoch - epoch - 1) /3600
                 print(f'still remain: {remain} hrs.')
 
             if self.rank == 0:
-            #     final_ckpt_path = os.path.join(model_checkpoints_dir, "checkpoint_epoch_final.pth")
-            #     self.save_checkpoint(optimizer, final_epoch - 1, average_loss, accuracy, final_ckpt_path)
+                final_ckpt_path = os.path.join(model_checkpoints_dir, "checkpoint_epoch_final.pth")
+                self.save_checkpoint(optimizer, final_epoch - 1, average_loss, accuracy, final_ckpt_path)
                 time_taken = time.time() - start
                 print(f"Time taken for {self.epochs} epochs = {(time_taken / 60):.2f} min.")
                 
@@ -506,6 +536,13 @@ class mirLM(nn.Module):
                     encoding="utf-8"
                 ) as fp:
                     json.dump(average_loss_list, fp)
+                    
+                with open(
+                    os.path.join(perf_dir, f"Avg_Change_in_prediction_{self.mRNA_max_len}.json"),
+                    "w",
+                    encoding='utf-8'
+                ) as fp:
+                    json.dump(average_diff, fp)
         # destroy process group to clean up
         if self.ddp:
             dist.destroy_process_group()  

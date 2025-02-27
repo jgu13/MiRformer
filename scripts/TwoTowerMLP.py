@@ -50,7 +50,8 @@ class TwoTowerMLP(mirLM):
             K: torch.tensor, 
             V: torch.tensor, 
             Q_mask: torch.tensor, 
-            K_mask: torch.tensor
+            K_mask: torch.tensor,
+            return_attn=False,
         ):
         '''
         Compute cross attention
@@ -74,7 +75,10 @@ class TwoTowerMLP(mirLM):
         # average pool over seq_length
         cross_attn = cross_attn.sum(dim=1) / valid_counts  # [batchsize, d_model]
         # print("Cross attention shape = ", cross_attn.shape)
-        return cross_attn
+        if return_attn:
+            return {"cross_attn": cross_attn, "attn_weights": attn_weights}
+        else:
+            return {"cross_attn": cross_attn}
 
     def run_training(
         self,
@@ -265,7 +269,8 @@ class TwoTowerMLP(mirLM):
                 mRNA_seq,
                 miRNA_seq,
                 mRNA_seq_mask=None,
-                miRNA_seq_mask=None
+                miRNA_seq_mask=None,
+                return_attn=False,
                 ):
         """
         Forward pass for the model.
@@ -299,15 +304,25 @@ class TwoTowerMLP(mirLM):
         V = self.kv_layer(mRNA_hidden_states)  # (batch_size, mRNA_seq_len, d_model)
 
         # Compute cross-attention
-        cross_attn_output = self.compute_cross_attention(
+        output = self.compute_cross_attention(
             Q=Q,
             K=K,
             V=V,
             Q_mask=miRNA_seq_mask,
             K_mask=mRNA_seq_mask,
+            return_attn=return_attn,
         )  # (batch_size, d_model)
 
+        if return_attn:
+            attn_weights=output["attn_weights"]
+            cross_attn=output["cross_attn"]
+        else:
+            cross_attn=output["cross_attn"]
+        
         # Pass through the MLP head
-        output = self.mlp_head(cross_attn_output)  # (batch_size, n_classes)
+        output = self.mlp_head(cross_attn)  # (batch_size, n_classes)
 
-        return output        
+        if return_attn:
+            return output, attn_weights
+        else:
+            return output        

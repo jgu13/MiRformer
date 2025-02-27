@@ -37,8 +37,8 @@ def objective(trial,
     # ==========================
     learning_rate = trial.suggest_categorical("lr", [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1])
     weight_decay = trial.suggest_categorical("weight_decay", [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1])
-    accumulation_step = trial.suggest_categorical("accumulation_step", [2, 4, 8, 16, 32, 64, 128])
-    # alpha = trial.suggest_categorical("alpha", [0.01, 0.05, 0.1, 0.2, 0.5])
+    accumulation_step = trial.suggest_categorical("accumulation_step", [2, 4, 8])
+    # alpha = trial.suggest_categorical("alpha", [1, 5, 6, 7, 8, 9, 10, 15, 20, 25])
     # margin = trial.suggest_categorical("margin", [0.01, 0.05, 0.1, 0.2, 0.3])
     
     # If model is TwoTowerMLP, we might tune hidden_sizes
@@ -180,6 +180,10 @@ def objective(trial,
         )
     os.makedirs(checkpoint_dir, exist_ok=True)
     
+    avg_losses = []
+    test_losses = []
+    test_accuracies = []
+    
     for epoch in range(epochs):
         train_loss = model.run_training(
             model=model,
@@ -187,12 +191,18 @@ def objective(trial,
             optimizer=optimizer,
             epoch=epoch,
             loss_fn=loss_fn,
+            tokenizer=tokenizer,
+            margin=0.001,
+            alpha=0,
         )
         # Evaluate or skip
-        test_acc, test_loss = model.run_testing(
+        test_acc, _, test_loss = model.run_testing(
             model=model,
             test_loader=test_loader,
+            tokenizer=tokenizer,
             loss_fn=loss_fn,
+            alpha=0,
+            margin=0.001,
         )
         
         train_loss_list.append(train_loss)
@@ -202,11 +212,17 @@ def objective(trial,
         # Save the checkpoint if validation accuracy improves
         if test_acc > best_acc:
             best_val_acc = test_acc
+            best_acc = test_acc            
             best_train_loss = train_loss
+            best_val_loss = test_loss.item()
             best_epoch = epoch
             checkpoint_path = os.path.join(checkpoint_dir, f"best_checkpoint_trial_{trial.number}_epoch_{epoch}.pt")
             torch.save(model.state_dict(), checkpoint_path)
             best_checkpoint_path = checkpoint_path
+        
+        avg_losses.append(train_loss)
+        test_losses.append(test_loss.item())
+        test_accuracies.append(test_acc)
         
         # Report these intermediate metrics to Optuna
         # so they appear in the "Intermediate values" chart
@@ -221,10 +237,12 @@ def objective(trial,
     # Save best results in trial's user attributes
     trial.set_user_attr("best_checkpoint", best_checkpoint_path)
     trial.set_user_attr("best_train_loss", best_train_loss)
+    trial.set_user_attr("best_val_loss", best_val_loss)
     trial.set_user_attr("best_val_acc", best_val_acc)
     trial.set_user_attr("best_epoch", best_epoch)
-    
-    # save train loss, test loss and test acc
+
+    # save metrics
+    import json
     perf_dir = os.path.join(PROJ_HOME, "Performance", model.dataset_name, model.model_name, str(trial.number))
     os.makedirs(perf_dir, exist_ok=True)
 
@@ -233,22 +251,22 @@ def objective(trial,
         "w",
         encoding="utf-8"
     ) as fp:
-        json.dump(test_acc_list, fp)
+        json.dump(test_accuracies, fp)
 
     with open(
         os.path.join(perf_dir, f"train_loss_{model.mRNA_max_len}.json"),
         "w",
         encoding="utf-8"
     ) as fp:
-        json.dump(train_loss_list, fp)
-        
+        json.dump(avg_losses, fp)
+    
     with open(
-        os.path.join(perf_dir, f"evaluation_loss_{model.mRNA_max_len}.json"),
+        os.path.join(perf_dir, f"test_loss_{model.mRNA_max_len}.json"),
         "w",
         encoding="utf-8"
     ) as fp:
-        json.dump(test_loss_list, fp)
-
+        json.dump(test_losses, fp)
+    
     # Return the metric that Optuna will try to maximize or minimize
     return test_acc
 
