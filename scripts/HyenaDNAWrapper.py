@@ -86,10 +86,10 @@ class HyenaDNAWrapper(mirLM):
                                 f"Loss: {loss.item():.6f}\n"
                             )                        
             epoch_loss += loss.item() * self.accumulation_step
-        # # After the loop, if gradients remain (for non-divisible number of batches)
-        # if (batch_idx + 1) % self.accumulation_step != 0:
-        #     optimizer.step()
-        #     optimizer.zero_grad()
+        # After the loop, if gradients remain (for non-divisible number of batches)
+        if (batch_idx + 1) % self.accumulation_step != 0:
+            optimizer.step()
+            optimizer.zero_grad()
         average_loss = epoch_loss / len(train_loader)
         return average_loss 
     
@@ -97,9 +97,11 @@ class HyenaDNAWrapper(mirLM):
         self, 
         model,
         test_loader, 
+        loss_fn,
     ):
         """Test loop."""
         model.eval()
+        losses = []
         if self.ddp:
             local_correct = 0
         else:
@@ -112,6 +114,8 @@ class HyenaDNAWrapper(mirLM):
                     seq_mask.to(self.device),
                 )
                 output = self.forward(seq=seq, seq_mask=seq_mask)
+                loss = loss_fn(output.squeeze().sigmoid(), target.squeeze())
+                losses.append(loss.item())
                 probabilities = torch.sigmoid(output.squeeze())
                 predictions = (probabilities > 0.5).long()
                 if self.ddp:
@@ -135,13 +139,14 @@ class HyenaDNAWrapper(mirLM):
                 )
             return global_accuracy
         else:
+            avg_loss = sum(losses) / len(losses)
             accuracy = 100.0 * correct / len(test_loader.dataset)
             print(
                 "\nTest set: Accuracy: {}/{} ({:.2f}%)\n".format(
                     correct, len(test_loader.dataset), accuracy
                 )
             )
-            return accuracy
+            return accuracy, avg_loss
 
     @staticmethod
     def assess_acc(predictions, targets, thresh=0.5):
@@ -162,7 +167,7 @@ class HyenaDNAWrapper(mirLM):
         predictions = []
         true_labels = []
         with torch.no_grad():
-            for seq, seq_mask, target, seed_start, seed_end in test_loader:
+            for seq, seq_mask, target in test_loader:
                 seq, target, seq_mask = (
                     seq.to(self.device),
                     target.to(self.device),

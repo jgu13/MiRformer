@@ -25,6 +25,7 @@ def plot_performance(
     else:
         model_paths = [os.path.join(performance_dir, model_dir) for model_dir in model_dirs]
         training_loss_paths = [os.path.join(model_path, f"train_loss_{mRNA_max_len}.json") for model_path in model_paths]
+        test_loss_paths = [os.path.join(model_path, f"evaluation_loss_{mRNA_max_len}.json") for model_path in model_paths]
         test_acc_paths = [os.path.join(model_path, f"evaluation_accuracy_{mRNA_max_len}.json") for model_path in model_paths]
     
     if model_names is None:
@@ -53,6 +54,29 @@ def plot_performance(
     else:
         plt.show()
     
+    plt.figure(figsize=(9,6))
+    for json_file, method_name in zip(test_acc_paths, model_names):
+        with open(json_file, "r", encoding='utf-8') as f:
+            test_acc = json.load(f)
+        max_accuracy = max(test_acc)
+        epochs = range(len(test_acc))
+        plt.plot(epochs, test_acc, label=f"{method_name} (Highest = {max_accuracy:.2f})")
+    
+    plt.xlabel('Epochs')
+    plt.ylabel('Test Accuracy (%)')
+    plt.title('Test Accuracy Comparison')
+    plt.legend(loc="lower right")
+    plt.grid(True)
+    plt.tight_layout()
+    
+    # save or show the plot
+    if test_acc_save_path:
+        plt.savefig(test_acc_save_path, dpi=500, bbox_inches="tight")
+        print(f"Test accuracy plot is saved to {test_acc_save_path}")
+    else:
+        plt.show()
+    
+    # plot 
     plt.figure(figsize=(9,6))
     for json_file, method_name in zip(test_acc_paths, model_names):
         with open(json_file, "r", encoding='utf-8') as f:

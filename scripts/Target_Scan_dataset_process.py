@@ -93,21 +93,17 @@ miRNA_df = pd.read_csv(path, sep='\t')
 # filter for human
 miRNA_df = miRNA_df[miRNA_df["Species ID"] == 9606]
 
-# # print("Putting together positive samples: ")
-# mRNA_len = 30
-# miRNA_len = 24
-# linker_len = 6
-# seed_len = 8
-# total = mRNA_len + miRNA_len + linker_len
-# diff = (total - miRNA_len - linker_len - seed_len) // 2
-# print(f"diff = {diff}")
+print("Putting together positive samples: ")
+mRNA_len = 10000
+miRNA_len = 24
+linker_len = 6
+seed_len = 8
+total = mRNA_len + miRNA_len + linker_len
+diff = (total - miRNA_len - linker_len - seed_len) // 2
+print(f"diff = {diff}")
 start_time = time.time()
 
-# # assemble positive pairs
-# all_lengths = [len(seq) for seq in mRNA_df['mRNA sequence']]
-# over_1k = [l >= mRNA_len for l in all_lengths]
-# mRNA_df = mRNA_df.loc[over_1k]
-
+# assemble positive pairs
 positive_samples = []
 max_len = 0
 for positive_pair in positive_pairs:
@@ -123,8 +119,8 @@ for positive_pair in positive_pairs:
         if len(mRNA_seq) > 0:    
             mRNA_seq = mRNA_seq.values[0]
             # segment mRNA seq binding site
-            start = max(positive_pair["UTR_start"]-10, 0)
-            end = min(positive_pair["UTR_end"]+12, len(mRNA_seq))
+            start = max(positive_pair["UTR_start"]-diff-1, 0)
+            end = min(positive_pair["UTR_end"]+diff, len(mRNA_seq))
             mRNA_seg = mRNA_seq[start:end]
             # print(f"target_gene = {target_gene_id}, miRNA_ID = {miRNA_ID}, start = {start}, end = {end}, mRNA_seg = {mRNA_seg}")
             if start < end and len(mRNA_seg) >= 6: # segment length must be greater than 6
@@ -136,8 +132,8 @@ for positive_pair in positive_pairs:
                                         "miRNA ID": miRNA_ID,
                                         "miRNA sequence": miRNA_seq,
                                         "mRNA sequence": mRNA_seg,
-                                        "seed start": 10,
-                                        "seed end": int(positive_pair["UTR_end"] - positive_pair["UTR_start"] + 10),
+                                        "seed start": int(positive_pair["UTR_start"]) if start==0 else diff,
+                                        "seed end": int(positive_pair["UTR_end"]) if end==len(mRNA_seq) else int(positive_pair["UTR_end"] - positive_pair["UTR_start"] + diff),
                                         "label": 1})
             else:
                 print(f"Cannot find valid segment for gene [{target_gene_id}] and mirRNA [{miRNA_ID}].")
@@ -148,10 +144,9 @@ print("Time take to put together positive samples = ", (time.time() - start_time
 positive_df = pd.DataFrame(positive_samples)
 print(f"Number of positive samples = {len(positive_df)}.")
 print(f"Maximum mRNA length = {max_len}.")
-positive_df.to_csv(os.path.join(data_dir, "positive_samples_short1.csv"), sep="\t", index=False)
+positive_df.to_csv(os.path.join(data_dir, "positive_samples_10k.csv"), sep="\t", index=False)
 
-
-# # assemble negative pairs
+# assemble negative pairs
 # print("Putting together negative samples: ")
 # start_time = time.time()
 # seg_len = total - linker_len - miRNA_len
@@ -174,19 +169,28 @@ positive_df.to_csv(os.path.join(data_dir, "positive_samples_short1.csv"), sep="\
 #         if len(mRNA_seq) > 0:    
 #             mRNA_seq = mRNA_seq.values[0]
 #             # randomly select seg_len-nt mRNA segment
-#             if len(mRNA_seq) < 30:
+#             if len(mRNA_seq) < seg_len:
 #                 mRNA_seg = mRNA_seq
+#                 negative_samples.append({"Gene ID": target_gene_id, 
+#                                     "Transcript ID": tran_id,
+#                                     "Gene Symbol": target_gene,
+#                                     "miRNA ID": miRNA_ID,
+#                                     "miRNA sequence": miRNA_seq,
+#                                     "mRNA sequence": mRNA_seg,
+#                                     "seed start": -1,
+#                                     "seed end": -1,
+#                                     "label": 0})
 #             else:
-#                 start = random.randint(0, len(mRNA_seq)-30)
-#                 end = min(start + 30, len(mRNA_seq))
+#                 start = random.randint(0, len(mRNA_seq)-seg_len)
+#                 end = min(start + seg_len, len(mRNA_seq))
 #                 mRNA_seg = mRNA_seq[start:end]
 #                 match = check_complementarity(miRNA_seq, mRNA_seg)
 #                 if match:
 #                     print("Found complementarity in negative samples, re-sampling mRNA segment...")
 #                     max_try = 100 # try for max times
 #                     for i in range(max_try):
-#                         start = random.randint(0, len(mRNA_seq)-30)
-#                         end = min(start + 30, len(mRNA_seq))
+#                         start = random.randint(0, len(mRNA_seq)-seg_len)
+#                         end = min(start + seg_len, len(mRNA_seq))
 #                         mRNA_seg = mRNA_seq[start:end]
 #                         match = check_complementarity(miRNA_seq, mRNA_seg)
 #                         if not match:
@@ -199,7 +203,6 @@ positive_df.to_csv(os.path.join(data_dir, "positive_samples_short1.csv"), sep="\
 #                                     "seed start": -1,
 #                                     "seed end": -1,
 #                                     "label": 0})
-#                             break
 #                     if i==max_try:
 #                         print(f"Tried for a maximum {max_try} times. Failed to find mRNA segment.")
 #                 else:
@@ -220,14 +223,14 @@ positive_df.to_csv(os.path.join(data_dir, "positive_samples_short1.csv"), sep="\
 # negative_df = pd.DataFrame(negative_samples)
 # print("Number of negative samples = ", len(negative_df))
 # print("Maximum mRNA length = ", max_length)
-# negative_df.to_csv(os.path.join(data_dir, "negative_samples_short1.csv"), sep="\t", index=False)
+# negative_df.to_csv(os.path.join(data_dir, "negative_samples_10k.csv"), sep="\t", index=False)
 # print("Time taken for putting together negative samples = ", (time.time() - start_time)/60)
 
-# positive_samples = pd.read_csv(os.path.join(data_dir, "positive_samples_short1.csv"), sep='\t')
-# negative_samples = pd.read_csv(os.path.join(data_dir, "negative_samples_short1.csv"), sep='\t')
-# samples = pd.concat([positive_samples, negative_samples], axis=0)
-# ds_train, ds_rem = train_test_split(samples, test_size=0.2, random_state=42, shuffle=True)
-# ds_val, ds_test = train_test_split(ds_rem, test_size=0.2, shuffle=False)
-# ds_train.to_csv(os.path.join(data_dir, "TargetScan_train.csv"), sep=',', index=False)
-# ds_val.to_csv(os.path.join(data_dir, "TargetScan_validation.csv"), sep=',', index=False)
-# ds_test.to_csv(os.path.join(data_dir, "TargetScan_test.csv"), sep=',', index=False)
+positive_samples = pd.read_csv(os.path.join(data_dir, "positive_samples_10k.csv"), sep='\t')
+negative_samples = pd.read_csv(os.path.join(data_dir, "negative_samples_10k.csv"), sep='\t')
+samples = pd.concat([positive_samples, negative_samples], axis=0)
+ds_train, ds_rem = train_test_split(samples, test_size=0.2, random_state=42, shuffle=True)
+ds_val, ds_test = train_test_split(ds_rem, test_size=0.2, shuffle=False)
+ds_train.to_csv(os.path.join(data_dir, "TargetScan_train_10k.csv"), sep=',', index=False)
+ds_val.to_csv(os.path.join(data_dir, "TargetScan_validation_10k.csv"), sep=',', index=False)
+ds_test.to_csv(os.path.join(data_dir, "TargetScan_test_10k.csv"), sep=',', index=False)

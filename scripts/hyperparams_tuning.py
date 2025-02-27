@@ -1,4 +1,5 @@
 import os
+import json
 import optuna
 import torch
 import argparse
@@ -36,9 +37,9 @@ def objective(trial,
     # ==========================
     learning_rate = trial.suggest_categorical("lr", [1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1])
     weight_decay = trial.suggest_categorical("weight_decay", [1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 1e-1])
-    accumulation_step = trial.suggest_categorical("accumulation_step", [2, 4, 8])
-    alpha = trial.suggest_categorical("alpha", [0.01, 0.05, 0.1, 0.2, 0.5])
-    margin = trial.suggest_categorical("margin", [0.01, 0.05, 0.1, 0.2, 0.3])
+    accumulation_step = trial.suggest_categorical("accumulation_step", [2, 4, 8, 16, 32, 64, 128])
+    # alpha = trial.suggest_categorical("alpha", [0.01, 0.05, 0.1, 0.2, 0.5])
+    # margin = trial.suggest_categorical("margin", [0.01, 0.05, 0.1, 0.2, 0.3])
     
     # If model is TwoTowerMLP, we might tune hidden_sizes
     if model_name == "TwoTowerMLP":
@@ -58,8 +59,8 @@ def objective(trial,
           f"weight decay = {weight_decay}\n"
           f"accumulation step = {accumulation_step}\n"
           f"Hidden sizes = {hidden_sizes}\n"
-          f"Alpha = {alpha}\n"
-          f"Margin = {margin}\n"
+        #   f"Alpha = {alpha}\n"
+        #   f"Margin = {margin}\n"
           f"Epochs = {epochs}")
     
     # ===================
@@ -109,8 +110,6 @@ def objective(trial,
             D_train,
             mRNA_max_length=model.mRNA_max_len,
             miRNA_max_length=model.miRNA_max_len,
-            seed_start_col="seed start",
-            seed_end_col="seed end",
             tokenizer=tokenizer,
             use_padding=model.use_padding,
             rc_aug=model.rc_aug,
@@ -122,8 +121,6 @@ def objective(trial,
             D_val,
             mRNA_max_length=model.mRNA_max_len,
             miRNA_max_length=model.miRNA_max_len,
-            seed_start_col="seed start",
-            seed_end_col="seed end",
             tokenizer=tokenizer,
             use_padding=model.use_padding,
             rc_aug=model.rc_aug,
@@ -136,8 +133,6 @@ def objective(trial,
             D_train,
             mRNA_max_length=model.mRNA_max_len,
             miRNA_max_length=model.miRNA_max_len,
-            seed_start_col="seed start",
-            seed_end_col="seed end",
             tokenizer=tokenizer,
             use_padding=model.use_padding,
             rc_aug=model.rc_aug,
@@ -148,8 +143,6 @@ def objective(trial,
             D_val,
             mRNA_max_length=model.mRNA_max_len,
             miRNA_max_length=model.miRNA_max_len,
-            seed_start_col="seed start",
-            seed_end_col="seed end",
             tokenizer=tokenizer,
             use_padding=model.use_padding,
             rc_aug=model.rc_aug,
@@ -175,6 +168,9 @@ def objective(trial,
     # ===================
     print("Starts training!")
     best_acc = 0
+    train_loss_list = []
+    test_loss_list = []
+    test_acc_list = []
     checkpoint_dir = os.path.join(
             PROJ_HOME, 
             "checkpoints", 
@@ -191,15 +187,17 @@ def objective(trial,
             optimizer=optimizer,
             epoch=epoch,
             loss_fn=loss_fn,
-            tokenizer=tokenizer,
-            margin=margin,
-            alpha=alpha,
         )
         # Evaluate or skip
-        test_acc = model.run_testing(
+        test_acc, test_loss = model.run_testing(
             model=model,
             test_loader=test_loader,
+            loss_fn=loss_fn,
         )
+        
+        train_loss_list.append(train_loss)
+        test_loss_list.append(test_loss)
+        test_acc_list.append(test_acc)
 
         # Save the checkpoint if validation accuracy improves
         if test_acc > best_acc:
@@ -212,7 +210,7 @@ def objective(trial,
         
         # Report these intermediate metrics to Optuna
         # so they appear in the "Intermediate values" chart
-        trial.report(train_loss, step=epoch)
+        # trial.report(train_loss, step=epoch)
         trial.report(test_acc, step=epoch + 0.5) # offset by 0.5 so we can see it
         trial.set_user_attr(model_name, f"trial_{trial.number}")
         
@@ -225,6 +223,31 @@ def objective(trial,
     trial.set_user_attr("best_train_loss", best_train_loss)
     trial.set_user_attr("best_val_acc", best_val_acc)
     trial.set_user_attr("best_epoch", best_epoch)
+    
+    # save train loss, test loss and test acc
+    perf_dir = os.path.join(PROJ_HOME, "Performance", model.dataset_name, model.model_name, str(trial.number))
+    os.makedirs(perf_dir, exist_ok=True)
+
+    with open(
+        os.path.join(perf_dir, f"evaluation_accuracy_{model.mRNA_max_len}.json"),
+        "w",
+        encoding="utf-8"
+    ) as fp:
+        json.dump(test_acc_list, fp)
+
+    with open(
+        os.path.join(perf_dir, f"train_loss_{model.mRNA_max_len}.json"),
+        "w",
+        encoding="utf-8"
+    ) as fp:
+        json.dump(train_loss_list, fp)
+        
+    with open(
+        os.path.join(perf_dir, f"evaluation_loss_{model.mRNA_max_len}.json"),
+        "w",
+        encoding="utf-8"
+    ) as fp:
+        json.dump(test_loss_list, fp)
 
     # Return the metric that Optuna will try to maximize or minimize
     return test_acc

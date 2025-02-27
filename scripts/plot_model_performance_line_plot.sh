@@ -19,9 +19,9 @@
 #     --test_acc_save_path $syn_data/miraw_noL_noMissing_test_acc.png
 
 python scripts/plot_model_performance_line_plot.py \
-    --mRNA_max_lengths 20371 30\
+    --mRNA_max_lengths 924\
     --dataset_name TargetScan\
-    --model_dirs HyenaDNA_w_linker_revmiRNA \
-    --model_names_in_plot Finetuned-HyenaDNA-20,371nt Finetuned-HyenaDNA-30nt \
-    --train_loss_save_path /home/mcb/users/jgu13/projects/mirLM/Performance/TargetScan/HyenaDNA_w_linker_revmiRNA/train_loss.png \
-    --test_acc_save_path /home/mcb/users/jgu13/projects/mirLM/Performance/TargetScan/HyenaDNA_w_linker_revmiRNA/evaluation_acc.png
+    --model_dirs HyenaDNA_miRNA_924/22 \
+    --model_names_in_plot Finetuned-HyenaDNA-924nt \
+    --train_loss_save_path /home/mcb/users/jgu13/projects/mirLM/Performance/TargetScan/HyenaDNA_miRNA_924/22/train_loss.png \
+    --test_acc_save_path /home/mcb/users/jgu13/projects/mirLM/Performance/TargetScan/HyenaDNA_miRNA_924/22/evaluation_acc.png

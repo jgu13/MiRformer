@@ -352,7 +352,7 @@ class miRawDataset(torch.utils.data.Dataset):
         mRNA_seq_encoding = self.tokenizer(
             mRNA_seq,
             add_special_tokens=False,
-            padding="max_length" if self.use_padding else None,
+            padding="max_length" if self.use_padding else "longest", # default to padding to longest in the batch
             max_length=self.mRNA_max_length,
             truncation=True,
             return_attention_mask=True,
@@ -364,7 +364,7 @@ class miRawDataset(torch.utils.data.Dataset):
         miRNA_seq_encoding = self.tokenizer(
             miRNA_seq,
             add_special_tokens=False,
-            padding="max_length" if self.use_padding else None,
+            padding="max_length" if self.use_padding else "longest",
             max_length=self.miRNA_max_length,
             truncation=True,
             return_attention_mask=True,
