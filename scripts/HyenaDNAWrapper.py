@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import torch.distributed as dist
+from transformers.tokenization_utils import PreTrainedTokenizer
 # Local imports
 from mirLM import mirLM
 
@@ -18,39 +19,23 @@ class HyenaDNAWrapper(mirLM):
                             self,
                             original_seq, 
                             original_mask,
-                            mRNA_seed_start, 
-                            mRNA_seed_end,
-                            miRNA_seed_start,
-                            miRNA_seed_end,
+                            seed_start, 
+                            seed_end,
                             tokenizer):
         special_chars = ["[PAD]","[UNK]","[MASK]"]
         perturbed_seqs = []
         perturbed_masks = []
         original_seq = [tokenizer._convert_id_to_token(d.item()) for d in original_seq]
-        mRNA_seed_start = int(mRNA_seed_start.item()) if torch.is_tensor(mRNA_seed_start) else int(mRNA_seed_start)
-        mRNA_seed_end = int(mRNA_seed_end.item()) if torch.is_tensor(mRNA_seed_end) else int(mRNA_seed_end)
-        miRNA_seed_start = int(miRNA_seed_start.item()) if torch.is_tensor(miRNA_seed_start) else int(miRNA_seed_start)
-        miRNA_seed_end = int(miRNA_seed_end.item()) if torch.is_tensor(miRNA_seed_end) else int(miRNA_seed_end)
-        seed_match = original_seq[mRNA_seed_start:mRNA_seed_end]
-        seed = original_seq[miRNA_seed_start:miRNA_seed_end]
+        seed_start = int(seed_start.item()) if torch.is_tensor(seed_start) else int(seed_start)
+        seed_end = int(seed_end.item()) if torch.is_tensor(seed_end) else int(seed_end)
+        seed_match = original_seq[seed_start:seed_end]
         for i in range(len(seed_match)):
             if seed_match[i] in special_chars:
                 continue
             for base in ["A", "T", "C", "G"]:
                 if base != seed_match[i]:
                     mutated = seed_match[:i] + [base] + seed_match[i+1:]
-                    perturbed_seq = original_seq[:mRNA_seed_start] + mutated + original_seq[mRNA_seed_end:]
-                    # convert back to ids
-                    perturbed_seq = [tokenizer._convert_token_to_id(c) for c in perturbed_seq]
-                    perturbed_seqs.append(torch.tensor(perturbed_seq, dtype=torch.long))
-                    perturbed_masks.append(original_mask)
-        for i in range(len(seed)):
-            if seed[i] in special_chars:
-                continue
-            for base in ["A", "T", "C", "G"]:
-                if base != seed[i]:
-                    mutated = seed[:i] + [base] + seed[i+1:]
-                    perturbed_seq = original_seq[:miRNA_seed_start] + mutated + original_seq[miRNA_seed_end:]
+                    perturbed_seq = original_seq[:seed_start] + mutated + original_seq[seed_end:]
                     # convert back to ids
                     perturbed_seq = [tokenizer._convert_token_to_id(c) for c in perturbed_seq]
                     perturbed_seqs.append(torch.tensor(perturbed_seq, dtype=torch.long))
@@ -87,34 +72,36 @@ class HyenaDNAWrapper(mirLM):
         epoch_loss = 0.0
         loss_list = []
         optimizer.zero_grad()
-        for batch_idx, (seq, seq_mask, mRNA_seed_start, mRNA_seed_end, miRNA_seed_start, miRNA_seed_end, target) in enumerate(train_loader):
-            seq, seq_mask, mRNA_seed_start, mRNA_seed_end, miRNA_seed_start, miRNA_seed_end, target = (
+        for batch_idx, (seq, seq_mask, seed_start, seed_end, target) in enumerate(train_loader):
+            seq, seq_mask, seed_start, seed_end, target = (
                 seq.to(self.device), 
                 seq_mask.to(self.device),
-                mRNA_seed_start.to(self.device),
-                mRNA_seed_end.to(self.device),
-                miRNA_seed_start.to(self.device),
-                miRNA_seed_end.to(self.device),
+                seed_start.to(self.device),
+                seed_end.to(self.device),
                 target.to(self.device),
             )
             pos_mask = (target == 1)
             pos_indices = torch.where(pos_mask)[0]
-            s_w, s_i, repeats = model.forward(seq=seq, 
-                                              seq_mask=seq_mask,
-                                              mRNA_seed_start=mRNA_seed_start,
-                                              mRNA_seed_end=mRNA_seed_end,
-                                              miRNA_seed_start=miRNA_seed_start,
-                                              miRNA_seed_end=miRNA_seed_end,
-                                              tokenizer=tokenizer,
-                                              pos_indices=pos_indices,
-                                              perturb=True,
-                                              )
-            s_w, s_i = (s_w.squeeze().sigmoid(), s_i.squeeze().sigmoid())
-            bce_loss = loss_fn(s_w, target.squeeze())
-            s_w_pos = s_w[pos_indices] # repeat only the positive samples
-            s_w_pos_repeated = torch.repeat_interleave(s_w_pos, repeats) # (batchsize * seed_len * 3,)
-            ranking_loss = torch.clamp(s_i - s_w_pos_repeated + margin, min=0.0).mean()
-            total_loss = bce_loss + alpha * ranking_loss
+            if pos_indices.shape[0] > 0:
+                s_w, s_i, repeats = model.forward(seq=seq, 
+                                                seq_mask=seq_mask,
+                                                seed_start=seed_start,
+                                                seed_end=seed_end,
+                                                tokenizer=tokenizer,
+                                                pos_indices=pos_indices,
+                                                perturb=True,
+                                                )
+                s_w, s_i = (s_w.squeeze(-1).sigmoid(), s_i.squeeze(-1).sigmoid())
+                bce_loss = loss_fn(s_w, target.view(-1))
+                s_w_pos = s_w[pos_indices] # repeat only the positive samples
+                s_w_pos_repeated = torch.repeat_interleave(s_w_pos, repeats) # (batchsize * seed_len * 3,)
+                ranking_loss = torch.clamp(s_i - s_w_pos_repeated + margin, min=0.0).mean()
+                total_loss = bce_loss + alpha * ranking_loss
+            else: # no positive samples in this batch
+                s_w = model.forward(seq=seq,
+                                    seq_mask=seq_mask,
+                                    perturb=False)
+                total_loss = loss_fn(s_w.squeeze().sigmoid(), target.view(-1)) # loss equals to bce loss when no perturbation
 
             # Log individual losses to wandb
             # wandb.log({
@@ -207,20 +194,28 @@ class HyenaDNAWrapper(mirLM):
                 )
                 pos_mask = (target == 1)
                 pos_indices = torch.where(pos_mask)[0]
-                s_w, s_i, repeats = model.forward(seq=seq, 
-                                            seq_mask=seq_mask,
-                                            seed_start=seed_start,
-                                            seed_end=seed_end,
-                                            tokenizer=tokenizer,
-                                            pos_indices=pos_indices,
-                                            perturb=True,
-                                            )
-                s_w, s_i = (s_w.squeeze().sigmoid(), s_i.squeeze().sigmoid())
-                bce_loss = loss_fn(s_w, target.squeeze())
-                s_w_pos = s_w[pos_indices] # repeat only the positive samples
-                s_w_pos_repeated = torch.repeat_interleave(s_w_pos, repeats) # (batchsize * seed_len * 3,)
-                ranking_loss = torch.clamp(s_i - s_w_pos_repeated + margin, min=0.0).mean()
-                total_loss = bce_loss + alpha * ranking_loss
+                if pos_indices.shape[0] > 0:
+                    s_w, s_i, repeats = model.forward(seq=seq, 
+                                                seq_mask=seq_mask,
+                                                seed_start=seed_start,
+                                                seed_end=seed_end,
+                                                tokenizer=tokenizer,
+                                                pos_indices=pos_indices,
+                                                perturb=True,
+                                                )
+                    s_w, s_i = (s_w.squeeze(-1).sigmoid(), s_i.squeeze(-1).sigmoid())
+                    bce_loss = loss_fn(s_w, target.squeeze())
+                    s_w_pos = s_w[pos_indices] # repeat only the positive samples
+                    s_w_pos_repeated = torch.repeat_interleave(s_w_pos, repeats) # (batchsize * seed_len * 3,)
+                    ranking_loss = torch.clamp(s_i - s_w_pos_repeated + margin, min=0.0).mean()
+                    total_loss = bce_loss + alpha * ranking_loss
+                else: 
+                    s_w = model.forward(seq=seq,
+                                        seq_mask=seq_mask,
+                                        perturb=False,
+                                        )
+                    s_w = s_w.squeeze(-1).sigmoid()
+                    total_loss = loss_fn(s_w, target.squeeze((-1,-2))) # total loss equals bce loss when no perturbation
                 # Log individual losses to wandb
                 # wandb.log({
                 #     "evaluation_bce_loss": bce_loss.item(),
@@ -230,9 +225,9 @@ class HyenaDNAWrapper(mirLM):
                     
                 prediction = (s_w > 0.5).long() # (batchsize,)
                 if self.ddp:
-                    local_correct += prediction.eq(target.squeeze()).sum().item()
+                    local_correct += prediction.eq(target.view(-1)).sum().item()
                 else:
-                    correct += prediction.eq(target.squeeze()).sum().item()
+                    correct += prediction.eq(target.view(-1)).sum().item()
                 unperturbed_predictions.extend(s_w_pos_repeated.cpu())
                 perturbed_predictions.extend(s_i.cpu())
             # change in prediction
@@ -259,7 +254,6 @@ class HyenaDNAWrapper(mirLM):
                 )
             return global_accuracy
         else:
-            avg_loss = sum(losses) / len(losses)
             accuracy = 100.0 * correct / len(test_loader.dataset)
             print(
                 "\nTest set: Accuracy: {}/{} ({:.2f}%)\n".format(
@@ -269,7 +263,7 @@ class HyenaDNAWrapper(mirLM):
             print(f"Average unperturbed prediction: {mean_unperturbed_score:.4f}")
             print(f"Average perturbed prediction: {mean_perturbed_score:.4f}")
             print(f"Difference (unperturbed - perturbed): {diff_score:.4f}")
-                        # Log individual losses to wandb
+            # Log individual losses to wandb
             # wandb.log({
             #     "Accuracy": accuracy,
             # })
@@ -311,14 +305,12 @@ class HyenaDNAWrapper(mirLM):
         return acc, predictions, true_labels
     
     def forward(self, 
-                seq, 
-                seq_mask,
-                mRNA_seed_start=-1,
-                mRNA_seed_end=-1,
-                miRNA_seed_start=-1,
-                miRNA_seed_end=-1,
-                pos_indices=None,
-                tokenizer=None,
+                seq:torch.tensor, 
+                seq_mask:torch.tensor,
+                seed_start:torch.tensor=-1,
+                seed_end:torch.tensor=-1,
+                pos_indices:torch.tensor=None,
+                tokenizer:PreTrainedTokenizer=None,
                 perturb=True):
         """
         Forward pass for HyenaDNAWrapper.
@@ -334,7 +326,7 @@ class HyenaDNAWrapper(mirLM):
             max_miRNA_length=self.miRNA_max_len
         )
         if perturb:
-            assert pos_indices is not None, "Only Positive samples will be perturbed during training. Positive samples are not provided."
+            assert (pos_indices is not None) and (pos_indices.shape[0]>0), "Only Positive samples will be perturbed during training. Positive samples are not provided."
             assert tokenizer is not None, "Tokenizer to tokenize perturbed sequences. Tokenizer can not be None."
             
             perturbed_seqs = []
@@ -343,19 +335,15 @@ class HyenaDNAWrapper(mirLM):
             for idx in pos_indices:
                 original_seq = seq[idx]
                 original_mask = seq_mask[idx]
-                m_start = mRNA_seed_start[idx]
-                m_end = mRNA_seed_end[idx]
-                mi_start = miRNA_seed_start[idx]
-                mi_end = miRNA_seed_end[idx]
-                assert (m_start.item() != -1) and (m_end.item() != -1) and (mi_start.item() != -1) and (mi_end.item() != -1), "During training, seed start and seed end must be provided to perturb the seed region."
+                start = seed_start[idx]
+                end = seed_end[idx]
+                assert (start.item() > 0) and (end.item() > 0), "During training, seed start and seed end must be provided to perturb the seed region."
                 # Generate perturbed sequences for the seed region
                 perturbed, perturbed_mask = self.generate_perturbed_seeds(
                         original_seq=original_seq, 
                         original_mask=original_mask,
-                        mRNA_seed_start=m_start, 
-                        mRNA_seed_end=m_end,
-                        miRNA_seed_start=mi_start,
-                        miRNA_seed_end=mi_end,
+                        seed_start=start, 
+                        seed_end=end,
                         tokenizer=tokenizer)
                 perturbed_seqs.extend(perturbed)
                 perturbed_masks.extend(perturbed_mask)

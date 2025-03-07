@@ -151,13 +151,13 @@ class mirLM(nn.Module):
             self.learning_rate = self.basemodel_cfg["lr"] * self.world_size # scale learning rate accordingly
             self.weight_decay = self.basemodel_cfg["weight_decay"]
             self.accumulation_step = self.basemodel_cfg["accumulation_step"]
-            print("learning rate = ", self.learning_rate)
-            print("weight decay = ", self.weight_decay)
-            if self.base_model_name == "HyenaDNA":
-                self.alpha = self.basemodel_cfg["alpha"]
-                self.margin = self.basemodel_cfg["margin"]
-                print("Alpha = ", self.alpha)
-                print("Margin = ", self.margin)
+            self.alpha = self.basemodel_cfg["alpha"]
+            self.margin = self.basemodel_cfg["margin"]
+            print(f"learning rate = {self.learning_rate}\n"
+                  f"weight decay = {self.weight_decay}\n"
+                  f"Alpha = {self.alpha}\n"
+                  f"Margin = {self.margin}\n"
+                  f"Accumulation step = {self.accumulation_step}\n")
 
     @classmethod
     def create_model(cls, **kwargs):
@@ -203,6 +203,7 @@ class mirLM(nn.Module):
         return data
 
     def save_checkpoint(self,
+                        model,
                         optimizer, 
                         epoch, 
                         average_loss, 
@@ -212,9 +213,9 @@ class mirLM(nn.Module):
         Helper function for saving model/optimizer state dicts.
         Only rank 0 should save to avoid file corruption.
         """
-        model_state_dict = self.module.state_dict() \
-                            if isinstance(self, nn.parallel.DistributedDataParallel) \
-                            else self.state_dict()
+        model_state_dict = model.module.state_dict() \
+                            if isinstance(model, nn.parallel.DistributedDataParallel) \
+                            else model.state_dict()
 
         torch.save({
             "epoch": epoch,
@@ -413,7 +414,7 @@ class mirLM(nn.Module):
                     )
             
             # loss function
-            loss_fn = nn.BCELoss()
+            loss_fn = nn.BCEWithLogitsLoss()
 
             # create optimizer
             optimizer = optim.AdamW(
@@ -491,23 +492,27 @@ class mirLM(nn.Module):
                     average_loss_list.append(average_loss)
                     accuracy_list.append(accuracy)
                     average_diff.append(diff_score)
-                
-                if (epoch + 1) % 50 == 0 and self.rank == 0:
+
+                if accuracy >= best_acc:
+                    best_acc = accuracy
+                    counter = 0
                     # Save the model checkpoint
-                    checkpoint_path = os.path.join(model_checkpoints_dir, 
-                                                   f"checkpoint_epoch_{epoch+1}.pth")
-                    self.save_checkpoint(optimizer, 
-                                         epoch, 
-                                         average_loss, 
-                                         accuracy, 
-                                         checkpoint_path)
-                # else:
-                #     counter += 1
-                
-                # Check if early stopping condition is met.
-                # if counter >= patience and self.rank == 0:
-                #     print(f"Early stopping triggered at epoch {epoch}. No improvement for {patience} consecutive epochs.")
-                #     break
+                    if self.rank == 0:
+                        checkpoint_path = os.path.join(model_checkpoints_dir, 
+                                                    f"best_checkpoint.pth")
+                        self.save_checkpoint(model=model,
+                                            optimizer=optimizer, 
+                                            epoch=epoch, 
+                                            average_loss=average_loss, 
+                                            accuracy=accuracy, 
+                                            path=checkpoint_path)
+                elif accuracy < best_acc:
+                    counter += 1
+                    # Check if early stopping condition is met.
+                    if counter >= patience and self.rank == 0:
+                        print(f"Early stopping triggered at epoch {epoch}. No improvement for {patience} consecutive epochs.")
+                        final_epoch = epoch + 1
+                        break
 
                 cost = time.time() - start
                 remain = cost/(epoch + 1) * (final_epoch - epoch - 1) /3600
@@ -515,7 +520,12 @@ class mirLM(nn.Module):
 
             if self.rank == 0:
                 final_ckpt_path = os.path.join(model_checkpoints_dir, "checkpoint_epoch_final.pth")
-                self.save_checkpoint(optimizer, final_epoch - 1, average_loss, accuracy, final_ckpt_path)
+                self.save_checkpoint(model=model, 
+                                     optimizer=optimizer, 
+                                     epoch=final_epoch - 1, 
+                                     average_loss=average_loss, 
+                                     accuracy=accuracy, 
+                                     path=final_ckpt_path)
                 time_taken = time.time() - start
                 print(f"Time taken for {self.epochs} epochs = {(time_taken / 60):.2f} min.")
                 
