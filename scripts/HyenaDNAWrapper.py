@@ -57,16 +57,16 @@ class HyenaDNAWrapper(mirLM):
         """
         Training loop.
         """
-        # wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-        # wandb.init(project="mirLM_study", config={
-        #     "learning_rate": self.learning_rate,
-        #     "batch_size": self.batch_size,
-        #     "epochs": self.epochs,
-        #     "alpha": self.alpha,
-        #     "margin": self.margin,
-        #     # add any other hyperparameters you want to track
-        # })
-        # config = wandb.config
+        wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+        wandb.init(project="mirLM_study", config={
+            "learning_rate": self.learning_rate,
+            "batch_size": self.batch_size,
+            "epochs": self.epochs,
+            "alpha": self.alpha,
+            "margin": self.margin,
+            # add any other hyperparameters you want to track
+        })
+        config = wandb.config
         
         model.train()
         epoch_loss = 0.0
@@ -91,24 +91,26 @@ class HyenaDNAWrapper(mirLM):
                                                 pos_indices=pos_indices,
                                                 perturb=True,
                                                 )
-                s_w, s_i = (s_w.squeeze(-1).sigmoid(), s_i.squeeze(-1).sigmoid())
+                s_w, s_i = (s_w.squeeze(-1), s_i.squeeze(-1))
                 bce_loss = loss_fn(s_w, target.view(-1))
                 s_w_pos = s_w[pos_indices] # repeat only the positive samples
                 s_w_pos_repeated = torch.repeat_interleave(s_w_pos, repeats) # (batchsize * seed_len * 3,)
-                ranking_loss = torch.clamp(s_i - s_w_pos_repeated + margin, min=0.0).mean()
+                # ranking loss = -ylog(\sigma(s_w-s_i-margin)) where y = 1, enforcing s_w - s_i > margin
+                difference = s_w_pos_repeated - s_i - margin
+                ranking_loss = loss_fn(difference, torch.ones_like(difference))
                 total_loss = bce_loss + alpha * ranking_loss
+                # Log individual losses to wandb
+                wandb.log({
+                    "training_bce_loss": bce_loss.item(),
+                    "training_ranking_loss": ranking_loss.item(),
+                    "training_total_loss": total_loss.item(),
+                })
             else: # no positive samples in this batch
                 s_w = model.forward(seq=seq,
                                     seq_mask=seq_mask,
                                     perturb=False)
-                total_loss = loss_fn(s_w.squeeze().sigmoid(), target.view(-1)) # loss equals to bce loss when no perturbation
+                total_loss = loss_fn(s_w.squeeze(), target.view(-1)) # loss equals to bce loss when no perturbation
 
-            # Log individual losses to wandb
-            # wandb.log({
-            #     "training_bce_loss": bce_loss.item(),
-            #     "training_ranking_loss": ranking_loss.item(),
-            #     "training_total_loss": total_loss.item(),
-            # })
             if self.accumulation_step is not None:
                 total_loss = total_loss / self.accumulation_step
                 total_loss.backward()
@@ -160,9 +162,9 @@ class HyenaDNAWrapper(mirLM):
             optimizer.step()
             optimizer.zero_grad()
         average_loss = epoch_loss / len(train_loader)
-        # wandb.log({
-        #     "epoch_loss": average_loss,
-        # })
+        wandb.log({
+            "epoch_loss": average_loss,
+        })
         return average_loss 
     
     def run_testing(
@@ -203,26 +205,28 @@ class HyenaDNAWrapper(mirLM):
                                                 pos_indices=pos_indices,
                                                 perturb=True,
                                                 )
-                    s_w, s_i = (s_w.squeeze(-1).sigmoid(), s_i.squeeze(-1).sigmoid())
-                    bce_loss = loss_fn(s_w, target.squeeze())
+                    s_w, s_i = (s_w.squeeze(-1), s_i.squeeze(-1))
+                    bce_loss = loss_fn(s_w, target.view(-1))
                     s_w_pos = s_w[pos_indices] # repeat only the positive samples
                     s_w_pos_repeated = torch.repeat_interleave(s_w_pos, repeats) # (batchsize * seed_len * 3,)
-                    ranking_loss = torch.clamp(s_i - s_w_pos_repeated + margin, min=0.0).mean()
+                    difference = s_w_pos_repeated - s_i - margin
+                    ranking_loss = loss_fn(difference, torch.ones_like(difference))
                     total_loss = bce_loss + alpha * ranking_loss
+                    losses.append(total_loss.item())
+                    # Log individual losses to wandb
+                    wandb.log({
+                        "evaluation_bce_loss": bce_loss.item(),
+                        "evaluation_ranking_loss": ranking_loss.item(),
+                        "evaluation_total_loss": total_loss.item(),
+                    })
                 else: 
                     s_w = model.forward(seq=seq,
                                         seq_mask=seq_mask,
                                         perturb=False,
                                         )
-                    s_w = s_w.squeeze(-1).sigmoid()
-                    total_loss = loss_fn(s_w, target.squeeze((-1,-2))) # total loss equals bce loss when no perturbation
-                # Log individual losses to wandb
-                # wandb.log({
-                #     "evaluation_bce_loss": bce_loss.item(),
-                #     "evaluation_ranking_loss": ranking_loss.item(),
-                #     "evaluation_total_loss": total_loss.item(),
-                # })
-                    
+                    s_w = s_w.squeeze(-1)
+                    total_loss = loss_fn(s_w, target.view(-1)) # total loss equals bce loss when no perturbation
+                    losses.append(total_loss.item())
                 prediction = (s_w > 0.5).long() # (batchsize,)
                 if self.ddp:
                     local_correct += prediction.eq(target.view(-1)).sum().item()
@@ -255,6 +259,7 @@ class HyenaDNAWrapper(mirLM):
             return global_accuracy
         else:
             accuracy = 100.0 * correct / len(test_loader.dataset)
+            avg_loss = sum(losses) / len(losses)
             print(
                 "\nTest set: Accuracy: {}/{} ({:.2f}%)\n".format(
                     correct, len(test_loader.dataset), accuracy
@@ -264,10 +269,10 @@ class HyenaDNAWrapper(mirLM):
             print(f"Average perturbed prediction: {mean_perturbed_score:.4f}")
             print(f"Difference (unperturbed - perturbed): {diff_score:.4f}")
             # Log individual losses to wandb
-            # wandb.log({
-            #     "Accuracy": accuracy,
-            # })
-            return accuracy, diff_score, total_loss
+            wandb.log({
+                "Accuracy": accuracy,
+            })
+            return accuracy, diff_score, avg_loss
 
     @staticmethod
     def assess_acc(predictions, targets, thresh=0.5):

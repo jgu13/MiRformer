@@ -449,6 +449,7 @@ class mirLM(nn.Module):
             
             average_loss_list = []
             accuracy_list = []
+            test_loss_list = []
             average_diff = []
             
             model_checkpoints_dir = os.path.join(
@@ -479,7 +480,7 @@ class mirLM(nn.Module):
                     margin=self.margin,
                     alpha=self.alpha,
                 )
-                accuracy, diff_score, _ = self.run_testing(
+                accuracy, diff_score, test_loss = self.run_testing(
                     model=model,
                     test_loader=test_loader,
                     tokenizer=tokenizer,
@@ -492,6 +493,7 @@ class mirLM(nn.Module):
                     average_loss_list.append(average_loss)
                     accuracy_list.append(accuracy)
                     average_diff.append(diff_score)
+                    test_loss_list.append(test_loss)
 
                 if accuracy >= best_acc:
                     best_acc = accuracy
@@ -548,11 +550,12 @@ class mirLM(nn.Module):
                     json.dump(average_loss_list, fp)
                     
                 with open(
-                    os.path.join(perf_dir, f"Avg_Change_in_prediction_{self.mRNA_max_len}.json"),
+                    os.path.join(perf_dir, f"evaluation_loss_{self.mRNA_max_len}.json"),
                     "w",
-                    encoding='utf-8'
+                    encoding="utf-8"
                 ) as fp:
-                    json.dump(average_diff, fp)
+                    json.dump(test_loss_list, fp)
+                    
         # destroy process group to clean up
         if self.ddp:
             dist.destroy_process_group()  

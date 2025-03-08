@@ -31,32 +31,32 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 #     > output_logs/output_TwoTowerMLP_miRaw_noL_noMissing_revmiRNA.log 2>&1 &
 
 # train TwoTowerMLP on TargetScan dataset
-nohup python /home/mcb/users/jgu13/projects/mirLM/scripts/main.py \
-    --mRNA_max_length 30 \
-    --miRNA_max_length 24 \
-    --device cuda:2 \
+# nohup python /home/mcb/users/jgu13/projects/mirLM/scripts/main.py \
+#     --mRNA_max_length 30 \
+#     --miRNA_max_length 24 \
+#     --device cuda:2 \
+#     --epochs 200 \
+#     --batch_size 64 \
+#     --base_model_name TwoTowerMLP \
+#     --model_name TwoTowerMLP_30 \
+#     --dataset_name TargetScan \
+#     --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_train.csv \
+#     --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_validation.csv \
+#     --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/MLPconfig.json \
+#     > output_logs/output_TwoTowerMLP_TargetScan_30.log 2>&1 &
+
+# train HyenaDNA on TargetScan dataset
+nohup python scripts/main.py \
+    --mRNA_max_len 30 \
+    --miRNA_max_len 24 \
+    --device cuda:1 \
     --epochs 200 \
     --batch_size 64 \
-    --base_model_name TwoTowerMLP \
-    --model_name TwoTowerMLP_30 \
+    --base_model_name HyenaDNA \
+    --model_name HyenaDNA_miRNA \
     --dataset_name TargetScan \
     --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_train.csv \
     --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_validation.csv \
-    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/MLPconfig.json \
-    > output_logs/output_TwoTowerMLP_TargetScan_30.log 2>&1 &
-
-# train HyenaDNA on TargetScan dataset
-# nohup python scripts/main.py \
-#     --mRNA_max_len 924 \
-#     --miRNA_max_len 24 \
-#     --device cuda:3 \
-#     --epochs 100 \
-#     --batch_size 16 \
-#     --base_model_name HyenaDNA \
-#     --model_name HyenaDNA_miRNA_924\
-#     --dataset_name TargetScan \
-#     --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_train_924.csv \
-#     --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_validation_924.csv \
-#     --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig3.json \
-#     --use_head \
-#     > output_logs/output_HyenaDNA_TargetScan_924.log 2>&1 &
+    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig2.json \
+    --use_head \
+    > output_logs/output_HyenaDNA_TargetScan_30.log 2>&1 &

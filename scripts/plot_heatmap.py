@@ -37,7 +37,7 @@ def predict(model,
                 miRNA_seq_mask=miRNA_seq_mask,
                 return_attn=return_attn
             )
-        prob = torch.sigmoid(output.squeeze()).item()
+        prob = torch.sigmoid(output.squeeze(-1)).item()
     if kwargs.get("return_attn", ""):
         return prob, attn_weights
     else:
@@ -98,9 +98,9 @@ def load_model(**args_dict):
                             model.dataset_name, 
                             model.model_name, 
                             str(model.mRNA_max_len), 
-                            "checkpoint_epoch_69.pth")
+                            "best_checkpoint_trial_4_epoch_99.pt")
     loaded_data = torch.load(ckpt_path, map_location=model.device)
-    model.load_state_dict(loaded_data["model_state_dict"])
+    model.load_state_dict(loaded_data)
     print(f"Loaded checkpoint from {ckpt_path}")
     return model
 
@@ -124,7 +124,7 @@ def main():
     labels = test_data[["label"]].values
     
     # Testing the first sequence
-    i=10
+    i=1899
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]

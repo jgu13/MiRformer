@@ -24,18 +24,19 @@ def predict(model,
             seq = kwargs["seq"]
             seq_mask = kwargs["seq_mask"]
             output = model(seq, seq_mask, perturb=False)
-        elif model.base_model_name == 'TwoTower':
+        elif model.base_model_name == 'TwoTowerMLP':
             mRNA_seq = kwargs["mRNA_seq"]
             miRNA_seq = kwargs["miRNA_seq"]
             mRNA_seq_mask = kwargs["mRNA_seq_mask"]
             miRNA_seq_mask = kwargs["miRNA_seq_mask"]
             output = model(
-                mRNA_seq,
-                miRNA_seq,
+                mRNA_seq=mRNA_seq,
+                miRNA_seq=miRNA_seq,
                 mRNA_seq_mask=mRNA_seq_mask,
                 miRNA_seq_mask=miRNA_seq_mask,
+                perturb=False,
             )
-        prob = torch.sigmoid(output.squeeze()).item()
+        prob = torch.sigmoid(output.squeeze(-1)).item()
     return prob
 
 def encode_seq(model, 
@@ -76,7 +77,7 @@ def encode_seq(model,
         concat_seq_mask = torch.tensor(concat_seq_mask, dtype=torch.long, device=model.device).unsqueeze(0)
         return {"seq": concat_seq_tokens, 
                 "seq_mask": concat_seq_mask}
-    elif model.base_model_name == "TwoTower":
+    elif model.base_model_name == "TwoTowerMLP":
         mRNA_seq_tokens = torch.tensor(mRNA_seq_tokens, dtype=torch.long, device=model.device).unsqueeze(0)
         miRNA_seq_tokens = torch.tensor(miRNA_seq_tokens, dtype=torch.long, device=model.device).unsqueeze(0)
         mRNA_seq_mask = torch.tensor(mRNA_seq_mask, dtype=torch.long, device=model.device).unsqueeze(0)
@@ -94,7 +95,7 @@ def load_model(**args_dict):
                             model.dataset_name, 
                             model.model_name, 
                             str(model.mRNA_max_len), 
-                            "checkpoint_epoch_19.pth")
+                            "best_checkpoint_trial_4_epoch_99.pt")
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data["model_state_dict"])
     print(f"Loaded checkpoint from {ckpt_path}")
