@@ -147,6 +147,15 @@ def main():
         mRNA_seq=mRNA_seq,
         miRNA_seq=miRNA_seq,
     )
+    # convert mRNA seq tokens to mRNA ids
+    mRNA_tokens = encoded["mRNA_seq"].squeeze(0)
+    mRNA_ids = [tokenizer._convert_id_to_token(d.item()) for d in mRNA_tokens]
+    # convert miRNA seq tokens to mRNA ids
+    miRNA_tokens = encoded["miRNA_seq"].squeeze(0)
+    miRNA_ids = [tokenizer._convert_id_to_token(d.item()) for d in miRNA_tokens]
+    
+    print("mRNA ids = ", mRNA_ids)
+    print("miRNA ids = ", miRNA_ids)
     
     output, attn_weights = predict(
         model=model,
@@ -163,12 +172,12 @@ def main():
     plt.figure(figsize=(10, 12))
     sns.heatmap(sample_attn, 
                 cmap="Blues", 
-                xticklabels=list(mRNA_seq), 
-                yticklabels=list(miRNA_seq))
+                xticklabels=mRNA_ids, 
+                yticklabels=miRNA_ids)
     plt.xlabel("mRNA bases")
     plt.ylabel("miRNA bases")
     plt.title("Cross-Attention Heatmap with Base Labels")
-    file_name = os.path.join(args_dict["save_plot_dir"], f"{mRNA_id}_{miRNA_id}_heatmap.png")
+    file_name = os.path.join(args_dict["save_plot_dir"], f"{mRNA_id}_{miRNA_id}_heatmap_unperturbed.png")
     print(f"Saved plot to {file_name}")
     plt.savefig(file_name, dpi=800, bbox_inches='tight')
     

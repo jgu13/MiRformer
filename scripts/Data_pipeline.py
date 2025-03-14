@@ -354,7 +354,7 @@ class miRawDataset(torch.utils.data.Dataset):
         else:
             seed_start = None
             seed_end = None       
-        # replace U with T
+        # replace U with T and reverse miRNA from 5'-to-3' to 3'-to-5'
         miRNA_seq = miRNA_seq.replace("U", "T")[::-1]
 
         # apply rc_aug here if using
