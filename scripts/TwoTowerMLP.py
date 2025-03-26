@@ -50,33 +50,6 @@ class TwoTowerMLP(mirLM):
         self.q_layer = nn.Linear(self.backbone_cfg["d_model"], self.backbone_cfg["d_model"])
         self.kv_layer = nn.Linear(self.backbone_cfg["d_model"], self.backbone_cfg["d_model"])
      
-    def generate_perturbed_seeds(
-                            self,
-                            original_seq, 
-                            original_mask,
-                            seed_start, 
-                            seed_end,
-                            tokenizer):
-        special_chars = ["[PAD]","[UNK]","[MASK]"]
-        perturbed_seqs = []
-        perturbed_masks = []
-        original_seq = [tokenizer._convert_id_to_token(d.item()) for d in original_seq]
-        seed_start = int(seed_start.item()) if torch.is_tensor(seed_start) else int(seed_start)
-        seed_end = int(seed_end.item()) if torch.is_tensor(seed_end) else int(seed_end)
-        seed_match = original_seq[seed_start:seed_end]
-        for i in range(len(seed_match)):
-            if seed_match[i] in special_chars:
-                continue
-            for base in ["A", "T", "C", "G"]:
-                if base != seed_match[i]:
-                    mutated = seed_match[:i] + [base] + seed_match[i+1:]
-                    perturbed_seq = original_seq[:seed_start] + mutated + original_seq[seed_end:]
-                    # convert back to ids
-                    perturbed_seq = [tokenizer._convert_token_to_id(c) for c in perturbed_seq]
-                    perturbed_seqs.append(torch.tensor(perturbed_seq, dtype=torch.long))
-                    perturbed_masks.append(original_mask)
-        return perturbed_seqs, perturbed_masks # 3 * seed_len
-     
     def compute_cross_attention(
             self,
             Q: torch.tensor, 
@@ -174,20 +147,28 @@ class TwoTowerMLP(mirLM):
                     pos_indices=pos_indices,
                     perturb=True,
                 )  # (batch_size, 1)
-                s_w, s_i = (s_w.squeeze(-1), s_i.squeeze(-1))
-                bce_loss = loss_fn(s_w, target.view(-1))
-                s_w_pos = s_w[pos_indices]
-                s_w_pos_repeated = torch.repeat_interleave(s_w_pos, repeats) # (batchsize * seed_len * 3,)
-                # ranking loss = -ylog(\sigma(s_w-s_i-margin)) where y = 1, enforcing s_w - s_i > margin
-                difference = s_w_pos_repeated - s_i - margin
-                ranking_loss = loss_fn(difference, torch.ones_like(difference))
-                total_loss = bce_loss + alpha * ranking_loss
-                # Log individual losses to wandb
-                wandb.log({
-                    "training_bce_loss": bce_loss.item(),
-                    "training_ranking_loss": ranking_loss.item(),
-                    "training_total_loss": total_loss.item(),
-                })
+                if s_i is not None:
+                    s_w, s_i = (s_w.squeeze(-1), s_i.squeeze(-1))
+                    bce_loss = loss_fn(s_w, target.view(-1))
+                    s_w_pos = s_w[pos_indices]
+                    s_w_pos_repeated = torch.repeat_interleave(s_w_pos, repeats) # (batchsize * seed_len * 3,)
+                    # ranking loss = -ylog(\sigma(s_w-s_i-margin)) where y = 1, enforcing s_w - s_i > margin
+                    difference = s_w_pos_repeated - s_i - margin
+                    ranking_loss = loss_fn(difference, torch.ones_like(difference))
+                    total_loss = bce_loss + alpha * ranking_loss
+                    # Log individual losses to wandb
+                    wandb.log({
+                        "training_bce_loss": bce_loss.item(),
+                        "training_ranking_loss": ranking_loss.item(),
+                        "training_total_loss": total_loss.item(),
+                    })
+                else:
+                    total_loss = loss_fn(s_w.squeeze(-1), target.view(-1))
+                    bce_loss = total_loss.item()
+                    wandb.log({
+                        "training_bce_loss": bce_loss,
+                        "training_total_loss": total_loss.item(),
+                    })
             else: # no positive sampels in the batch
                 s_w = model.forward(
                     mRNA_seq=mRNA_seq,
@@ -315,8 +296,10 @@ class TwoTowerMLP(mirLM):
                         "evaluation_total_loss": total_loss.item(),
                     })
                 else: 
-                    s_w = model.forward(seq=mRNA_seq,
-                                        seq_mask=mRNA_seq_mask,
+                    s_w = model.forward(mRNA_seq=mRNA_seq,
+                                        miRNA_seq=miRNA_seq,
+                                        mRNA_seq_mask=mRNA_seq_mask,
+                                        miRNA_seq_mask=miRNA_seq_mask,
                                         perturb=False,
                                         )
                     s_w = s_w.squeeze(-1)
@@ -496,47 +479,50 @@ class TwoTowerMLP(mirLM):
                 perturbed_masks.extend(perturbed_mask)
                 repeats.append(len(perturbed))
                 # print("repeats = ", repeats)
-            repeats = torch.tensor(repeats, dtype=torch.long, device=self.device)
-            # perturbed_seqs has shape (batchsize * seed_len * 3)
-            # Compute perturbed scores (s_i)
-            perturbed_mRNA_hidden_states = self.hyena(
-                input_ids = torch.stack(perturbed_seqs).to(self.device),
-                input_mask = torch.stack(perturbed_masks).to(self.device),
-                max_mRNA_length=self.mRNA_max_len,
-                max_miRNA_length=self.miRNA_max_len,
-                ) # (batchsize * seed_len * 3, mRNA_seq_len, hidden_size)
-            miRNA_hidden_states_pos = miRNA_hidden_states[pos_indices]
-            miRNA_hidden_states_pos = torch.repeat_interleave(miRNA_hidden_states_pos, repeats, dim=0)
-            # Compute Q, K, V for cross-attention
-            # new_batchsize = batchsize * seed_len * 3
-            Q = self.q_layer(miRNA_hidden_states_pos)  # (new_batchsize, miRNA_seq_len, hidden_size)
-            K = self.kv_layer(perturbed_mRNA_hidden_states)  # (new_batchsize, mRNA_seq_len, hidden_size)
-            V = self.kv_layer(perturbed_mRNA_hidden_states)  # (new_batchsize, mRNA_seq_len, hidden_size)
-            Q_mask = torch.repeat_interleave(miRNA_seq_mask[pos_indices], repeats, dim=0) # (new_batchsize, mRNA_seq_len)
-            K_mask = torch.stack(perturbed_masks).to(self.device)
-            # Compute cross-attention
-            output = self.compute_cross_attention(
-                Q=Q,
-                K=K,
-                V=V,
-                Q_mask=Q_mask,
-                K_mask=K_mask,
-                return_attn=return_attn,
-            )  # (new_batchsize, d_model)
+            if len(perturbed_seqs) > 1:
+                repeats = torch.tensor(repeats, dtype=torch.long, device=self.device)
+                # perturbed_seqs has shape (batchsize * seed_len * 3)
+                # Compute perturbed scores (s_i)
+                perturbed_mRNA_hidden_states = self.hyena(
+                    input_ids = torch.stack(perturbed_seqs).to(self.device),
+                    input_mask = torch.stack(perturbed_masks).to(self.device),
+                    max_mRNA_length=self.mRNA_max_len,
+                    max_miRNA_length=self.miRNA_max_len,
+                    ) # (batchsize * seed_len * 3, mRNA_seq_len, hidden_size)
+                miRNA_hidden_states_pos = miRNA_hidden_states[pos_indices]
+                miRNA_hidden_states_pos = torch.repeat_interleave(miRNA_hidden_states_pos, repeats, dim=0)
+                # Compute Q, K, V for cross-attention
+                # new_batchsize = batchsize * seed_len * 3
+                Q = self.q_layer(miRNA_hidden_states_pos)  # (new_batchsize, miRNA_seq_len, hidden_size)
+                K = self.kv_layer(perturbed_mRNA_hidden_states)  # (new_batchsize, mRNA_seq_len, hidden_size)
+                V = self.kv_layer(perturbed_mRNA_hidden_states)  # (new_batchsize, mRNA_seq_len, hidden_size)
+                Q_mask = torch.repeat_interleave(miRNA_seq_mask[pos_indices], repeats, dim=0) # (new_batchsize, mRNA_seq_len)
+                K_mask = torch.stack(perturbed_masks).to(self.device)
+                # Compute cross-attention
+                output = self.compute_cross_attention(
+                    Q=Q,
+                    K=K,
+                    V=V,
+                    Q_mask=Q_mask,
+                    K_mask=K_mask,
+                    return_attn=return_attn,
+                )  # (new_batchsize, d_model)
 
-            if return_attn:
-                attn_weights=output["attn_weights"]
-                cross_attn=output["cross_attn"]
+                if return_attn:
+                    attn_weights=output["attn_weights"]
+                    cross_attn=output["cross_attn"]
+                else:
+                    cross_attn=output["cross_attn"]
+                
+                # Pass through the MLP head
+                s_i = self.mlp_head(cross_attn)  # (new_batchsize, n_classes)
+                
+                if return_attn:
+                    return s_w, s_i, repeats, attn_weights
+                else:
+                    return s_w, s_i, repeats
             else:
-                cross_attn=output["cross_attn"]
-            
-            # Pass through the MLP head
-            s_i = self.mlp_head(cross_attn)  # (new_batchsize, n_classes)
-            
-            if return_attn:
-                return s_w, s_i, repeats, attn_weights
-            else:
-                return s_w, s_i, repeats
+                return s_w, None, repeats
         
         if return_attn:
             return s_w, attn_weights

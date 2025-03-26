@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import logomaker as lm
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 # local import
 from mirLM import mirLM
 from argument_parser import get_argument_parser
@@ -95,7 +96,7 @@ def load_model(**args_dict):
                             model.dataset_name, 
                             model.model_name, 
                             str(model.mRNA_max_len), 
-                            "best_checkpoint_trial_4_epoch_99.pt")
+                            "checkpoint_epoch_final.pth")
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data["model_state_dict"])
     print(f"Loaded checkpoint from {ckpt_path}")
@@ -108,7 +109,7 @@ def single_base_perturbation(seq, pos):
     seq[pos] = random.choice([base for base in bases if base != orig])
     return ''.join(seq)
 
-def viz_sequence(seq, changes, file_name=None):
+def viz_sequence(seq, changes, seed_start=None, seed_end=None, file_name=None):
     # Create a matrix for the sequence logo
     logo_matrix = lm.alignment_to_matrix([seq])
     # Convert matrix to float to avoid dtype conflicts
@@ -121,7 +122,7 @@ def viz_sequence(seq, changes, file_name=None):
     # Create the sequence logo
     logo = lm.Logo(logo_matrix, 
                    color_scheme='classic',
-                   figsize=(10,2))
+                   figsize=(80,2))
 
     # Style the plot
     logo.style_spines(visible=False)
@@ -132,8 +133,20 @@ def viz_sequence(seq, changes, file_name=None):
     logo.ax.set_ylabel("Change in Accuracy")
     logo.ax.set_title("Impact of Single-Base Perturbations")
     
+    # Add rectangle around specific bases (highlight_region is a tuple: (start, end))
+    if seed_start is not None and seed_end is not None:
+        rect = patches.Rectangle(
+            (seed_start - 0.5, logo.ax.get_ylim()[0]),  # (x, y)
+            seed_end - seed_start + 1,                       # width
+            logo.ax.get_ylim()[1] - logo.ax.get_ylim()[0],  # height
+            linewidth=2,
+            edgecolor='red',
+            facecolor='none'
+        )
+        logo.ax.add_patch(rect)
+    
     if file_name:
-        plt.savefig(file_name, dpi=500, bbox_inches='tight')  # Save as PNG
+        plt.savefig(file_name, dpi=1000, bbox_inches='tight')  # Save as PNG
     plt.close()
 
 def main():
@@ -155,11 +168,13 @@ def main():
     labels = test_data[["label"]].values
     
     # Testing the first sequence
-    i=1899
+    i=1760
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]
     mRNA_id = test_data[["Gene Symbol"]].iloc[i,0]
+    seed_start = test_data[["seed start"]].iloc[i,0]
+    seed_end = test_data[["seed end"]].iloc[i,0]
     print("miRNA id = ",miRNA_id)
     print("mRNA id = ", mRNA_id)
     # replace U with T and reverse miRNA to 3' to 5' 
@@ -223,9 +238,14 @@ def main():
             single_delta.append(delta)
         deltas.append(sum(single_delta)/len(single_delta))
     
+    print("Max in delta = ", max(deltas))
+    
+    os.makedirs(args.save_plot_dir, exist_ok=True)
     file_path = os.path.join(args.save_plot_dir, f"{mRNA_id}.png")
     viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  changes=deltas,
+                 seed_start=seed_start,
+                 seed_end=seed_end,
                  file_name=file_path)
 
 if __name__ == '__main__':

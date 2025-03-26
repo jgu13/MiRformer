@@ -236,6 +236,40 @@ class mirLM(nn.Module):
         # for cudnn, if reproducibility is needed:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
+        
+    def generate_perturbed_seeds(
+                            self,
+                            original_seq, 
+                            original_mask,
+                            seed_start, 
+                            seed_end,
+                            tokenizer):
+        # print("Original sequence = ", original_seq)
+        special_chars = ["[PAD]","[UNK]","[MASK]"]
+        perturbed_seqs = []
+        perturbed_masks = []
+        original_seq = [tokenizer._convert_id_to_token(d.item()) for d in original_seq]
+        seed_start = int(seed_start.item()) if torch.is_tensor(seed_start) else int(seed_start)
+        seed_end = int(seed_end.item()) if torch.is_tensor(seed_end) else int(seed_end)
+        if seed_start < len(original_seq) and seed_end < len(original_seq):
+            seed_match = original_seq[seed_start:seed_end]
+            # print("Seed start = ", seed_start)
+            # print("Seed end = ", seed_end)
+            # print("Seed match region = ", seed_match)
+            for i in range(len(seed_match)):
+                if seed_match[i] in special_chars:
+                    continue
+                for base in ["A", "T", "C", "G"]:
+                    if base != seed_match[i]:
+                        mutated = seed_match[:i] + [base] + seed_match[i+1:]
+                        perturbed_seq = original_seq[:seed_start] + mutated + original_seq[seed_end:]
+                        # convert back to ids
+                        perturbed_seq = [tokenizer._convert_token_to_id(c) for c in perturbed_seq]
+                        perturbed_seqs.append(torch.tensor(perturbed_seq, dtype=torch.long))
+                        perturbed_masks.append(original_mask)
+        else:
+            print("Seed start >= length of sequence or seed end >= length of sequence. Skipping the current sequence perturbation.")
+        return perturbed_seqs, perturbed_masks # 3 * seed_len
     
     def run(self, model):
         self.seed_everything(seed=42) 
@@ -495,19 +529,18 @@ class mirLM(nn.Module):
                     average_diff.append(diff_score)
                     test_loss_list.append(test_loss)
 
-                if accuracy >= best_acc:
+                if accuracy >= best_acc and self.rank == 0:
                     best_acc = accuracy
                     counter = 0
                     # Save the model checkpoint
-                    if self.rank == 0:
-                        checkpoint_path = os.path.join(model_checkpoints_dir, 
-                                                    f"best_checkpoint.pth")
-                        self.save_checkpoint(model=model,
-                                            optimizer=optimizer, 
-                                            epoch=epoch, 
-                                            average_loss=average_loss, 
-                                            accuracy=accuracy, 
-                                            path=checkpoint_path)
+                    checkpoint_path = os.path.join(model_checkpoints_dir, 
+                                                f"best_checkpoint_epoch_{epoch}.pth")
+                    self.save_checkpoint(model=model,
+                                        optimizer=optimizer, 
+                                        epoch=epoch, 
+                                        average_loss=average_loss, 
+                                        accuracy=accuracy, 
+                                        path=checkpoint_path)
                 elif accuracy < best_acc:
                     counter += 1
                     # Check if early stopping condition is met.

@@ -77,14 +77,14 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 #     > output_logs/output_CNN_selected_perfect_seed_match.log 2>&1 &
 
 # continue train on TargetScan
-nohup python scripts/baseline_CNN.py \
-    --mRNA_max_len 994 \
-    --miRNA_max_len 24 \
-    --device cuda:1 \
-    --num_epochs 100 \
-    --batch_size 64 \
-    --dataset_name TargetScan \
-    --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_1024_train.csv \
-    --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_1024_validation.csv \
-    --accumulation_step 2\
-    > output_logs/output_CNN_TargetScan_w_linker_revmiRNA.log 2>&1 &
+# nohup python scripts/baseline_CNN.py \
+#     --mRNA_max_len 994 \
+#     --miRNA_max_len 24 \
+#     --device cuda:1 \
+#     --num_epochs 100 \
+#     --batch_size 64 \
+#     --dataset_name TargetScan \
+#     --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_1024_train.csv \
+#     --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_1024_validation.csv \
+#     --accumulation_step 2\
+#     > output_logs/output_CNN_TargetScan_w_linker_revmiRNA.log 2>&1 &
