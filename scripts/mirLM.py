@@ -84,8 +84,8 @@ class mirLM(nn.Module):
             print("Batch size == ", self.batch_size)
 
         # model to be used for training
-        pretrained_model_name = "hyenadna-small-32k-seqlen"  # use None if training from scratch
-        # pretrained_model_name = None
+        # pretrained_model_name = "hyenadna-small-32k-seqlen"  # use None if training from scratch
+        pretrained_model_name = None
         
         # we need these for the decoder head, if using
         self.use_head = use_head
@@ -151,8 +151,8 @@ class mirLM(nn.Module):
             self.learning_rate = self.basemodel_cfg["lr"] * self.world_size # scale learning rate accordingly
             self.weight_decay = self.basemodel_cfg["weight_decay"]
             self.accumulation_step = self.basemodel_cfg["accumulation_step"]
-            self.alpha = self.basemodel_cfg["alpha"]
-            self.margin = self.basemodel_cfg["margin"]
+            self.alpha = self.basemodel_cfg.get("alpha", None)
+            self.margin = self.basemodel_cfg.get("margin", None)
             print(f"learning rate = {self.learning_rate}\n"
                   f"weight decay = {self.weight_decay}\n"
                   f"Alpha = {self.alpha}\n"

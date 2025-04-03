@@ -69,22 +69,22 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 #     > output_logs/output_hyena_miraw_50.log 2>&1 &
 
 # train on miRAW data
-# nohup python \
-#     scripts/main.py \
-#     --mRNA_max_len 40 \
-#     --miRNA_max_len 26\
-#     --device cuda:2 \
-#     --epochs 100 \
-#     --batch_size 64 \
-#     --base_model_name HyenaDNA \
-#     --model_name HyenaDNA \
-#     --dataset_name miRAW_noL_noMissing \
-#     --train_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_train.csv \
-#     --val_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_validation.csv \
-#     --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
-#     --use_head \
-#     --accumulation_step 8 \
-#     > output_logs/output_HyenaDNA_miRaw_noL_noMissing_revmiRNA.log 2>&1 &
+nohup python \
+    scripts/main.py \
+    --mRNA_max_len 40 \
+    --miRNA_max_len 26 \
+    --device cuda:2 \
+    --epochs 100 \
+    --batch_size 64 \
+    --base_model_name HyenaDNA \
+    --model_name HyenaDNA \
+    --dataset_name miRAW_noL_noMissing \
+    --train_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_train.csv \
+    --val_dataset_path $data_dir/data_miRaw_noL_noMissing_remained_seed1122_validation.csv \
+    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
+    --use_head \
+    --accumulation_step 8 \
+    > output_logs/output_HyenaDNA_miRaw_noL_noMissing_revmiRNA.log 2>&1 &
 
 # continue train on selected perfect seed match
 # nohup python \
@@ -106,19 +106,19 @@ data_dir=/home/mcb/users/jgu13/projects/mirLM/data
 #     > output_logs/output_HyenaDNA_selected_perfect_seed_match.log 2>&1 &
 
 # Train on TargetScan dataset
-nohup python \
-    scripts/main.py \
-    --mRNA_max_len 30 \
-    --miRNA_max_len 26\
-    --device cuda:2 \
-    --epochs 100 \
-    --batch_size 64 \
-    --base_model_name HyenaDNA \
-    --model_name HyenaDNA_miRNA \
-    --dataset_name TargetScan \
-    --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_train.csv \
-    --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_validation.csv \
-    --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
-    --use_head \
-    --accumulation_step 8 \
-    > output_logs/output_HyenaDNA_TargetScan_short.log 2>&1 &
+# nohup python \
+#     scripts/main.py \
+#     --mRNA_max_len 30 \
+#     --miRNA_max_len 26\
+#     --device cuda:2 \
+#     --epochs 100 \
+#     --batch_size 64 \
+#     --base_model_name HyenaDNA \
+#     --model_name HyenaDNA_miRNA \
+#     --dataset_name TargetScan \
+#     --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_train.csv \
+#     --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_validation.csv \
+#     --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig.json \
+#     --use_head \
+#     --accumulation_step 8 \
+#     > output_logs/output_HyenaDNA_TargetScan_short.log 2>&1 &
