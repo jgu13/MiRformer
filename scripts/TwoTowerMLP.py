@@ -67,7 +67,7 @@ class TwoTowerMLP(mirLM):
         # expand K mask to mask out keys, make each query only attend to valid keys
         K_mask = K_mask.unsqueeze(1).expand(
             -1, Q.shape[1], -1
-        )  # [batchsize, miRNA_seq_len, mRNA_seq_len]
+        )  # [batchsize, mRNA_seq_len, miRNA_seq_len]
         scores = scores.masked_fill(K_mask == 0, -1e9) # [batchsize, miRNA_seq_len, mRNA_seq_len]
         # apply softmax on the key dimension
         attn_weights = F.softmax(scores, dim=-1)  # [batchsize, miRNA_seq_len, mRNA_seq_len]

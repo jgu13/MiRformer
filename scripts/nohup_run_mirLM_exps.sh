@@ -51,15 +51,15 @@ nohup python scripts/main.py \
     --miRNA_max_len 24 \
     --device cuda:3 \
     --epochs 300 \
-    --batch_size 64 \
+    --batch_size 16 \
     --base_model_name HyenaDNA \
-    --model_name HyenaDNA_30_perturbed_alpha_0.25 \
+    --model_name HyenaDNA_miRNA_few_shot \
     --dataset_name TargetScan \
-    --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_train.csv \
+    --train_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_few_shot_train.csv \
     --val_dataset_path /home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/TargetScan_validation.csv \
     --basemodel_cfg /home/mcb/users/jgu13/projects/mirLM/checkpoints/Hyenaconfig_30.json \
     --use_head \
-    > output_logs/output_HyenaDNA_TargetScan_30_perturbed.log 2>&1 &
+    > output_logs/output_HyenaDNA_TargetScan_30_few_shot.log 2>&1 &
 
 # nohup python scripts/main.py \
 #     --mRNA_max_len 500 \

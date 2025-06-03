@@ -208,6 +208,7 @@ class HyenaDNAWrapper(mirLM):
                     s_w = s_w.squeeze(-1)
                     total_loss = loss_fn(s_w, target.view(-1)) # total loss equals bce loss when no perturbation
                     losses.append(total_loss.item())
+                s_w = F.sigmoid(s_w)
                 prediction = (s_w > 0.5).long() # (batchsize,)
                 if self.ddp:
                     local_correct += prediction.eq(target.view(-1)).sum().item()

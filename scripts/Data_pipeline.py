@@ -329,7 +329,6 @@ class miRawDataset(torch.utils.data.Dataset):
         self.concat = concat
         self.data = dataframe
         self.add_linker = add_linker
-        # Assuming the last column is the label, adjust this if needed
         self.mRNA_sequences = self.data[[mRNA_col]].values
         self.miRNA_sequences = self.data[[miRNA_col]].values
         self.labels = self.data[["label"]].values
@@ -422,3 +421,82 @@ class miRawDataset(torch.utils.data.Dataset):
             miRNA_seq_mask = torch.tensor(miRNA_seq_mask, dtype=torch.long)
             target = torch.tensor([label], dtype=torch.float)
             return mRNA_seq_tokens, miRNA_seq_tokens, mRNA_seq_mask, miRNA_seq_mask, seed_start, seed_end, target
+
+class QuestionAnswerDataset(torch.utils.data.Dataset):
+    def __init__(self,
+                 data,
+                 mrna_max_len,
+                 mirna_max_len,
+                 tokenizer,
+                 mRNA_col="mRNA sequence",
+                 miRNA_col="miRNA sequence",
+                 seed_start_col=None,
+                 seed_end_col=None,
+                 ):
+        self.data = data
+        self.mrna_max_len = mrna_max_len
+        self.mirna_max_len = mirna_max_len
+        self.tokenizer = tokenizer
+        self.mRNA_col = mRNA_col
+        self.miRNA_col = miRNA_col
+        # self.mRNA_sequences = self.data[[mRNA_col]].values
+        # self.miRNA_sequences = self.data[[miRNA_col]].values
+        self.seed_start_col = seed_start_col
+        self.seed_end_col   = seed_end_col
+        # self.seed_starts = self.data[[seed_start_col]].values
+        # self.seed_ends = self.data[[seed_end_col]].values
+        
+    def __len__(self):
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        mrna_seq = self.data[self.mRNA_col].iat[idx]
+        mirna_seq = self.data[self.miRNA_col].iat[idx]
+        label = self.data["label"].iat[idx]
+
+        if self.seed_start_col is not None and self.seed_end_col is not None:
+            seed_start = torch.tensor(self.data[self.seed_start_col].iat[idx], dtype=torch.long)
+            seed_end = torch.tensor(self.data[self.seed_end_col].iat[idx], dtype=torch.long)
+        else:
+            seed_start = -1
+            seed_end = -1 
+        
+        # Tokenize mirna
+        mirna_seq = mirna_seq.replace("U", "T")
+        mirna_encoded = self.tokenizer(
+            mirna_seq,
+            add_special_tokens=False,
+            padding="max_length",
+            truncation=True,
+            max_length=self.mirna_max_len, 
+            return_attention_mask=True,
+        )
+
+        # Tokenize mrna
+        mrna_encoded = self.tokenizer(
+            mrna_seq,
+            add_special_tokens=False,
+            padding="max_length",
+            truncation=True,
+            max_length=self.mrna_max_len,  
+            return_attention_mask=True,
+        )
+
+        mirna_ids = torch.tensor(mirna_encoded["input_ids"], dtype=torch.long)
+        mirna_attn_mask = torch.tensor(mirna_encoded["attention_mask"], dtype=torch.long)
+        mrna_ids = torch.tensor(mrna_encoded["input_ids"], dtype=torch.long)
+        mrna_attn_mask = torch.tensor(mrna_encoded["attention_mask"], dtype=torch.long)
+        target = torch.tensor([label], dtype=torch.long)
+
+        return {
+            "mirna_input_ids": mirna_ids,
+            "mirna_attention_mask": mirna_attn_mask,
+            "mrna_input_ids": mrna_ids,
+            "mrna_attention_mask": mrna_attn_mask,
+            "start_positions": seed_start,  # used as labels
+            "end_positions": seed_end,
+            "target": target
+        }
+      
+        
+        

@@ -10,7 +10,7 @@ from torch import nn, optim
 import torch.distributed as dist
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, DistributedSampler
-import pandas as pd
+from utils import load_dataset
 
 # Local imports
 from Hyena_layer import HyenaDNAPreTrainedModel, HyenaDNAModel
@@ -179,28 +179,28 @@ class mirLM(nn.Module):
         else:
             raise ValueError(f"Unknown base_model_name: {base_model_name}")
     
-    def load_dataset(self, dataset=None, sep=","):
-        """
-        Load dataset from a file or DataFrame.
-        """
-        if dataset:
-            if isinstance(dataset, str):
-                if dataset.endswith((".csv", ".txt", ".tsv")):
-                    data = pd.read_csv(dataset, sep=sep)
-                elif dataset.endswith(".xlsx"):
-                    data = pd.read_excel(dataset)
-                elif dataset.endswith(".json"):
-                    with open(dataset, "r", encoding="utf-8") as f:
-                        data = pd.read_json(f)
-                else:
-                    raise ValueError(f"Unrecognized format of {dataset}")
-            elif isinstance(dataset, pd.DataFrame):
-                data = dataset
-            else:
-                raise TypeError("Dataset must be a path or a pandas DataFrame.")
-        else:
-            raise ValueError("Dataset cannot be None.")
-        return data
+    # def load_dataset(self, dataset=None, sep=","):
+    #     """
+    #     Load dataset from a file or DataFrame.
+    #     """
+    #     if dataset:
+    #         if isinstance(dataset, str):
+    #             if dataset.endswith((".csv", ".txt", ".tsv")):
+    #                 data = pd.read_csv(dataset, sep=sep)
+    #             elif dataset.endswith(".xlsx"):
+    #                 data = pd.read_excel(dataset)
+    #             elif dataset.endswith(".json"):
+    #                 with open(dataset, "r", encoding="utf-8") as f:
+    #                     data = pd.read_json(f)
+    #             else:
+    #                 raise ValueError(f"Unrecognized format of {dataset}")
+    #         elif isinstance(dataset, pd.DataFrame):
+    #             data = dataset
+    #         else:
+    #             raise TypeError("Dataset must be a path or a pandas DataFrame.")
+    #     else:
+    #         raise ValueError("Dataset cannot be None.")
+        # return data
 
     def save_checkpoint(self,
                         model,
@@ -312,7 +312,7 @@ class mirLM(nn.Module):
         )
 
         if self.evaluate_flag:
-            D_test = self.load_dataset(self.test_dataset_path)
+            D_test = load_dataset(self.test_dataset_path)
             if self.base_model_name == 'HyenaDNA':
                 ds_test = miRawDataset(
                     D_test,
@@ -342,8 +342,8 @@ class mirLM(nn.Module):
                 )
             test_loader = DataLoader(ds_test, batch_size=self.batch_size, shuffle=False)
         else:
-            D_train = self.load_dataset(self.train_dataset_path)
-            D_val = self.load_dataset(self.val_dataset_path)
+            D_train = load_dataset(self.train_dataset_path)
+            D_val = load_dataset(self.val_dataset_path)
             
             if self.base_model_name == 'HyenaDNA':
                 ds_train = miRawDataset(
