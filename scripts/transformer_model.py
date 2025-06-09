@@ -159,11 +159,11 @@ class CrossAttentionPredictor(nn.Module):
                  mirna_max_len:int,
                  mrna_max_len:int, 
                  vocab_size:int=12, # 7 special tokens + 5 bases
-                 num_layers:int=2, 
-                 embed_dim:int=128, 
+                 num_layers:int=4, 
+                 embed_dim:int=256, 
                  num_heads:int=4, 
-                 ff_dim:int=256,
-                 hidden_sizes:list[int]=[512, 512],
+                 ff_dim:int=1024,
+                 hidden_sizes:list[int]=[2048, 2048],
                  n_classes:int=1, 
                  dropout:float=0.1,
                  device:str='cuda',
@@ -597,5 +597,7 @@ if __name__ == "__main__":
                                    epochs=10,
                                    batch_size=32,
                                    predict_binding=False)
-    model.run(model=model)
+    # model.run(model=model)
+    # n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # print(f"Total trainable parameters = {n_params}.") #11.3M
    
