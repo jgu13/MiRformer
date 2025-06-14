@@ -463,6 +463,7 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
         
         # Tokenize mirna
         mirna_seq = mirna_seq.replace("U", "T")
+        mirna_seq = mirna_seq[::-1]
         mirna_encoded = self.tokenizer(
             mirna_seq,
             add_special_tokens=False,

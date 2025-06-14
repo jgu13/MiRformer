@@ -136,12 +136,12 @@ class TransformerEncoder(nn.Module):
             x = layer(x, mask)
         return x
 
-class Binding_predictor(nn.Module):
+class LinearHead(nn.Module):
     def __init__(self,
                  input_size, 
                  hidden_sizes,
                  output_size):
-        super(Binding_predictor, self).__init__()
+        super(LinearHead, self).__init__()
         self.activation = nn.ReLU()
         layers = []
         for h in hidden_sizes:
@@ -167,6 +167,7 @@ class CrossAttentionPredictor(nn.Module):
                  n_classes:int=1, 
                  dropout:float=0.1,
                  device:str='cuda',
+                 predict_span=True,
                  predict_binding=False):
         super(CrossAttentionPredictor, self).__init__()
         self.embed_dim = embed_dim
@@ -194,12 +195,13 @@ class CrossAttentionPredictor(nn.Module):
         )
         self.cross_norm = nn.LayerNorm(embed_dim) # normalize over embedding dimension
         self.qa_outputs = nn.Linear(embed_dim, 2)
-        self.binding_output = Binding_predictor(
+        self.binding_output = LinearHead(
             input_size=embed_dim, 
             hidden_sizes=hidden_sizes,
             output_size=n_classes)
         self.dropout = nn.Dropout(dropout)
         self.device = device
+        self.predict_span = predict_span
         self.predict_binding = predict_binding
     
     def forward(self, mirna, mrna, mrna_mask, mirna_mask):
@@ -228,10 +230,12 @@ class CrossAttentionPredictor(nn.Module):
             binding_logits = self.binding_output(z_norm_mean) # (batchsize, 1)
         else:
             binding_logits = None
-        # predict start and end
-        span_logits = self.qa_outputs(z_norm) # (batchsize, mrna_len, 2)
-        start_logits, end_logits = span_logits[...,0], span_logits[...,1] # (batchsize, mrna_len)
-        
+        if self.predict_span:
+            # predict start and end
+            span_logits = self.qa_outputs(z_norm) # (batchsize, mrna_len, 2)
+            start_logits, end_logits = span_logits[...,0], span_logits[...,1] # (batchsize, mrna_len)
+        else:
+            start_logits, end_logits = None, None
         return binding_logits, start_logits, end_logits
     
 class QuestionAnsweringModel(nn.Module):
@@ -244,6 +248,7 @@ class QuestionAnsweringModel(nn.Module):
                 epochs:int=100,
                 batch_size:int=64,
                 lr=0.001,
+                predict_span=True,
                 predict_binding=False):
         super(QuestionAnsweringModel, self).__init__()
         self.mrna_max_len = mrna_max_len
@@ -255,9 +260,11 @@ class QuestionAnsweringModel(nn.Module):
         self.batch_size = batch_size
         self.lr = lr
         self.predict_binding = predict_binding
+        self.predict_span = predict_span
         self.predictor = CrossAttentionPredictor(mrna_max_len=mrna_max_len,
                                                  mirna_max_len=mirna_max_len,
                                                  device=device,
+                                                 predict_span=predict_span,
                                                  predict_binding=predict_binding)
     
     def forward(self, 
@@ -340,9 +347,10 @@ class QuestionAnsweringModel(nn.Module):
             )
             binding_logits, start_logits, end_logits = outputs  # [B, L]
                
-            # mask padded output in start and end logits
-            start_logits = start_logits.masked_fill(mrna_mask==0, float("-inf"))
-            end_logits   = end_logits.masked_fill(mrna_mask==0, float("-inf"))
+            if self.predict_span:
+                # mask padded output in start and end logits
+                start_logits = start_logits.masked_fill(mrna_mask==0, float("-inf"))
+                end_logits   = end_logits.masked_fill(mrna_mask==0, float("-inf"))
             
             start_positions = batch["start_positions"]
             end_positions   = batch["end_positions"]
@@ -351,19 +359,19 @@ class QuestionAnsweringModel(nn.Module):
             span_loss = torch.tensor(0.0, device=device)
             binding_loss = torch.tensor(0.0, device=device)
 
-            if binding_logits is not None:
+            if self.predict_binding and binding_logits is not None:
                 binding_loss_fn = nn.BCEWithLogitsLoss()
                 binding_loss    = binding_loss_fn(binding_logits.squeeze(-1), binding_targets.view(-1).float())
                 pos_mask        = binding_targets.view(-1).bool()
-                if pos_mask.any():
-                    # only loss of positive pairs arecounted
+                if self.predict_span and pos_mask.any():
+                    # only loss of positive pairs are counted
                     loss_start = loss_fn(start_logits[pos_mask,], start_positions[pos_mask]) # CrossEntropyLoss expects [B, L], labels as [B]
                     loss_end   = loss_fn(end_logits[pos_mask,], end_positions[pos_mask])
                     span_loss  = 0.5 * (loss_start + loss_end)
                     loss       = span_loss + binding_loss
                 else:
                     loss       = binding_loss
-            else:
+            elif self.predict_span:
                 # assume all mirna-mrna pairs are positive
                 # CrossEntropyLoss expects [B, L], labels as [B]
                 loss_start = loss_fn(start_logits, start_positions)
@@ -420,9 +428,10 @@ class QuestionAnsweringModel(nn.Module):
                 )
                 binding_logits, start_logits, end_logits = outputs
 
-                # mask padded mrna tokens
-                start_logits = start_logits.masked_fill(mrna_mask==0, float("-inf"))
-                end_logits   = end_logits.masked_fill(mrna_mask==0, float("-inf"))
+                if self.predict_span:
+                    # mask padded mrna tokens
+                    start_logits = start_logits.masked_fill(mrna_mask==0, float("-inf"))
+                    end_logits   = end_logits.masked_fill(mrna_mask==0, float("-inf"))
 
                 # Compute loss
                 loss_fn = nn.CrossEntropyLoss()
@@ -432,7 +441,7 @@ class QuestionAnsweringModel(nn.Module):
                 binding_targets = batch["target"] # (batchsize, )
 
                 # Compute binding loss if binding label is predicted
-                if binding_logits is not None:
+                if self.predict_binding and binding_logits is not None:
                     binding_loss_fn = nn.BCEWithLogitsLoss()
                     binding_loss    = binding_loss_fn(binding_logits.squeeze(-1), binding_targets.view(-1).float())
                     binding_probs   = F.sigmoid(binding_logits)
@@ -440,14 +449,14 @@ class QuestionAnsweringModel(nn.Module):
                     all_binding_preds.extend(binding_preds.cpu())
                     all_binding_labels.extend(binding_targets.view(-1).cpu())
                     pos_mask = binding_targets.view(-1).bool() # (batchsize, )
-                    if pos_mask.any():
+                    if self.predict_span and pos_mask.any():
                         loss_start = loss_fn(start_logits[pos_mask,], start_positions[pos_mask])
                         loss_end = loss_fn(end_logits[pos_mask,], end_positions[pos_mask])
                         span_loss = 0.5 * (loss_start + loss_end)
                         loss = span_loss + binding_loss
                     else:
                         loss = binding_loss
-                else:
+                elif self.predict_span:
                     # assume all mirna-mrna pairs are positive
                     loss_start = loss_fn(start_logits, start_positions)
                     loss_end   = loss_fn(end_logits, end_positions)
@@ -461,7 +470,7 @@ class QuestionAnsweringModel(nn.Module):
 
                 # Predictions
                 pos_mask = binding_targets.view(-1).bool()
-                if pos_mask.any():
+                if self.predict_span and pos_mask.any():
                     start_preds = torch.argmax(start_logits[pos_mask,], dim=-1) #(batch_size, )
                     end_preds   = torch.argmax(end_logits[pos_mask,], dim=-1) #(batch_size, )
 
@@ -540,8 +549,8 @@ class QuestionAnsweringModel(nn.Module):
                                        model_max_length=self.mrna_max_len,
                                        padding_side="right")
         # load dataset
-        D_train  = load_dataset(self.train_datapath, sep='\t')
-        D_val    = load_dataset(self.valid_datapath, sep='\t')
+        D_train  = load_dataset(self.train_datapath, sep=',')
+        D_val    = load_dataset(self.valid_datapath, sep=',')
         ds_train = QuestionAnswerDataset(data=D_train,
                                          mrna_max_len=self.mrna_max_len,
                                          mirna_max_len=self.mirna_max_len,
@@ -593,11 +602,12 @@ if __name__ == "__main__":
                                    mirna_max_len=mirna_max_len,
                                    train_datapath=train_datapath,
                                    valid_datapath=valid_datapath,
-                                   device='cuda:1',
-                                   epochs=10,
+                                   device='cuda:2',
+                                   epochs=50,
                                    batch_size=32,
-                                   predict_binding=False)
-    # model.run(model=model)
+                                   predict_span=False,
+                                   predict_binding=True)
+    model.run(model=model)
     # n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # print(f"Total trainable parameters = {n_params}.") #11.3M
    
