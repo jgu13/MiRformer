@@ -60,6 +60,7 @@ class MultiHeadAttention(nn.Module):
             mask = mask.to(self.device)
             scores = scores.masked_fill(mask==0, float("-inf"))
         attention = F.softmax(scores, dim=-1)
+        attention = F.dropout(attention, p=0.1)
         output = torch.matmul(attention, V) # [batchsize, num_heads, q_len, head_dim]
 
         # Concatenate heads and apply final linear layer
@@ -116,6 +117,7 @@ class TransformerEncoderLayer(nn.Module):
 
         # Position-wise Feed-Forward Network with residual connection and layer normalization
         ff_output = self.feed_forward(x)
+        ff_output = self.dropout(ff_output)
         x = self.norm2(x + self.dropout(ff_output))
 
         return x
@@ -140,14 +142,18 @@ class LinearHead(nn.Module):
     def __init__(self,
                  input_size, 
                  hidden_sizes,
-                 output_size):
+                 output_size,
+                 dropout):
         super(LinearHead, self).__init__()
         self.activation = nn.ReLU()
         layers = []
         for h in hidden_sizes:
             layer = nn.Linear(input_size, h)
-            layers.append(layer)
-            layers.append(nn.ReLU())
+            layers += [
+                layer,
+                nn.ReLU(),
+                nn.Dropout(dropout)
+            ]
             input_size = h
         layers.append(nn.Linear(h, output_size))
         self.transform = nn.Sequential(*layers)
@@ -159,18 +165,20 @@ class CrossAttentionPredictor(nn.Module):
                  mirna_max_len:int,
                  mrna_max_len:int, 
                  vocab_size:int=12, # 7 special tokens + 5 bases
-                 num_layers:int=4, 
+                 num_layers:int=2, 
                  embed_dim:int=256, 
-                 num_heads:int=4, 
-                 ff_dim:int=1024,
-                 hidden_sizes:list[int]=[2048, 2048],
+                 num_heads:int=2, 
+                 ff_dim:int=512,
+                 hidden_sizes:list[int]=[512, 512],
                  n_classes:int=1, 
-                 dropout:float=0.1,
+                 dropout_rate:float=0.1,
                  device:str='cuda',
                  predict_span=True,
                  predict_binding=False):
         super(CrossAttentionPredictor, self).__init__()
         self.embed_dim = embed_dim
+        self.dropout_rate = dropout_rate
+        self.device = device
         self.embedding = nn.Embedding(vocab_size, embed_dim)
         self.mirna_positional_embedding = AdditivePositionalEncoding(max_len=mirna_max_len, d_model=embed_dim)
         self.mrna_positional_embedding = AdditivePositionalEncoding(max_len=mrna_max_len, d_model=embed_dim)
@@ -180,6 +188,7 @@ class CrossAttentionPredictor(nn.Module):
             num_heads=num_heads,
             ff_dim=ff_dim,
             device=device,
+            dropout=dropout_rate,
         )
         self.mrna_encoder = TransformerEncoder(
             num_layers=num_layers,
@@ -187,20 +196,21 @@ class CrossAttentionPredictor(nn.Module):
             num_heads=num_heads,
             ff_dim=ff_dim,
             device=device,
+            dropout=dropout_rate,
         )
         self.cross_attn_layer = MultiHeadAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
             device=device,
         )
+        self.dropout = nn.Dropout(dropout_rate)
         self.cross_norm = nn.LayerNorm(embed_dim) # normalize over embedding dimension
-        self.qa_outputs = nn.Linear(embed_dim, 2)
+        self.qa_outputs = nn.Linear(embed_dim, 2) # Linear head instead of one Linear transformation
         self.binding_output = LinearHead(
             input_size=embed_dim, 
             hidden_sizes=hidden_sizes,
-            output_size=n_classes)
-        self.dropout = nn.Dropout(dropout)
-        self.device = device
+            output_size=n_classes,
+            dropout=dropout_rate)
         self.predict_span = predict_span
         self.predict_binding = predict_binding
     
@@ -248,8 +258,10 @@ class QuestionAnsweringModel(nn.Module):
                 epochs:int=100,
                 batch_size:int=64,
                 lr=0.001,
+                seed=42,
                 predict_span=True,
-                predict_binding=False):
+                predict_binding=False,
+                use_cross_attn=True,):
         super(QuestionAnsweringModel, self).__init__()
         self.mrna_max_len = mrna_max_len
         self.mirna_max_len = mirna_max_len
@@ -259,13 +271,15 @@ class QuestionAnsweringModel(nn.Module):
         self.epochs = epochs
         self.batch_size = batch_size
         self.lr = lr
+        self.seed = seed
         self.predict_binding = predict_binding
         self.predict_span = predict_span
-        self.predictor = CrossAttentionPredictor(mrna_max_len=mrna_max_len,
-                                                 mirna_max_len=mirna_max_len,
-                                                 device=device,
-                                                 predict_span=predict_span,
-                                                 predict_binding=predict_binding)
+        if use_cross_attn:
+            self.predictor = CrossAttentionPredictor(mrna_max_len=mrna_max_len,
+                                                    mirna_max_len=mirna_max_len,
+                                                    device=device,
+                                                    predict_span=predict_span,
+                                                    predict_binding=predict_binding)
     
     def forward(self, 
                 mirna, 
@@ -325,13 +339,15 @@ class QuestionAnsweringModel(nn.Module):
               loss_fn,
               optimizer, 
               device,
-              epoch):
+              epoch,
+              accumulation_step=1):
         '''
         Training loop
         '''
         model.train()
         total_loss = 0.0
         optimizer.zero_grad()
+        loss_list = []
         for batch_idx, batch in enumerate(dataloader):
             for k in batch:
                 batch[k] = batch[k].to(device)
@@ -379,25 +395,42 @@ class QuestionAnsweringModel(nn.Module):
                 span_loss  = 0.5 * (loss_start + loss_end)
                 loss       = span_loss 
 
-            total_loss += loss.item()
+            loss = loss / accumulation_step
             loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            
+            bs = batch["mrna_input_ids"].size(0)
+            if accumulation_step != 1:
+                loss_list.append(loss.item())
+                if (batch_idx + 1) % accumulation_step == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    print(
+                        f"Train Epoch: {epoch} "
+                        f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
+                        f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
+                        f"Avg loss: {sum(loss_list) / len(loss_list):.6f}\n",
+                        flush=True
+                    )
+                    loss_list = []
+            else:
+                optimizer.step()
+                optimizer.zero_grad()
+                print(
+                    f"Train Epoch: {epoch} "
+                    f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
+                    f"({(batch_idx + 1) * bs/len(dataloader.dataset) * 100:.0f}%)] "
+                    f"Span Loss: {span_loss.item():.6f} "
+                    f"Binding Loss: {binding_loss.item():.6f}\n",
+                    flush=True
+                ) 
+
+            total_loss += loss.item() * accumulation_step
             wandb.log({
                 "train_cross_entropy_loss": loss.item()
             })
-            
-            bs = batch["mrna_input_ids"].size(0)
-            
-            print(
-                f"Train Epoch: {epoch} "
-                f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
-                f"({(batch_idx + 1) * bs/len(dataloader.dataset) * 100:.0f}%)] "
-                f"Span Loss: {span_loss.item():.6f} "
-                f"Binding Loss: {binding_loss.item():.6f}\n"
-            ) 
-            
+        # After the loop, if gradients remain (for non-divisible number of batches)
+        if (batch_idx + 1) % self.accumulation_step != 0:
+            optimizer.step()
+            optimizer.zero_grad()
         avg_loss = total_loss / len(dataloader)
         wandb.log({
             "train_epoch_loss": avg_loss,
@@ -432,16 +465,15 @@ class QuestionAnsweringModel(nn.Module):
                     # mask padded mrna tokens
                     start_logits = start_logits.masked_fill(mrna_mask==0, float("-inf"))
                     end_logits   = end_logits.masked_fill(mrna_mask==0, float("-inf"))
+                    start_positions = batch["start_positions"] # (batchsize, )
+                    end_positions   = batch["end_positions"] # (batchsize, )
 
                 # Compute loss
                 loss_fn = nn.CrossEntropyLoss()
 
-                start_positions = batch["start_positions"] # (batchsize, )
-                end_positions   = batch["end_positions"] # (batchsize, )
-                binding_targets = batch["target"] # (batchsize, )
-
                 # Compute binding loss if binding label is predicted
                 if self.predict_binding and binding_logits is not None:
+                    binding_targets = batch["target"] # (batchsize, )
                     binding_loss_fn = nn.BCEWithLogitsLoss()
                     binding_loss    = binding_loss_fn(binding_logits.squeeze(-1), binding_targets.view(-1).float())
                     binding_probs   = F.sigmoid(binding_logits)
@@ -522,7 +554,7 @@ class QuestionAnsweringModel(nn.Module):
             "val_binding_acc": acc_binding
         })
 
-        return avg_loss, acc_start, acc_end, exact_match, f1
+        return acc_binding, acc_start, acc_end, exact_match, f1
     
     @staticmethod 
     def seed_everything(seed):
@@ -531,19 +563,21 @@ class QuestionAnsweringModel(nn.Module):
         random.seed(seed)
         np.random.seed(seed)
     
-    def run(self, model):
+    def run(self, 
+            model,
+            accumulation_step=1):
         # weights and bias initialization
         wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
         wandb.init(
             project="mirna-Question-Answering",
-            name=f"qa-mrna-random-start-len:{self.mrna_max_len}-epoch:{self.epochs}", 
+            name=f"binding-random-start-len:{self.mrna_max_len}-epoch:{self.epochs}-batchsize:{self.batch_size}-2layerTrans-512MLP_hidden", 
             config={
                 "batch_size": self.batch_size,
                 "epochs": self.epochs,
                 "learning rate": self.lr,
             }
         )
-        self.seed_everything(seed=42)
+        self.seed_everything(seed=self.seed)
         tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
                                        add_special_tokens=False, 
                                        model_max_length=self.mrna_max_len,
@@ -570,44 +604,80 @@ class QuestionAnsweringModel(nn.Module):
                                 batch_size=self.batch_size, 
                                 shuffle=False)
         loss_fn   = nn.CrossEntropyLoss()
-        optimizer = AdamW(model.parameters(), lr=self.lr)
-        
         model.to(self.device)
         
-        start = time()
-        
+        if self.predict_binding and not self.predict_span:
+            # freeze update of params in the span prediction head
+            for p in model.predictor.qa_outputs.parameters():
+                p.requires_grad = False
+        elif self.predict_span and not self.predict_binding:
+            # freeze update of params in the binding prediction head
+            for p in model.predictor.binding_output.parameters():
+                p.requires_grad = False
+
+        trainable_params = [p for p in model.parameters() if p.requires_grad]
+        optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-2)
+
+        start    = time()
+        best_binding_acc = 0
+        count    = 0
+        patience = 10
+        model_checkpoints_dir = os.path.join(
+            PROJ_HOME, 
+            "checkpoints", 
+            "TargetScan", 
+            "TwoTowerTransformer", 
+            str(self.mRNA_max_len),
+        )
+        os.makedirs(model_checkpoints_dir, exist_ok=True)
         for epoch in range(self.epochs):
             self.train_loop(model=model,
                        dataloader=train_loader,
                        loss_fn=loss_fn,
                        optimizer=optimizer,
                        device=self.device,
-                       epoch=epoch)
-            self.eval_loop(model=model,
-                      dataloader=val_loader,
-                      device=self.device,)
+                       epoch=epoch,
+                       accumulation_step=accumulation_step)
+            acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(model=model,
+                                                                            dataloader=val_loader,
+                                                                            device=self.device,)
+            if acc_binding >= best_binding_acc:
+                best_binding_acc = acc_binding
+                count = 0
+                ckpt_name = f"best_binding_acc_{acc_binding:.4f}_epoch{epoch}.pth"
+                torch.save(model.state_dict(), os.path.join(model_checkpoints_dir, ckpt_name))
+                wandb.save(ckpt_name)
+            else:
+                count += 1
+                if count == patience:
+                    print("Max patience reached with no improvement on accuracy. Early stopped training.")
+                    break
             cost = time() - start
             remain = cost/(epoch + 1) * (self.epochs - epoch - 1) /3600
             print(f'still remain: {remain} hrs.')
+        wandb.run.summary["best_binding_acc"] = best_binding_acc
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 30
     mirna_max_len = 24
     PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_30_random_start_samples.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_30_random_start_samples.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_30_randomized_start.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_30_randomized_start.csv")
     
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    train_datapath=train_datapath,
                                    valid_datapath=valid_datapath,
-                                   device='cuda:2',
-                                   epochs=50,
+                                   device='cuda:1',
+                                   epochs=100,
                                    batch_size=32,
+                                   lr=1e-4,
+                                   seed=54,
                                    predict_span=False,
                                    predict_binding=True)
-    model.run(model=model)
+    model.run(model=model,
+              accumulation_step=8)
     # n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     # print(f"Total trainable parameters = {n_params}.") #11.3M
    

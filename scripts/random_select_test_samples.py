@@ -7,7 +7,7 @@ mRNA_length = 30
 
 data_path = os.path.join(PROJ_HOME, "TargetScan_dataset", f"TargetScan_train_30_randomized_start.csv")
 df = pd.read_csv(data_path, sep=",")
-df = df.sample(n=512, random_state=42)
+df = df.sample(n=2048, random_state=42)
 
 df.to_csv(
     os.path.join(
