@@ -125,10 +125,10 @@ def main():
     
     # Testing the first sequence
     i=1899
-    mRNA_seq = mRNA_seqs[i][0]
+    mRNA_seq  = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
-    miRNA_id = test_data[["miRNA ID"]].iloc[i,0]
-    mRNA_id = test_data[["Gene Symbol"]].iloc[i,0]
+    miRNA_id  = test_data[["miRNA ID"]].iloc[i,0]
+    mRNA_id   = test_data[["Gene Symbol"]].iloc[i,0]
     print("miRNA id = ",miRNA_id)
     print("mRNA id = ", mRNA_id)
     # replace U with T and reverse miRNA to 3' to 5' 

@@ -30,26 +30,24 @@ def check_complementarity(miRNA, mRNA, seg_length = 6):
 # print(match)
 
 # read positive pairs
-positive_pairs_human = pd.read_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t')
+# positive_pairs_human = pd.read_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t')
 positive_pairs_mouse = pd.read_csv(os.path.join(data_dir, "Positive_pairs_mouse.csv"), sep='\t')
-negative_pairs_human = pd.read_csv(os.path.join(data_dir, "negative_pairs_human.csv"), sep='\t')
+# negative_pairs_human = pd.read_csv(os.path.join(data_dir, "negative_pairs_human.csv"), sep='\t')
 negative_pairs_mouse = pd.read_csv(os.path.join(data_dir, "negative_pairs_mouse.csv"), sep='\t')
-positive_pairs = pd.concat([positive_pairs_human, positive_pairs_mouse]).to_dict(orient = "records")
-negative_pairs = pd.concat([negative_pairs_human, negative_pairs_mouse]).to_dict(orient = "records")
+positive_pairs = positive_pairs_mouse.to_dict(orient = "records")
+negative_pairs = negative_pairs_mouse.to_dict(orient = "records")
 
 # read mrna 3utr
-human_mRNA_df      = pd.read_csv(os.path.join(data_dir, "human_3utr.csv"), sep='\t', usecols=[1,2,3,4])
+# human_mRNA_df      = pd.read_csv(os.path.join(data_dir, "human_3utr.csv"), sep='\t', usecols=[1,2,3,4])
 # chimpanzee_mRNA_df = pd.read_csv(os.path.join(data_dir, "chimpanzee_mrna_seq.csv.gz"), sep="\t", compression="gzip")
 mouse_mRNA_df      = pd.read_csv(os.path.join(data_dir, "mouse_mrna_seq.csv.gz"), sep="\t", compression="gzip")
-mRNA_df            = pd.concat([human_mRNA_df, mouse_mRNA_df])
-print(mRNA_df.head())
-print(mRNA_df.tail())
+# mRNA_df            = pd.concat([human_mRNA_df, mouse_mRNA_df])
 
 # read mature sequence of miRNA
 path     = os.path.join(data_dir, "miR_Family_Info.txt")
 miRNA_df = pd.read_csv(path, sep='\t')
 # filter for human
-species_ids = [9606, 10090]
+species_ids = [10090]
 miRNA_df    = miRNA_df[miRNA_df["Species ID"].isin(species_ids)]
 
 def get_windown_len_mrna(mRNA_seq,
