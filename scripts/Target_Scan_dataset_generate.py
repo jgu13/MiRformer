@@ -30,18 +30,17 @@ def check_complementarity(miRNA, mRNA, seg_length = 6):
 # print(match)
 
 # read positive pairs
-# positive_pairs_human = pd.read_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t')
+positive_pairs_human = pd.read_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t')
 positive_pairs_mouse = pd.read_csv(os.path.join(data_dir, "Positive_pairs_mouse.csv"), sep='\t')
-# negative_pairs_human = pd.read_csv(os.path.join(data_dir, "negative_pairs_human.csv"), sep='\t')
+negative_pairs_human = pd.read_csv(os.path.join(data_dir, "negative_pairs_human.csv"), sep='\t')
 negative_pairs_mouse = pd.read_csv(os.path.join(data_dir, "negative_pairs_mouse.csv"), sep='\t')
 positive_pairs = positive_pairs_mouse.to_dict(orient = "records")
 negative_pairs = negative_pairs_mouse.to_dict(orient = "records")
 
 # read mrna 3utr
-# human_mRNA_df      = pd.read_csv(os.path.join(data_dir, "human_3utr.csv"), sep='\t', usecols=[1,2,3,4])
-# chimpanzee_mRNA_df = pd.read_csv(os.path.join(data_dir, "chimpanzee_mrna_seq.csv.gz"), sep="\t", compression="gzip")
-mouse_mRNA_df      = pd.read_csv(os.path.join(data_dir, "mouse_mrna_seq.csv.gz"), sep="\t", compression="gzip")
-# mRNA_df            = pd.concat([human_mRNA_df, mouse_mRNA_df])
+human_mRNA_df = pd.read_csv(os.path.join(data_dir, "human_mrna_seq.csv.gz"), sep='\t', compression='gzip')
+mouse_mRNA_df = pd.read_csv(os.path.join(data_dir, "mouse_mrna_seq.csv.gz"), sep="\t", compression="gzip")
+mRNA_df = pd.concat([human_mRNA_df, mouse_mRNA_df])
 
 # read mature sequence of miRNA
 path     = os.path.join(data_dir, "miR_Family_Info.txt")
@@ -50,6 +49,7 @@ miRNA_df = pd.read_csv(path, sep='\t')
 species_ids = [10090]
 miRNA_df    = miRNA_df[miRNA_df["Species ID"].isin(species_ids)]
 
+# get window-length mRNA segment
 def get_windown_len_mrna(mRNA_seq,
                          window_len,
                          seed_start,
@@ -107,7 +107,7 @@ done = set()
 #         miRNA = ll[1]
 #         trans = ll[0]
 #         done.add((miRNA, trans))
-# with open(os.path.join(data_dir, f"positive_samples_{str(window_len)}_randomized_start.csv"), "a", newline="") as f:
+# with open(os.path.join(data_dir, f"mouse_positive_samples_{str(window_len)}_randomized_start.csv"), "w", newline="") as f:
 #     writer = csv.DictWriter(f, fieldnames=["Transcript ID", 
 #                                            "miRNA ID", 
 #                                            "miRNA sequence", 
@@ -115,12 +115,12 @@ done = set()
 #                                            "seed start", 
 #                                            "seed end", 
 #                                            "label"], delimiter="\t")
-#     # writer.writeheader()
+#     writer.writeheader()
 #     for positive_pair in positive_pairs:
 #         miRNA_ID       = positive_pair.get("miRNA", "")
 #         tran_id        = positive_pair.get("Transcript_ID", "")
-#         if (miRNA_ID, tran_id) in done:
-#             continue
+#         # if (miRNA_ID, tran_id) in done:
+#         #     continue
 #         if miRNA_ID: 
 #             miRNA_seq = miRNA_df.loc[miRNA_df["MiRBase ID"] == miRNA_ID, "Mature sequence"]
 #             miRNA_seq = miRNA_seq.values[0]
@@ -157,17 +157,19 @@ done = set()
 #                     f"3. mRNA length <= seed end", flush=True)       
 #         else:
 #             print(f"Cannot find mRNA seq: [{tran_id}].", flush=True)
+
+
 # print("Time taken to put together positive samples = ", (time.time() - start_time) / 60)
 # print(f"Maximum mRNA length = {max_len}.")
 
 
-# assemble negative pairs
-print("Putting together negative samples: ")
-start_time = time.time()
-seg_len = window_len
-print(f"Segment length = {seg_len}")
-negative_samples = []
-max_length = 0
+# # assemble negative pairs
+# print("Putting together negative samples: ")
+# start_time = time.time()
+# seg_len = window_len
+# print(f"Segment length = {seg_len}")
+# negative_samples = []
+# max_length = 0
 
 # with open(os.path.join(data_dir, f"negative_samples_{str(window_len)}.csv"), "w", newline="") as f:
 #     writer = csv.DictWriter(f, fieldnames=["Transcript ID", 
@@ -249,9 +251,11 @@ max_length = 0
 # print("Maximum mRNA length = ", max_length)
 # print(f"Time taken for putting together negative samples = {(time.time() - start_time)/60} min")
 
-positive_samples = pd.read_csv(os.path.join(data_dir, f"positive_samples_{str(window_len)}_randomized_start.csv"), sep='\t')
-negative_samples = pd.read_csv(os.path.join(data_dir, f"negative_samples_{str(window_len)}.csv"), sep='\t')
-samples = pd.concat([positive_samples, negative_samples], axis=0)
+positive_human_samples = pd.read_csv(os.path.join(data_dir, f"positive_samples_{str(window_len)}_randomized_start.csv"), sep='\t')
+negative_human_samples = pd.read_csv(os.path.join(data_dir, f"negative_samples_{str(window_len)}.csv"), sep='\t')
+positive_mouse_samples = pd.read_csv(os.path.join(data_dir, f"mouse_positive_samples_{str(window_len)}_randomized_start.csv"), sep='\t')
+negative_mouse_samples = pd.read_csv(os.path.join(data_dir, f"mouse_negative_samples_{str(window_len)}.csv"), sep='\t')
+samples = pd.concat([positive_human_samples, positive_mouse_samples, negative_human_samples, negative_mouse_samples], axis=0)
 ds_train, ds_rem = train_test_split(samples, test_size=0.1, random_state=42, shuffle=True)
 ds_val, ds_test = train_test_split(ds_rem, test_size=0.2, shuffle=False)
 ds_train.to_csv(os.path.join(data_dir, f"TargetScan_train_{str(window_len)}_randomized_start.csv"), sep=',', index=False)

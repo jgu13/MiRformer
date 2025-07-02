@@ -9,6 +9,7 @@ import math
 import wandb
 import random
 import numpy as np
+import pandas as pd
 from time import time
 
 from utils import load_dataset
@@ -437,7 +438,8 @@ class QuestionAnsweringModel(nn.Module):
                   dataloader, 
                   device,
                   alpha1=1,
-                  alpha2=0.25):
+                  alpha2=0.25,
+                  evaluation=False):
         model.eval()
         total_loss = 0.0 
         all_start_preds, all_end_preds        = [], []
@@ -553,6 +555,13 @@ class QuestionAnsweringModel(nn.Module):
               f"Span Exact Match: {exact_match*100}%\n"
               f"F1 Score:    {f1}\n"
               f"Binding Acc: {acc_binding*100}")
+        
+        if evaluation:
+            if self.predict_binding:
+                self.all_binding_preds = all_binding_preds.numpy()
+            if self.predict_span:
+                self.all_start_preds = all_start_preds.numpy()
+                self.all_end_preds = all_end_preds.numpy()
 
         return avg_loss, acc_binding, acc_start, acc_end, exact_match, f1      
 
@@ -571,21 +580,6 @@ class QuestionAnsweringModel(nn.Module):
             evaluation=False,
             accumulation_step=1,
             ckpt_name=""):
-        # weights and bias initialization
-        wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-        run = wandb.init(
-            project="mirna-Question-Answering",
-            name=f"binding-span-random-start-len:{self.mrna_max_len}-epoch:{self.epochs}-batchsize:{self.batch_size}-2layerTrans-512MLP_hidden", 
-            config={
-                "batch_size": self.batch_size * accumulation_step,
-                "epochs": self.epochs,
-                "learning rate": self.lr,
-            },
-            tags=["binding-span"],
-            save_code=True,
-            job_type="train"
-        )
-        self.seed_everything(seed=self.seed)
         tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
                                        add_special_tokens=False, 
                                        model_max_length=self.mrna_max_len,
@@ -603,167 +597,207 @@ class QuestionAnsweringModel(nn.Module):
                                     shuffle=False)
             ckpt_path = os.path.join(PROJ_HOME, 
                             "checkpoints", 
-                            "TwoTowerTransformer",
+                            "TargetScan/TwoTowerTransformer",
                             str(model.mrna_max_len), 
                             ckpt_name)
             loaded_data = torch.load(ckpt_path, map_location=model.device)
             model.load_state_dict(loaded_data)
             print(f"Loaded checkpoint from {ckpt_path}")
-            eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(
-                                                                            model=model,
-                                                                            dataloader=test_loader,
-                                                                            device=self.device,)
-        # load dataset
-        D_train  = load_dataset(train_path, sep=',')
-        D_val    = load_dataset(valid_path, sep=',')
-        ds_train = QuestionAnswerDataset(data=D_train,
-                                         mrna_max_len=self.mrna_max_len,
-                                         mirna_max_len=self.mirna_max_len,
-                                         tokenizer=tokenizer,
-                                         seed_start_col="seed start",
-                                         seed_end_col="seed end",)
-        ds_val = QuestionAnswerDataset(data=D_val,
-                                       mrna_max_len=self.mrna_max_len,
-                                       mirna_max_len=self.mirna_max_len,
-                                       tokenizer=tokenizer,
-                                       seed_start_col="seed start",
-                                       seed_end_col="seed end",)
-        train_loader = DataLoader(ds_train, 
-                            batch_size=self.batch_size, 
-                            shuffle=True)
-        val_loader   = DataLoader(ds_val, 
+            model.to(self.device)
+            self.eval_loop(model=model, 
+                           dataloader=test_loader,
+                           device=self.device,
+                           evaluation=evaluation)
+            D_test_w_pred = D_test.copy()
+            if self.predict_binding:
+                D_test_w_pred["pred label"] = self.all_binding_preds
+            if self.predict_span:
+                D_test_positive = D_test_w_pred.loc[D_test_w_pred["label"] == 1].copy()
+                D_test_positive["pred start"] = self.all_start_preds
+                D_test_positive["pred end"]   = self.all_end_preds
+                # merge D_test_w_pred with D_test_positive
+                cols = ['pred start', 'pred end']
+                D_pred_se = D_test_positive[cols]
+
+                # 2. 左连接（保留 D_test_w_pred 的所有行）
+                D_merged = D_test_w_pred.join(D_pred_se, how='left')
+
+                # 3. 将缺失的 pred start/end 填成 -1，并转成整数
+                D_merged[['pred start', 'pred end']] = (
+                    D_merged[['pred start', 'pred end']]
+                    .fillna(-1)
+                    .astype(int)
+                )
+            pred_df_path = os.path.join(os.path.dirname(train_path), "binding_span_predictions.csv")
+            D_merged.to_csv(pred_df_path, index=False)
+            print(f"Prediction saved to {pred_df_path}")
+        else:
+            # weights and bias initialization
+            wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+            run = wandb.init(
+                project="mirna-Question-Answering",
+                name=f"primates_binding-span-random-start-len:{self.mrna_max_len}-epoch:{self.epochs}-batchsize:{self.batch_size}-2layerTrans-512MLP_hidden", 
+                config={
+                    "batch_size": self.batch_size * accumulation_step,
+                    "epochs": self.epochs,
+                    "learning rate": self.lr,
+                },
+                tags=["binding-span", "primates"],
+                save_code=True,
+                job_type="train"
+            )
+            self.seed_everything(seed=self.seed)
+            # load dataset
+            D_train  = load_dataset(train_path, sep=',')
+            D_val    = load_dataset(valid_path, sep=',')
+            ds_train = QuestionAnswerDataset(data=D_train,
+                                            mrna_max_len=self.mrna_max_len,
+                                            mirna_max_len=self.mirna_max_len,
+                                            tokenizer=tokenizer,
+                                            seed_start_col="seed start",
+                                            seed_end_col="seed end",)
+            ds_val = QuestionAnswerDataset(data=D_val,
+                                        mrna_max_len=self.mrna_max_len,
+                                        mirna_max_len=self.mirna_max_len,
+                                        tokenizer=tokenizer,
+                                        seed_start_col="seed start",
+                                        seed_end_col="seed end",)
+            train_loader = DataLoader(ds_train, 
                                 batch_size=self.batch_size, 
-                                shuffle=False)
-        loss_fn   = nn.CrossEntropyLoss()
-        model.to(self.device)
-        
-        if self.predict_binding and not self.predict_span:
-            # freeze update of params in the span prediction head
-            for p in model.predictor.qa_outputs.parameters():
-                p.requires_grad = False
-        elif self.predict_span and not self.predict_binding:
-            # freeze update of params in the binding prediction head
-            for p in model.predictor.binding_output.parameters():
-                p.requires_grad = False
-
-        trainable_params = [p for p in model.parameters() if p.requires_grad]
-        optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-2)
-
-        start    = time()
-        count    = 0
-        patience = 10
-        best_binding_acc = 0
-        best_exact_match = 0
-        best_f1_score    = 0
-        best_composite_metric = 0
-        model_checkpoints_dir = os.path.join(
-            PROJ_HOME, 
-            "checkpoints", 
-            "TargetScan", 
-            "TwoTowerTransformer", 
-            str(self.mrna_max_len),
-        )
-        os.makedirs(model_checkpoints_dir, exist_ok=True)
-        for epoch in range(self.epochs):
-            train_loss = self.train_loop(model=model,
-                       dataloader=train_loader,
-                       loss_fn=loss_fn,
-                       optimizer=optimizer,
-                       device=self.device,
-                       epoch=epoch,
-                       accumulation_step=accumulation_step)
-            eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(model=model,
-                                                                            dataloader=val_loader,
-                                                                            device=self.device,)
-            wandb.log({
-                "epoch": epoch,
-                "train/loss": train_loss,
-                "eval/loss": eval_loss,
-                "eval/binding accuracy": acc_binding,
-                "eval/start accuracy": acc_start,
-                "eval/end accuracy": acc_end,
-                "eval/exact match": exact_match,
-                "eval/F1 score": f1
-            }, step=epoch)
+                                shuffle=True)
+            val_loader   = DataLoader(ds_val, 
+                                    batch_size=self.batch_size, 
+                                    shuffle=False)
+            loss_fn   = nn.CrossEntropyLoss()
+            model.to(self.device)
             
-            if self.predict_binding and self.predict_span:
-                composite_metric = f1 + acc_binding
-                if composite_metric > best_composite_metric:
-                    best_composite_metric = composite_metric
-                    best_binding_acc      = acc_binding
-                    best_f1_score         = f1
-                    count = 0
-                    ckpt_name = f"best_composite_{f1:.4f}_{acc_binding:.4f}_epoch{epoch}.pth"
-                    ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                    torch.save(model.state_dict(), ckpt_path)
-                    model_art = wandb.Artifact(
-                        name="binding-span-model",
-                        type="model",
-                        metadata={ "epoch": epoch, "f1 + acc_binding": composite_metric }
-                    )
-                    model_art.add_file(ckpt_path)
-                    run.log_artifact(model_art)
-                    # mark as the “latest”
-                    run.log_artifact(model_art).wait()
-                else:
-                    count += 1
-                    if count == patience:
-                        print("Max patience reached with no improvement on accuracy. Early stop triggered.")
-                        break
-            elif self.predict_binding and not self.predict_span:
-                if acc_binding >= best_binding_acc:
-                    best_binding_acc = acc_binding
-                    count = 0
-                    ckpt_name = f"best_binding_acc_{acc_binding:.4f}_epoch{epoch}.pth"
-                    ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                    torch.save(model.state_dict(), ckpt_path)
-                    # create new artifact
-                    model_art = wandb.Artifact(
-                        name="mirna-binding-model",
-                        type="model",
-                        metadata={ "epoch": epoch, "binding_acc": acc_binding }
-                    )
-                    model_art.add_file(ckpt_path)
-                    run.log_artifact(model_art)
-                    # mark as the “latest”
-                    run.log_artifact(model_art).wait()
-                else:
-                    count += 1
-                    if count == patience:
-                        print("Max patience reached with no improvement on accuracy. Early stop triggered.")
-                        break
+            if self.predict_binding and not self.predict_span:
+                # freeze update of params in the span prediction head
+                for p in model.predictor.qa_outputs.parameters():
+                    p.requires_grad = False
             elif self.predict_span and not self.predict_binding:
-                if exact_match >= best_exact_match:
-                    best_exact_match = exact_match
-                    count = 0
-                    ckpt_name = f"best_exact_match_{exact_match:.4f}_epoch{epoch}.pth"
-                    ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                    torch.save(model.state_dict(), ckpt_path)
-                    # create new artifact
-                    model_art = wandb.Artifact(
-                        name="mirna-span-model",
-                        type="model",
-                        metadata={ "epoch": epoch, "exact_match": exact_match}
-                    )
-                    model_art.add_file(ckpt_path)
-                    run.log_artifact(model_art)
-                    # mark as the “latest”
-                    run.log_artifact(model_art).wait()
-                else:
-                    count += 1
-                    if count == patience:
-                        print("Max patience reached with no improvement on accuracy. Early stop triggered.")
-                        break
-            cost = time() - start
-            remain = cost/(epoch + 1) * (self.epochs - epoch - 1) /3600
-            print(f'still remain: {remain} hrs.')
+                # freeze update of params in the binding prediction head
+                for p in model.predictor.binding_output.parameters():
+                    p.requires_grad = False
 
-        cost = time() - start
-        print(f"Training takes {cost / 3600} hours.")
-        run.summary["best_binding_acc"] = best_binding_acc
-        run.summary["best F1 score"]    = best_f1_score
-        run.summary["best_epoch"]       = int(model_art.metadata["epoch"])
-        run.finish()
+            trainable_params = [p for p in model.parameters() if p.requires_grad]
+            optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-2)
+
+            start    = time()
+            count    = 0
+            patience = 10
+            best_binding_acc = 0
+            best_exact_match = 0
+            best_f1_score    = 0
+            best_composite_metric = 0
+            model_checkpoints_dir = os.path.join(
+                PROJ_HOME, 
+                "checkpoints", 
+                "TargetScan", 
+                "TwoTowerTransformer", 
+                str(self.mrna_max_len),
+            )
+            os.makedirs(model_checkpoints_dir, exist_ok=True)
+            for epoch in range(self.epochs):
+                train_loss = self.train_loop(model=model,
+                        dataloader=train_loader,
+                        loss_fn=loss_fn,
+                        optimizer=optimizer,
+                        device=self.device,
+                        epoch=epoch,
+                        accumulation_step=accumulation_step)
+                eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(model=model,
+                                                                                dataloader=val_loader,
+                                                                                device=self.device,)
+                wandb.log({
+                    "epoch": epoch,
+                    "train/loss": train_loss,
+                    "eval/loss": eval_loss,
+                    "eval/binding accuracy": acc_binding,
+                    "eval/start accuracy": acc_start,
+                    "eval/end accuracy": acc_end,
+                    "eval/exact match": exact_match,
+                    "eval/F1 score": f1
+                }, step=epoch)
+                
+                if self.predict_binding and self.predict_span:
+                    composite_metric = f1 + acc_binding
+                    if composite_metric > best_composite_metric:
+                        best_composite_metric = composite_metric
+                        best_binding_acc      = acc_binding
+                        best_f1_score         = f1
+                        count = 0
+                        ckpt_name = f"best_composite_{f1:.4f}_{acc_binding:.4f}_epoch{epoch}.pth"
+                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                        torch.save(model.state_dict(), ckpt_path)
+                        model_art = wandb.Artifact(
+                            name="binding-span-model",
+                            type="model",
+                            metadata={ "epoch": epoch, "f1 + acc_binding": composite_metric }
+                        )
+                        model_art.add_file(ckpt_path)
+                        run.log_artifact(model_art)
+                        # mark as the “latest”
+                        run.log_artifact(model_art).wait()
+                    else:
+                        count += 1
+                        if count == patience:
+                            print("Max patience reached with no improvement on accuracy. Early stop triggered.")
+                            break
+                elif self.predict_binding and not self.predict_span:
+                    if acc_binding >= best_binding_acc:
+                        best_binding_acc = acc_binding
+                        count = 0
+                        ckpt_name = f"primates_best_binding_acc_{acc_binding:.4f}_epoch{epoch}.pth"
+                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                        torch.save(model.state_dict(), ckpt_path)
+                        # create new artifact
+                        model_art = wandb.Artifact(
+                            name="mirna-binding-model",
+                            type="model",
+                            metadata={ "epoch": epoch, "binding_acc": acc_binding }
+                        )
+                        model_art.add_file(ckpt_path)
+                        run.log_artifact(model_art)
+                        # mark as the “latest”
+                        run.log_artifact(model_art).wait()
+                    else:
+                        count += 1
+                        if count == patience:
+                            print("Max patience reached with no improvement on accuracy. Early stop triggered.")
+                            break
+                elif self.predict_span and not self.predict_binding:
+                    if exact_match >= best_exact_match:
+                        best_exact_match = exact_match
+                        count = 0
+                        ckpt_name = f"best_exact_match_{exact_match:.4f}_epoch{epoch}.pth"
+                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                        torch.save(model.state_dict(), ckpt_path)
+                        # create new artifact
+                        model_art = wandb.Artifact(
+                            name="mirna-span-model",
+                            type="model",
+                            metadata={ "epoch": epoch, "exact_match": exact_match}
+                        )
+                        model_art.add_file(ckpt_path)
+                        run.log_artifact(model_art)
+                        # mark as the “latest”
+                        run.log_artifact(model_art).wait()
+                    else:
+                        count += 1
+                        if count == patience:
+                            print("Max patience reached with no improvement on accuracy. Early stop triggered.")
+                            break
+                cost = time() - start
+                remain = cost/(epoch + 1) * (self.epochs - epoch - 1) /3600
+                print(f'still remain: {remain} hrs.')
+
+            cost = time() - start
+            print(f"Training takes {cost / 3600} hours.")
+            run.summary["best_binding_acc"] = best_binding_acc
+            run.summary["best F1 score"]    = best_f1_score
+            run.summary["best_epoch"]       = int(model_art.metadata["epoch"])
+            run.finish()
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
@@ -772,7 +806,8 @@ if __name__ == "__main__":
     PROJ_HOME = os.path.expanduser("~/projects/mirLM")
     train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_30_randomized_start.csv")
     valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_30_randomized_start.csv")
-    
+    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_test_30_randomized_start.csv")
+
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    device='cuda:1',
@@ -785,5 +820,8 @@ if __name__ == "__main__":
     model.run(model=model,
               train_path=train_datapath,
               valid_path=valid_datapath,
+              test_path =test_datapath,
+              evaluation=False,
+            #   ckpt_name="best_composite_0.9764_0.9935_epoch57.pth",
               accumulation_step=8)
    

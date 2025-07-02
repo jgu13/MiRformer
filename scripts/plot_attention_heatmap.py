@@ -127,32 +127,33 @@ def plot_heatmap(model,
                     yticklabels=mRNA_seq,
                     norm=norm,
                     cbar=True)
-        
-        # seed_start and seed_end are indices into the mRNA sequence (0-based)
-        ys = seed_start
-        ye = seed_end
-        seed_len = ye - ys + 1
-        
-        # get where the seed starts and ends in miRNA
-        # skip [PAD] tokens
-        i = len(miRNA_seq) - 1
-        token = miRNA_seq[i]
-        while token == '[PAD]':
-            i -= 1
-            token = miRNA_seq[i]
-        xe = i # seed ends at the 2nd last base
-        xs = xe - seed_len
 
-        # draw a red rectangle around those rows
-        rect = patches.Rectangle(
-            (xs, ys),  # lower-left corner in data coords
-            seed_len,              # width = number of seed bases
-            seed_len,             # height = number of seed bases
-            linewidth=1,
-            edgecolor="orange",
-            facecolor="none"
-        )
-        ax[h].add_patch(rect)
+        if seed_start != -1 and seed_end != -1:    
+            # seed_start and seed_end are indices into the mRNA sequence (0-based)
+            ys = seed_start
+            ye = seed_end
+            seed_len = ye - ys + 1
+            
+            # get where the seed starts and ends in miRNA
+            # skip [PAD] tokens
+            i = len(miRNA_seq) - 1
+            token = miRNA_seq[i]
+            while token == '[PAD]':
+                i -= 1
+                token = miRNA_seq[i]
+            xe = i # seed ends at the 2nd last base
+            xs = xe - seed_len
+
+            # draw a red rectangle around those rows
+            rect = patches.Rectangle(
+                (xs, ys),  # lower-left corner in data coords
+                seed_len,              # width = number of seed bases
+                seed_len,             # height = number of seed bases
+                linewidth=1,
+                edgecolor="orange",
+                facecolor="none"
+            )
+            ax[h].add_patch(rect)
 
         ax[h].set_xlabel(miRNA_id)
         ax[h].set_ylabel(mRNA_id)
@@ -195,7 +196,7 @@ def main():
                        **args_dict)
 
     # Testing the first sequence
-    i=3508 # row number - 2
+    i=3494 # row number - 2
     mRNA_seq  = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     mRNA_ID   = mRNA_IDs[i][0]
