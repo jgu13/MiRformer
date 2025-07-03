@@ -37,6 +37,28 @@ class MultiHeadAttention(nn.Module):
 
         self.scale = 1.0 / math.sqrt(self.head_dim)
 
+    def get_slopes(self, n):
+        def get_slopes_power_of_2(n):
+            start = (2**(-2**-(math.log2(n)-3)))
+            ratio = start
+            return [start*ratio**i for i in range(n)]
+
+        if math.log2(n).is_integer():
+            return get_slopes_power_of_2(n)                   #In the paper, we only train models that have 2^a heads for some a. This function has
+        else:                                                 #some good properties that only occur when the input is a power of 2. To maintain that even
+            closest_power_of_2 = 2**math.floor(math.log2(n))  #when the number of heads is not a power of 2, we use this workaround. 
+            return get_slopes_power_of_2(closest_power_of_2) + self.get_slopes(2*closest_power_of_2)[0::2][:n-closest_power_of_2]
+        
+    def get_alibi(self, attn_score):
+        batch_size = attn_score.shape[0]
+        q_len      = attn_score.shape[2]
+        k_len      = attn_score.shape[3]
+        self.slopes        = self.get_slopes(self.num_heads)
+        self.slopes_matrix = torch.tensor(self.slopes).unsqueeze(1).unsqueeze(1) # (num_heads, 1, 1)
+        self.bias_matrix   = torch.arange(q_len).unsqueez(0).unsqueeze(0).expand(self.num_heads, k_len, -1) # (num_heads, k_len, q_len)
+        self.alibi         = self.slopes_matrix * self.bias_matrix # (num_heads, k_len, q_len)
+        self.alibi         = self.alibi.unsqueeze(0).repeat(batch_size, 1, 1, 1) #(batchsize, num_heads, k_len, q_len)
+
     def forward(self, 
                 query, 
                 key, 
@@ -60,6 +82,10 @@ class MultiHeadAttention(nn.Module):
         
         # Scaled Dot-Product Attention
         scores = torch.matmul(Q, K.transpose(2, 3)) * self.scale # (batchsize, num_head, q_len, k_len)
+        # TODO: add alibi bias
+        self.get_alibi(attn_score = scores)
+        scores += self.alibi # add alibi to attention score QK^T
+
         if mask is not None:
             mask = mask.unsqueeze(1).unsqueeze(2).expand(-1, self.num_heads, Q.shape[2], -1) # (batchsize, head_dim, q_len, k_len)
             mask = mask.to(self.device)
@@ -816,12 +842,14 @@ if __name__ == "__main__":
                                    lr=1e-4,
                                    seed=54,
                                    predict_span=True,
-                                   predict_binding=True)
-    model.run(model=model,
-              train_path=train_datapath,
-              valid_path=valid_datapath,
-              test_path =test_datapath,
-              evaluation=False,
-            #   ckpt_name="best_composite_0.9764_0.9935_epoch57.pth",
-              accumulation_step=8)
+                                    predict_binding=True)
+    # total_params = sum(param.numel() for param in model.parameters())
+    # print(f"Total Parameters: {total_params}")
+    # model.run(model=model,
+    #           train_path=train_datapath,
+    #           valid_path=valid_datapath,
+    #           test_path =test_datapath,
+    #           evaluation=False,
+    #         #   ckpt_name="best_composite_0.9764_0.9935_epoch57.pth",
+    #           accumulation_step=8)
    
