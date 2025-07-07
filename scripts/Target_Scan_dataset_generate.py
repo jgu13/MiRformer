@@ -9,9 +9,13 @@ from sklearn.model_selection import train_test_split
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
-def get_complementary_seq(seq):
+def get_complementary_seq(seq, mRNA):
     d = {'A':'T', 'T':'A', 'C':'G', 'G':'C'}
-    return ''.join([d[c] for c in seq])
+    try:
+        s = ''.join([d[c] for c in seq]) # ignore N
+        return s
+    except KeyError:
+        print(f"KeyError found in mRNA sequence: {mRNA}")
 
 def check_complementarity(miRNA, mRNA, seg_length = 6):
     # check whether there are 6-consecutive complmentary segment between miRNA and mRNA
@@ -19,35 +23,39 @@ def check_complementarity(miRNA, mRNA, seg_length = 6):
     miRNA = miRNA.replace('U', 'T')
     for start in range(0, len(mRNA)-seg_length+1):
         mRNA_seg = mRNA[start:start + seg_length]
-        mRNA_seg_c = get_complementary_seq(mRNA_seg)
-        if mRNA_seg_c in miRNA:
-            return True
+        if 'N' in mRNA_seg:
+            print("Found N in seed candidate, skipping")
+            continue
+        else:
+            mRNA_seg_c = get_complementary_seq(mRNA_seg, mRNA)
+            if mRNA_seg_c in miRNA:
+                return True
     return False
 
-# mRNA = "AACTAACTTTAAACTGGATATATACTTTG"
-# miRNA = "GUCCAGUUUUCCCAGGAAUCCCU"
+# mRNA = "ACGCGCCGGCTCTGGCGGCGGGCTCCGGGCCCAGCCCCGCAGCGGCCAGGAGCACGGGCCGGCGATGCGGCTGCCGGCGCACCCCCGCCCGGGGCCGAGGTGCCTACGGGCGGGGGCTGCAGGGCCACGCCGCCACGGGGTCAGTGTTGCTACCGCCGCTGCCAGGCGCTCCGGAGCTGTCCGCTTCAGCACCACGCCGNCGCCGGTAGTGGTGGTGCGGACCAGCCCGGAGCCCGCCGACGCACTCATGCACTTTAGAACCTCGGGCCGCAGCTCCACCCCGCACACCGGAACCGACACAGAGACCCACGGCCCCCAGCCCGCCCCCTCCCGCACGGCTCCCCTGCCCCGCCCCTCCTCCGATCAATCTGGTCTGCAGCCCGGGCAGCTGCGGCGTCGGACTGCGCGGCCAGGGAGGTTTGGCTGCATATTTGCATGAGCTTCCTACCCACCTCAGCCTAGCCCTCCGGGCAATTCCTCAACTGTACCCCTGTCTGGCG"
+# miRNA = "CAAAGUGCUUACAGUGCAGGUAG"
 # match = check_complementarity(miRNA, mRNA)
 # print(match)
 
 # read positive pairs
-positive_pairs_human = pd.read_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t')
-positive_pairs_mouse = pd.read_csv(os.path.join(data_dir, "Positive_pairs_mouse.csv"), sep='\t')
-negative_pairs_human = pd.read_csv(os.path.join(data_dir, "negative_pairs_human.csv"), sep='\t')
-negative_pairs_mouse = pd.read_csv(os.path.join(data_dir, "negative_pairs_mouse.csv"), sep='\t')
-positive_pairs = positive_pairs_mouse.to_dict(orient = "records")
-negative_pairs = negative_pairs_mouse.to_dict(orient = "records")
+# positive_pairs_human = pd.read_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t')
+# positive_pairs_mouse = pd.read_csv(os.path.join(data_dir, "Positive_pairs_mouse.csv"), sep='\t')
+# negative_pairs_human = pd.read_csv(os.path.join(data_dir, "negative_pairs_human.csv"), sep='\t')
+# negative_pairs_mouse = pd.read_csv(os.path.join(data_dir, "negative_pairs_mouse.csv"), sep='\t')
+# positive_pairs = positive_pairs_mouse.to_dict(orient = "records")
+# negative_pairs = negative_pairs_mouse.to_dict(orient = "records")
 
 # read mrna 3utr
-human_mRNA_df = pd.read_csv(os.path.join(data_dir, "human_mrna_seq.csv.gz"), sep='\t', compression='gzip')
-mouse_mRNA_df = pd.read_csv(os.path.join(data_dir, "mouse_mrna_seq.csv.gz"), sep="\t", compression="gzip")
-mRNA_df = pd.concat([human_mRNA_df, mouse_mRNA_df])
+# mRNA_df = pd.read_csv(os.path.join(data_dir, "human_mrna_seq.csv.gz"), sep='\t', compression='gzip')
+# mRNA_df = pd.read_csv(os.path.join(data_dir, "mouse_mrna_seq.csv.gz"), sep="\t", compression="gzip")
+# mRNA_df = pd.concat([human_mRNA_df, mouse_mRNA_df])
 
 # read mature sequence of miRNA
-path     = os.path.join(data_dir, "miR_Family_Info.txt")
-miRNA_df = pd.read_csv(path, sep='\t')
-# filter for human
-species_ids = [10090]
-miRNA_df    = miRNA_df[miRNA_df["Species ID"].isin(species_ids)]
+# path     = os.path.join(data_dir, "miR_Family_Info.txt")
+# miRNA_df = pd.read_csv(path, sep='\t')
+# # filter for human
+# species_ids = [10090]
+# miRNA_df    = miRNA_df[miRNA_df["Species ID"].isin(species_ids)]
 
 # get window-length mRNA segment
 def get_windown_len_mrna(mRNA_seq,
@@ -90,7 +98,7 @@ def get_windown_len_mrna(mRNA_seq,
             return {"mRNA sequence": None}
 
 print("Putting together positive samples: ")
-window_len = 30
+window_len = 500
 miRNA_len  = 24
 start_time = time.time()
 randomize_start = True
@@ -99,7 +107,7 @@ randomize_start = True
 positive_samples = []
 max_len = 0
 
-done = set()
+# done = set()
 # with open(os.path.join(data_dir, f"positive_samples_{str(window_len)}_randomized_start.csv")) as f:
 #     next(f)  # 跳过 header
 #     for line in f:
@@ -135,7 +143,8 @@ done = set()
 #                                         seed_start=orig_seed_start,
 #                                         seed_end=orig_seed_end)
 #                 if res["mRNA sequence"] is not None:
-#                     if check_complementarity(miRNA=miRNA_seq, mRNA=res["mRNA sequence"]): # check seed complementarilty in mRNA segments
+#                     seed_region = res["mRNA sequence"][res["seed start"]:res["seed end"]+1]
+#                     if check_complementarity(miRNA=miRNA_seq, mRNA=seed_region): # check seed complementarilty in mRNA segments
 #                         max_len = max(max_len, len(res["mRNA sequence"]))
 #                         writer.writerow({
 #                                         "Transcript ID":  tran_id,
@@ -147,7 +156,7 @@ done = set()
 #                                         "label":          1
 #                                         })
 #                     else:
-#                         raise RuntimeError(f"No complementary seed found in miRNA:{miRNA_ID}: {miRNA_seq} and mRNA:{tran_id}: {res['mRNA sequence']}.")
+#                         raise RuntimeError(f"No complementary seed found in miRNA:{miRNA_ID}: {miRNA_seq} and mRNA id:{tran_id}: {mRNA_seq}\noriginal seed start:{orig_seed_start}, original seed end:{orig_seed_end}\nmRNA segment: {res['mRNA sequence']}\nseed start:{res['seed start']}\nseed end:{res['seed end']}.")
 #                 else:
 #                     print(f"Cannot find valid segment for transcript [{tran_id}] and mirRNA [{miRNA_ID}].", flush=True)
 #             else:
@@ -171,7 +180,7 @@ done = set()
 # negative_samples = []
 # max_length = 0
 
-# with open(os.path.join(data_dir, f"negative_samples_{str(window_len)}.csv"), "w", newline="") as f:
+# with open(os.path.join(data_dir, f"mouse_negative_samples_{str(window_len)}.csv"), "w", newline="") as f:
 #     writer = csv.DictWriter(f, fieldnames=["Transcript ID", 
 #                                            "miRNA ID", 
 #                                            "miRNA sequence", 
@@ -212,7 +221,7 @@ done = set()
 #                     if match:
 #                         print("Found complementarity in negative samples, re-sampling mRNA segment...")
 #                         possible_starts    = len(mRNA_seq) - seg_len + 1
-#                         n_samples_per_pair = 1
+#                         n_samples_per_pair = 10
 #                         max_tries          = min(n_samples_per_pair, possible_starts) # choose between N samples or max possible segments per sample
 #                         tried_starts       = set()
 
@@ -251,8 +260,8 @@ done = set()
 # print("Maximum mRNA length = ", max_length)
 # print(f"Time taken for putting together negative samples = {(time.time() - start_time)/60} min")
 
-positive_human_samples = pd.read_csv(os.path.join(data_dir, f"positive_samples_{str(window_len)}_randomized_start.csv"), sep='\t')
-negative_human_samples = pd.read_csv(os.path.join(data_dir, f"negative_samples_{str(window_len)}.csv"), sep='\t')
+positive_human_samples = pd.read_csv(os.path.join(data_dir, f"human_positive_samples_{str(window_len)}_randomized_start.csv"), sep='\t')
+negative_human_samples = pd.read_csv(os.path.join(data_dir, f"human_negative_samples_{str(window_len)}.csv"), sep='\t')
 positive_mouse_samples = pd.read_csv(os.path.join(data_dir, f"mouse_positive_samples_{str(window_len)}_randomized_start.csv"), sep='\t')
 negative_mouse_samples = pd.read_csv(os.path.join(data_dir, f"mouse_negative_samples_{str(window_len)}.csv"), sep='\t')
 samples = pd.concat([positive_human_samples, positive_mouse_samples, negative_human_samples, negative_mouse_samples], axis=0)

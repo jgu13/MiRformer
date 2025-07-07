@@ -19,12 +19,15 @@ class MultiHeadAttention(nn.Module):
     def __init__(self, 
                  embed_dim, 
                  num_heads,
-                 device='cuda',):
+                 device='cuda',
+                 cross_attn=False,
+                 max_seq_len=10000):
         super(MultiHeadAttention, self).__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
         self.device = device
+        self.cross_attn = cross_attn
 
         assert (
             self.head_dim * num_heads == embed_dim
@@ -37,7 +40,19 @@ class MultiHeadAttention(nn.Module):
 
         self.scale = 1.0 / math.sqrt(self.head_dim)
 
-    def get_slopes(self, n):
+        if not cross_attn:
+            # get alibi positional embedding 
+            slopes = self._get_slopes(self.num_heads)
+            slopes = torch.tensor(slopes, device=device).view(num_heads, 1, 1) # (num_heads, 1, 1)
+            arange = torch.arange(max_seq_len, device=device)
+            x = arange[:, None] # (L, 1)
+            y = arange[None, :] # (1, L)
+            bias = (x - y).to(device) # (L, L)
+            bias = bias.unsqueeze(0).expand(self.num_heads, -1, -1) # (num_heads, L, L)
+            full_alibi = slopes * bias # (num_heads, L, L)
+            self.register_buffer("alibi_full", full_alibi)
+
+    def _get_slopes(self, n):
         def get_slopes_power_of_2(n):
             start = (2**(-2**-(math.log2(n)-3)))
             ratio = start
@@ -47,24 +62,13 @@ class MultiHeadAttention(nn.Module):
             return get_slopes_power_of_2(n)                   #In the paper, we only train models that have 2^a heads for some a. This function has
         else:                                                 #some good properties that only occur when the input is a power of 2. To maintain that even
             closest_power_of_2 = 2**math.floor(math.log2(n))  #when the number of heads is not a power of 2, we use this workaround. 
-            return get_slopes_power_of_2(closest_power_of_2) + self.get_slopes(2*closest_power_of_2)[0::2][:n-closest_power_of_2]
-        
-    def get_alibi(self, attn_score):
-        batch_size = attn_score.shape[0]
-        q_len      = attn_score.shape[2]
-        k_len      = attn_score.shape[3]
-        self.slopes        = self.get_slopes(self.num_heads)
-        self.slopes_matrix = torch.tensor(self.slopes).unsqueeze(1).unsqueeze(1) # (num_heads, 1, 1)
-        self.bias_matrix   = torch.arange(q_len).unsqueez(0).unsqueeze(0).expand(self.num_heads, k_len, -1) # (num_heads, k_len, q_len)
-        self.alibi         = self.slopes_matrix * self.bias_matrix # (num_heads, k_len, q_len)
-        self.alibi         = self.alibi.unsqueeze(0).repeat(batch_size, 1, 1, 1) #(batchsize, num_heads, k_len, q_len)
+            return get_slopes_power_of_2(closest_power_of_2) + self._get_slopes(2*closest_power_of_2)[0::2][:n-closest_power_of_2]
 
     def forward(self, 
                 query, 
                 key, 
                 value, 
-                mask=None,
-                save_attn=False):
+                mask=None,):
         batch_size = query.size(0)
         len_q, len_k, len_v = query.size(1), key.size(1), value.size(1)
         
@@ -82,9 +86,11 @@ class MultiHeadAttention(nn.Module):
         
         # Scaled Dot-Product Attention
         scores = torch.matmul(Q, K.transpose(2, 3)) * self.scale # (batchsize, num_head, q_len, k_len)
-        # TODO: add alibi bias
-        self.get_alibi(attn_score = scores)
-        scores += self.alibi # add alibi to attention score QK^T
+        if not self.cross_attn:
+            batch_size = scores.shape[0]
+            seq_len    = scores.shape[2]
+            alibi      = self.alibi_full[:, :seq_len, :seq_len] # slice to the current sequence length
+            scores    += alibi.unsqueeze(0) # add alibi to attention score QK^T
 
         if mask is not None:
             mask = mask.unsqueeze(1).unsqueeze(2).expand(-1, self.num_heads, Q.shape[2], -1) # (batchsize, head_dim, q_len, k_len)
@@ -101,9 +107,9 @@ class MultiHeadAttention(nn.Module):
 
         return output
 
-class PositionWiseFeedForward(nn.Module):
+class FeedForward(nn.Module):
     def __init__(self, embed_dim, ff_dim):
-        super(PositionWiseFeedForward, self).__init__()
+        super(FeedForward, self).__init__()
         self.fc1 = nn.Linear(embed_dim, ff_dim)
         self.fc2 = nn.Linear(ff_dim, embed_dim)
 
@@ -133,10 +139,13 @@ class AdditivePositionalEncoding(nn.Module):
         return x + pos_emb
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, embed_dim, num_heads, ff_dim, dropout=0.1, device='cuda'):
+    def __init__(self, embed_dim, num_heads, ff_dim, max_seq_len=10000, dropout=0.1, device='cuda'):
         super(TransformerEncoderLayer, self).__init__()
-        self.self_attn = MultiHeadAttention(embed_dim, num_heads, device)
-        self.feed_forward = PositionWiseFeedForward(embed_dim, ff_dim)
+        self.self_attn = MultiHeadAttention(embed_dim=embed_dim, 
+                                            num_heads=num_heads, 
+                                            device=device, 
+                                            max_seq_len=max_seq_len)
+        self.feed_forward = FeedForward(embed_dim, ff_dim)
         self.norm1 = nn.LayerNorm(embed_dim)
         self.norm2 = nn.LayerNorm(embed_dim)
         self.dropout = nn.Dropout(dropout)
@@ -154,12 +163,13 @@ class TransformerEncoderLayer(nn.Module):
         return x
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, num_layers, embed_dim, num_heads, ff_dim, dropout=0.1, device='cuda'):
+    def __init__(self, num_layers, embed_dim, num_heads, ff_dim, max_seq_len=10000, dropout=0.1, device='cuda'):
         super(TransformerEncoder, self).__init__()
         self.layers = nn.ModuleList(
             [TransformerEncoderLayer(embed_dim=embed_dim, 
                                      num_heads=num_heads, 
                                      ff_dim=ff_dim, 
+                                     max_seq_len=max_seq_len, 
                                      dropout=dropout, 
                                      device=device) for _ in range(num_layers)]
         )
@@ -218,6 +228,7 @@ class CrossAttentionPredictor(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             ff_dim=ff_dim,
+            max_seq_len=mirna_max_len, 
             device=device,
             dropout=dropout_rate,
         )
@@ -226,6 +237,7 @@ class CrossAttentionPredictor(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             ff_dim=ff_dim,
+            max_seq_len=mrna_max_len, 
             device=device,
             dropout=dropout_rate,
         )
@@ -233,6 +245,7 @@ class CrossAttentionPredictor(nn.Module):
             embed_dim=embed_dim,
             num_heads=num_heads,
             device=device,
+            cross_attn=True, # no positional encoding in cross attention
         )
         self.dropout = nn.Dropout(dropout_rate)
         self.cross_norm = nn.LayerNorm(embed_dim) # normalize over embedding dimension
@@ -247,9 +260,9 @@ class CrossAttentionPredictor(nn.Module):
     
     def forward(self, mirna, mrna, mrna_mask, mirna_mask):
         mirna_embedding = self.embedding(mirna)
-        mirna_embedding = self.mirna_positional_embedding(mirna_embedding) # (batch_size, mirna_len, embed_dim)
+        # mirna_embedding = self.mirna_positional_embedding(mirna_embedding) # (batch_size, mirna_len, embed_dim)
         mrna_embedding = self.embedding(mrna)
-        mrna_embedding = self.mrna_positional_embedding(mrna_embedding) # (batch_size, mrna_len, embed_dim)
+        # mrna_embedding = self.mrna_positional_embedding(mrna_embedding) # (batch_size, mrna_len, embed_dim)
         
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
         mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
@@ -827,29 +840,28 @@ class QuestionAnsweringModel(nn.Module):
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
-    mrna_max_len = 30
+    mrna_max_len = 500
     mirna_max_len = 24
     PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_30_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_30_randomized_start.csv")
-    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_test_30_randomized_start.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
+    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_test_500_randomized_start.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    device='cuda:1',
-                                   epochs=100,
+                                   epochs=20,
                                    batch_size=32,
-                                   lr=1e-4,
+                                   lr=1e-6,
                                    seed=54,
                                    predict_span=True,
-                                    predict_binding=True)
+                                   predict_binding=True)
     # total_params = sum(param.numel() for param in model.parameters())
     # print(f"Total Parameters: {total_params}")
-    # model.run(model=model,
-    #           train_path=train_datapath,
-    #           valid_path=valid_datapath,
-    #           test_path =test_datapath,
-    #           evaluation=False,
-    #         #   ckpt_name="best_composite_0.9764_0.9935_epoch57.pth",
-    #           accumulation_step=8)
-   
+    model.run(model=model,
+              train_path=train_datapath,
+              valid_path=valid_datapath,
+              test_path =test_datapath,
+              evaluation=False,
+              accumulation_step=8)
+              #   ckpt_name="best_composite_0.9764_0.9935_epoch57.pth",
