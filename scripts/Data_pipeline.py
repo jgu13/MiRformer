@@ -169,13 +169,10 @@ class CharacterTokenizer(PreTrainedTokenizer):
         with open(cfg_file) as f:
             cfg = json.load(f)
         return cls.from_config(cfg)
+    
 
 
-"""
-The GenomicBenchmarks dataset will automatically download to /contents on colab.
-There are 8 datasets to choose from.
 
-"""
 
 from random import random
 import numpy as np
@@ -215,93 +212,6 @@ def string_reverse_complement(seq):
         else:
             rev_comp += base
     return rev_comp
-
-
-class GenomicBenchmarkDataset(torch.utils.data.Dataset):
-    """
-    Loop thru bed file, retrieve (chr, start, end), query fasta file for sequence.
-    Returns a generator that retrieves the sequence.
-
-    Genomic Benchmarks Dataset, from:
-    https://github.com/ML-Bioinfo-CEITEC/genomic_benchmarks
-
-
-    """
-
-    def __init__(
-        self,
-        split,
-        max_length,
-        dataset_name="human_enhancers_cohn",
-        d_output=2,  # default binary classification
-        dest_path="/content",  # default for colab
-        tokenizer=None,
-        tokenizer_name=None,
-        use_padding=None,
-        add_eos=False,
-        rc_aug=False,
-        return_augs=False,
-    ):
-
-        self.max_length = max_length
-        self.use_padding = use_padding
-        self.tokenizer_name = tokenizer_name
-        self.tokenizer = tokenizer
-        self.return_augs = return_augs
-        self.add_eos = add_eos
-        self.d_output = d_output  # needed for decoder to grab
-        self.rc_aug = rc_aug
-
-        # use Path object
-        base_path = Path(dest_path) / dataset_name / split
-
-        self.all_paths = []
-        self.all_labels = []
-        label_mapper = {}
-
-        for i, x in enumerate(base_path.iterdir()):
-            label_mapper[x.stem] = i
-
-        for label_type in label_mapper.keys():
-            for x in (base_path / label_type).iterdir():
-                self.all_paths.append(x)
-                self.all_labels.append(label_mapper[label_type])
-
-    def __len__(self):
-        return len(self.all_paths)
-
-    def __getitem__(self, idx):
-        txt_path = self.all_paths[idx]
-        with open(txt_path, "r") as f:
-            content = f.read()
-        x = content
-        y = self.all_labels[idx]
-
-        # apply rc_aug here if using
-        if self.rc_aug and coin_flip():
-            x = string_reverse_complement(x)
-
-        seq = self.tokenizer(
-            x,
-            add_special_tokens=False,
-            padding="max_length" if self.use_padding else None,
-            max_length=self.max_length,
-            truncation=True,
-        )  # add cls and eos token (+2)
-        seq = seq["input_ids"]  # get input_ids
-
-        # need to handle eos here
-        if self.add_eos:
-            # append list seems to be faster than append tensor
-            seq.append(self.tokenizer.sep_token_id)
-
-        # convert to tensor
-        seq = torch.LongTensor(seq)
-
-        # need to wrap in list
-        target = torch.LongTensor([y])
-
-        return seq, target
 
 class miRawDataset(torch.utils.data.Dataset):
     def __init__(
@@ -482,6 +392,9 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
             max_length=self.mrna_max_len,  
             return_attention_mask=True,
         )
+
+        # add CNN-encoded k-mer tokenization
+        
 
         mirna_ids = torch.tensor(mirna_encoded["input_ids"], dtype=torch.long)
         mirna_attn_mask = torch.tensor(mirna_encoded["attention_mask"], dtype=torch.long)

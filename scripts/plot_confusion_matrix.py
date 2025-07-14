@@ -5,8 +5,7 @@ import matplotlib.pyplot as plt
 
 # 1. 读取 CSV（替换为你的文件路径）
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
-df = pd.read_csv(os.path.join(PROJ_HOME, data_dir, "predictions.csv"))
+df = pd.read_csv(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer/30/binding_span_predictions.csv"))
 
 df = df.loc[df["label"] == 1]
 print(len(df))
@@ -57,6 +56,6 @@ cbar = fig.colorbar(im, ax=ax, pad=0.01, label='Count')
 plt.tight_layout()
 
 # 保存
-performance_dir = os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer")
-plt.savefig(os.path.join(performance_dir, 'confusion_matrix.png'), dpi=800, bbox_inches='tight')
-plt.show()
+performance_dir = os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer/30/")
+plt.savefig(os.path.join(performance_dir, 'confusion_matrix_w_cnn.png'), dpi=500, bbox_inches='tight')
+print(f"plot saved to {performance_dir}")

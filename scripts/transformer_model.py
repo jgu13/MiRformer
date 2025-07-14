@@ -15,13 +15,68 @@ from time import time
 from utils import load_dataset
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset
 
+
+class CNNTokenization(nn.Module):
+    def __init__(self, embed_dim):
+        super().__init__()
+        self.embed_dim = embed_dim
+        D = 2*embed_dim
+        self.conv1 = nn.Conv1d(embed_dim, D, padding=2, kernel_size=5)
+        self.conv2 = nn.Conv1d(embed_dim, D, padding=3, kernel_size=7)
+        self.fc1 = nn.Linear(D, D)
+        self.bn1 = nn.BatchNorm1d(D)
+        self.fc2 = nn.Linear(D, embed_dim)
+        self.act = nn.ReLU()
+    
+    def forward(self, x):
+        x1 = self.conv1(x) # (B, D, L)
+        x1 = x1.transpose(-1, -2) # (B, L. D)
+        x1 = self.act(self.fc1(x1)) # (B, L, D)
+        x1 = x1.transpose(-1, -2) # (B, D, L)
+        x1 = self.bn1(x1) # (B, D, L)
+        x1 = x1.transpose(-1, -2) #(B, L, D)
+        x1 = self.fc2(x1) # (B, L, embed_dim)
+
+        x2 = self.conv2(x)
+        x2 = x2.transpose(-1, -2) # (B, L. D)
+        x2 = self.act(self.fc1(x2)) # (B, L, D)
+        x2 = x2.transpose(-1, -2) # (B, D, L)
+        x2 = self.bn1(x2) # (B, D, L)
+        x2 = x2.transpose(-1, -2) #(B, L, D)
+        x2 = self.fc2(x2) # (B, L, embed_dim)
+
+        x = x1 + x2
+        return x
+
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, max_seq_len=10000):
+        super().__init__()
+        inv_freq = 1.0 / (10000 ** (torch.arange(0, dim, 2) / dim))
+        t = torch.arange(max_seq_len)
+        # (max_seq_len, dim/2)
+        freqs = torch.einsum("i,j->ij", t, inv_freq)  
+        # interleave to (max_seq_len, dim)
+        emb = torch.cat([freqs, freqs], dim=-1)        
+        # register buffers so they move with .to(device)
+        self.register_buffer("cos_emb", emb.cos()[None, None, :, :])  
+        self.register_buffer("sin_emb", emb.sin()[None, None, :, :])  
+
+    def forward(self, x):
+        # x: (batch, heads, seq_len, head_dim)
+        seq_len = x.shape[2]
+        cos = self.cos_emb[:, :, :seq_len, :]
+        sin = self.sin_emb[:, :, :seq_len, :]
+        # rotate pairs
+        x2 = torch.stack([-x[..., 1::2], x[..., 0::2]], -1).reshape_as(x)
+        return x * cos + x2 * sin
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, 
                  embed_dim, 
                  num_heads,
                  device='cuda',
-                 cross_attn=False,
-                 max_seq_len=10000):
+                 max_seq_len=10000,
+                 cross_attn=False):
         super(MultiHeadAttention, self).__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -41,28 +96,8 @@ class MultiHeadAttention(nn.Module):
         self.scale = 1.0 / math.sqrt(self.head_dim)
 
         if not cross_attn:
-            # get alibi positional embedding 
-            slopes = self._get_slopes(self.num_heads)
-            slopes = torch.tensor(slopes, device=device).view(num_heads, 1, 1) # (num_heads, 1, 1)
-            arange = torch.arange(max_seq_len, device=device)
-            x = arange[:, None] # (L, 1)
-            y = arange[None, :] # (1, L)
-            bias = (x - y).to(device) # (L, L)
-            bias = bias.unsqueeze(0).expand(self.num_heads, -1, -1) # (num_heads, L, L)
-            full_alibi = slopes * bias # (num_heads, L, L)
-            self.register_buffer("alibi_full", full_alibi)
-
-    def _get_slopes(self, n):
-        def get_slopes_power_of_2(n):
-            start = (2**(-2**-(math.log2(n)-3)))
-            ratio = start
-            return [start*ratio**i for i in range(n)]
-
-        if math.log2(n).is_integer():
-            return get_slopes_power_of_2(n)                   #In the paper, we only train models that have 2^a heads for some a. This function has
-        else:                                                 #some good properties that only occur when the input is a power of 2. To maintain that even
-            closest_power_of_2 = 2**math.floor(math.log2(n))  #when the number of heads is not a power of 2, we use this workaround. 
-            return get_slopes_power_of_2(closest_power_of_2) + self._get_slopes(2*closest_power_of_2)[0::2][:n-closest_power_of_2]
+            self.rotary = RotaryEmbedding(dim=self.head_dim, 
+                                          max_seq_len=max_seq_len)
 
     def forward(self, 
                 query, 
@@ -83,15 +118,13 @@ class MultiHeadAttention(nn.Module):
         Q = Q.transpose(1,2) 
         K = K.transpose(1,2)
         V = V.transpose(1,2)
+
+        if not self.cross_attn:
+            Q = self.rotary(Q)
+            K = self.rotary(K)
         
         # Scaled Dot-Product Attention
         scores = torch.matmul(Q, K.transpose(2, 3)) * self.scale # (batchsize, num_head, q_len, k_len)
-        if not self.cross_attn:
-            batch_size = scores.shape[0]
-            seq_len    = scores.shape[2]
-            alibi      = self.alibi_full[:, :seq_len, :seq_len] # slice to the current sequence length
-            scores    += alibi.unsqueeze(0) # add alibi to attention score QK^T
-
         if mask is not None:
             mask = mask.unsqueeze(1).unsqueeze(2).expand(-1, self.num_heads, Q.shape[2], -1) # (batchsize, head_dim, q_len, k_len)
             mask = mask.to(self.device)
@@ -143,7 +176,7 @@ class TransformerEncoderLayer(nn.Module):
         super(TransformerEncoderLayer, self).__init__()
         self.self_attn = MultiHeadAttention(embed_dim=embed_dim, 
                                             num_heads=num_heads, 
-                                            device=device, 
+                                            device=device,
                                             max_seq_len=max_seq_len)
         self.feed_forward = FeedForward(embed_dim, ff_dim)
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -169,7 +202,7 @@ class TransformerEncoder(nn.Module):
             [TransformerEncoderLayer(embed_dim=embed_dim, 
                                      num_heads=num_heads, 
                                      ff_dim=ff_dim, 
-                                     max_seq_len=max_seq_len, 
+                                     max_seq_len=max_seq_len,
                                      dropout=dropout, 
                                      device=device) for _ in range(num_layers)]
         )
@@ -221,14 +254,16 @@ class CrossAttentionPredictor(nn.Module):
         self.dropout_rate = dropout_rate
         self.device = device
         self.embedding = nn.Embedding(vocab_size, embed_dim)
-        self.mirna_positional_embedding = AdditivePositionalEncoding(max_len=mirna_max_len, d_model=embed_dim)
-        self.mrna_positional_embedding = AdditivePositionalEncoding(max_len=mrna_max_len, d_model=embed_dim)
+        # self.sn_embedding = nn.Embedding(vocab_size, embed_dim)
+        # self.cnn_embedding = CNNTokenization(embed_dim)
+        # self.mirna_positional_embedding = AdditivePositionalEncoding(max_len=mirna_max_len, d_model=embed_dim)
+        # self.mrna_positional_embedding = AdditivePositionalEncoding(max_len=mrna_max_len, d_model=embed_dim)
         self.mirna_encoder = TransformerEncoder(
             num_layers=num_layers,
             embed_dim=embed_dim,
             num_heads=num_heads,
-            ff_dim=ff_dim,
-            max_seq_len=mirna_max_len, 
+            ff_dim=ff_dim, 
+            max_seq_len=mirna_max_len,
             device=device,
             dropout=dropout_rate,
         )
@@ -236,8 +271,8 @@ class CrossAttentionPredictor(nn.Module):
             num_layers=num_layers,
             embed_dim=embed_dim,
             num_heads=num_heads,
-            ff_dim=ff_dim,
-            max_seq_len=mrna_max_len, 
+            ff_dim=ff_dim, 
+            max_seq_len=mrna_max_len,
             device=device,
             dropout=dropout_rate,
         )
@@ -259,11 +294,17 @@ class CrossAttentionPredictor(nn.Module):
         self.predict_binding = predict_binding
     
     def forward(self, mirna, mrna, mrna_mask, mirna_mask):
-        mirna_embedding = self.embedding(mirna)
+        mirna_sn_embedding = self.sn_embedding(mirna)
         # mirna_embedding = self.mirna_positional_embedding(mirna_embedding) # (batch_size, mirna_len, embed_dim)
-        mrna_embedding = self.embedding(mrna)
+        mrna_sn_embedding = self.sn_embedding(mrna)
         # mrna_embedding = self.mrna_positional_embedding(mrna_embedding) # (batch_size, mrna_len, embed_dim)
         
+        # add N-gram CNN-encoded embedding
+        # mirna_cnn_embedding = self.cnn_embedding(mirna_sn_embedding.transpose(-1, -2)) # (batch_size, embed_dim, mirna_len)
+        # mrna_cnn_embedding = self.cnn_embedding(mrna_sn_embedding.transpose(-1, -2))  # (batch_size, embed_dim, mrna_len)
+        mirna_embedding = mirna_sn_embedding #+ mirna_cnn_embedding # (batch_size, mirna_len, embed_dim)
+        mrna_embedding = mrna_sn_embedding #+ mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
+
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
         mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
         
@@ -271,9 +312,9 @@ class CrossAttentionPredictor(nn.Module):
                                   key=mirna_embedding,
                                   value=mirna_embedding,
                                   mask=mirna_mask) # pass key-mask
-        z_res = self.dropout(z) + mrna_embedding
+        self.cross_attn_output = z
+        z_res = self.dropout(z) + mrna_embedding # residual connection
         z_norm = self.cross_norm(z_res)
-        # 消除padded tokens 在隐藏状态中的信息
         z_norm = z_norm.masked_fill(mrna_mask.unsqueeze(-1)==0, 0) # (batch_size, mrna_len, embed_dim)
         
         if self.predict_binding:
@@ -298,6 +339,8 @@ class QuestionAnsweringModel(nn.Module):
                 mirna_max_len,
                 device: str='cuda',
                 epochs:int=100,
+                embed_dim=256,
+                ff_dim:int=512,
                 batch_size:int=32,
                 lr=0.001,
                 seed=42,
@@ -309,6 +352,7 @@ class QuestionAnsweringModel(nn.Module):
         self.mirna_max_len = mirna_max_len
         self.device = device
         self.epochs = epochs
+        self.ff_dim = ff_dim
         self.batch_size = batch_size
         self.lr = lr
         self.seed = seed
@@ -317,6 +361,9 @@ class QuestionAnsweringModel(nn.Module):
         if use_cross_attn:
             self.predictor = CrossAttentionPredictor(mrna_max_len=mrna_max_len,
                                                     mirna_max_len=mirna_max_len,
+                                                    embed_dim = embed_dim,
+                                                    ff_dim = ff_dim,
+                                                    hidden_sizes = [ff_dim, ff_dim],
                                                     device=device,
                                                     predict_span=predict_span,
                                                     predict_binding=predict_binding)
@@ -382,7 +429,7 @@ class QuestionAnsweringModel(nn.Module):
               epoch,
               accumulation_step=1,
               alpha1=1,
-              alpha2=0.25):
+              alpha2=1):
         '''
         Training loop
         '''
@@ -483,6 +530,7 @@ class QuestionAnsweringModel(nn.Module):
         total_loss = 0.0 
         all_start_preds, all_end_preds        = [], []
         all_binding_preds, all_binding_labels = [], []
+        all_binding_probs                     = []
         all_start_labels, all_end_labels      = [], []
 
         with torch.no_grad():
@@ -518,6 +566,7 @@ class QuestionAnsweringModel(nn.Module):
                     # binding metric
                     binding_probs   = F.sigmoid(binding_logits)
                     binding_preds   = (binding_probs > 0.5).to(torch.int)
+                    all_binding_probs.extend(binding_probs.cpu())
                     all_binding_preds.extend(binding_preds.cpu())
                     all_binding_labels.extend(binding_targets.view(-1).cpu())
                 else:
@@ -581,6 +630,7 @@ class QuestionAnsweringModel(nn.Module):
             f1          = 0.0
 
         if self.predict_binding:
+            all_binding_probs  = torch.tensor(all_binding_probs, dtype=torch.float)
             all_binding_labels = torch.tensor(all_binding_labels, dtype=torch.long)
             all_binding_preds  = torch.tensor(all_binding_preds, dtype=torch.long)
             acc_binding        = (all_binding_preds == all_binding_labels).float().mean().item()
@@ -597,6 +647,7 @@ class QuestionAnsweringModel(nn.Module):
         
         if evaluation:
             if self.predict_binding:
+                self.all_binding_probs = all_binding_probs.numpy()
                 self.all_binding_preds = all_binding_preds.numpy()
             if self.predict_span:
                 self.all_start_preds = all_start_preds.numpy()
@@ -637,6 +688,7 @@ class QuestionAnsweringModel(nn.Module):
             ckpt_path = os.path.join(PROJ_HOME, 
                             "checkpoints", 
                             "TargetScan/TwoTowerTransformer",
+                            "CNN-tokenized",
                             str(model.mrna_max_len), 
                             ckpt_name)
             loaded_data = torch.load(ckpt_path, map_location=model.device)
@@ -650,6 +702,8 @@ class QuestionAnsweringModel(nn.Module):
             D_test_w_pred = D_test.copy()
             if self.predict_binding:
                 D_test_w_pred["pred label"] = self.all_binding_preds
+                D_test_w_pred["pred prob"]  = self.all_binding_probs
+                res_df = D_test_w_pred
             if self.predict_span:
                 D_test_positive = D_test_w_pred.loc[D_test_w_pred["label"] == 1].copy()
                 D_test_positive["pred start"] = self.all_start_preds
@@ -667,21 +721,23 @@ class QuestionAnsweringModel(nn.Module):
                     .fillna(-1)
                     .astype(int)
                 )
-            pred_df_path = os.path.join(os.path.dirname(train_path), "binding_span_predictions.csv")
-            D_merged.to_csv(pred_df_path, index=False)
+                res_df = D_merged
+            pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(mrna_max_len))
+            os.makedirs(pred_df_path, exist_ok=True)
+            res_df.to_csv(os.path.join(pred_df_path, "negative_with_seed_prediction.csv"), index=False)
             print(f"Prediction saved to {pred_df_path}")
         else:
             # weights and bias initialization
             wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
             run = wandb.init(
                 project="mirna-Question-Answering",
-                name=f"primates_binding-span-random-start-len:{self.mrna_max_len}-epoch:{self.epochs}-batchsize:{self.batch_size}-2layerTrans-512MLP_hidden", 
+                name=f"CNN_binding-span-random-start-len:{self.mrna_max_len}-epoch:{self.epochs}-batchsize:{self.batch_size}-2layerTrans-{self.ff_dim}MLP_hidden", 
                 config={
                     "batch_size": self.batch_size * accumulation_step,
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates"],
+                tags=["binding-span", "primates", "CNN-5-7-kernel"],
                 save_code=True,
                 job_type="train"
             )
@@ -734,6 +790,7 @@ class QuestionAnsweringModel(nn.Module):
                 "checkpoints", 
                 "TargetScan", 
                 "TwoTowerTransformer", 
+                "CNN-tokenized",
                 str(self.mrna_max_len),
             )
             os.makedirs(model_checkpoints_dir, exist_ok=True)
@@ -766,7 +823,7 @@ class QuestionAnsweringModel(nn.Module):
                         best_binding_acc      = acc_binding
                         best_f1_score         = f1
                         count = 0
-                        ckpt_name = f"best_composite_{f1:.4f}_{acc_binding:.4f}_epoch{epoch}.pth"
+                        ckpt_name = f"alpha=1_best_composite_{f1:.4f}_{acc_binding:.4f}_epoch{epoch}.pth"
                         ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
                         torch.save(model.state_dict(), ckpt_path)
                         model_art = wandb.Artifact(
@@ -840,19 +897,21 @@ class QuestionAnsweringModel(nn.Module):
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
-    mrna_max_len = 500
+    mrna_max_len = 30
     mirna_max_len = 24
     PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
-    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_test_500_randomized_start.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_30_randomized_start.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_30_randomized_start.csv")
+    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_30_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device='cuda:1',
+                                   device='cuda:2',
                                    epochs=20,
+                                   embed_dim=256,
+                                   ff_dim=512,
                                    batch_size=32,
-                                   lr=1e-6,
+                                   lr=1e-4,
                                    seed=54,
                                    predict_span=True,
                                    predict_binding=True)
@@ -863,5 +922,5 @@ if __name__ == "__main__":
               valid_path=valid_datapath,
               test_path =test_datapath,
               evaluation=False,
-              accumulation_step=8)
-              #   ckpt_name="best_composite_0.9764_0.9935_epoch57.pth",
+              accumulation_step=8,
+              ckpt_name="best_composite_0.9911_0.9977_epoch11.pth")

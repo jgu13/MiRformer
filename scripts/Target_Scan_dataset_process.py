@@ -10,21 +10,19 @@ from sklearn.model_selection import train_test_split
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
-predicted_targets_f = "Mouse_Predicted_Targets_Context_Scores.default_predictions.txt.zip"
+predicted_targets_f = "Human_Predicted_Targets_Context_Scores.default_predictions.txt.zip"
 
 # positive miRNA and mRNA pairs
-# path = os.path.join(data_dir, predicted_targets_f)
-# predicted_targets = pd.read_csv(path, sep='\t', compression="zip")
-# print(predicted_targets["Site Type"].unique())
-# print(predicted_targets.loc[(predicted_targets["miRNA"]=="hsa-miR-145-5p") & (predicted_targets["Transcript ID"]=="ENST00000532642.1")])
+path = os.path.join(data_dir, predicted_targets_f)
+predicted_targets = pd.read_csv(path, sep='\t', compression="zip")
 # filter for human (9606), chimpanzee (9598), mouse (10090)
-# tax_ids = [10090]
-# top_predicted_targets = predicted_targets[
-#     (predicted_targets["Gene Tax ID"].isin(tax_ids)) &
-#     (predicted_targets["context++ score percentile"] >= np.int64(80)) # top 20% likely pairs
-#     ]
-# # filter out non-canonical sites
-# top_predicted_targets = top_predicted_targets.loc[~top_predicted_targets["Site Type"].isin([-2,-3])]
+tax_ids = [9606]
+top_predicted_targets = predicted_targets[
+    (predicted_targets["Gene Tax ID"].isin(tax_ids)) &
+    (predicted_targets["context++ score percentile"] >= np.int64(80)) # top 20% likely pairs
+    ]
+# filter out non-canonical sites
+top_predicted_targets = top_predicted_targets.loc[~top_predicted_targets["Site Type"].isin([-2,-3])]
 
 # positive_pairs = top_predicted_targets[[
 #      "miRNA",
@@ -131,17 +129,17 @@ predicted_targets_f = "Mouse_Predicted_Targets_Context_Scores.default_prediction
 #               index=False,
 #               compression='gzip')
 
-mRNA_df_path = os.path.join(data_dir, "human_utr_sequences.txt.zip")
-utr_df = pd.read_csv(mRNA_df_path, sep='\t', compression='zip')
-# filter for mouse
-species_ids = [9606]
-utr_df = utr_df[utr_df['Species ID'].isin(species_ids)]
-def clean_seq(s):
-    return s.replace("-", "").upper().replace("U", "T")
-utr_df["UTR sequence"] = utr_df["UTR sequence"].apply(clean_seq)
-utr_df.columns = ['Transcript ID', 'Gene ID', 'Gene Symbol', 'Species ID', 'mRNA sequence']
-mrna_save_path = os.path.join(data_dir, "human_mrna_seq.csv.gz")
-utr_df.to_csv(mrna_save_path,
-              sep='\t',
-              index=False,
-              compression='gzip')
+# mRNA_df_path = os.path.join(data_dir, "human_utr_sequences.txt.zip")
+# utr_df = pd.read_csv(mRNA_df_path, sep='\t', compression='zip')
+# # filter for mouse
+# species_ids = [9606]
+# utr_df = utr_df[utr_df['Species ID'].isin(species_ids)]
+# def clean_seq(s):
+#     return s.replace("-", "").upper().replace("U", "T")
+# utr_df["UTR sequence"] = utr_df["UTR sequence"].apply(clean_seq)
+# utr_df.columns = ['Transcript ID', 'Gene ID', 'Gene Symbol', 'Species ID', 'mRNA sequence']
+# mrna_save_path = os.path.join(data_dir, "human_mrna_seq.csv.gz")
+# utr_df.to_csv(mrna_save_path,
+#               sep='\t',
+#               index=False,
+#               compression='gzip')
