@@ -16,6 +16,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Sampler
 from functools import partial
 from einops import rearrange
 from typing import Optional
@@ -169,10 +170,27 @@ class CharacterTokenizer(PreTrainedTokenizer):
         with open(cfg_file) as f:
             cfg = json.load(f)
         return cls.from_config(cfg)
-    
 
+class BatchStratifiedSampler(Sampler):
+    def __init__(self, labels, batch_size):
+        assert batch_size % 2 == 0
+        self.pos_label_idx = [i for i,l in enumerate(labels) if l == 1]
+        self.neg_label_idx = [i for i,l in enumerate(labels) if l == 0]
+        self.half = batch_size // 2
 
+    def __iter__(self):
+        random.shuffle(self.pos_label_idx)
+        random.shuffle(self.neg_label_idx)
+        for i in range(0, len(self.pos_label_idx), self.half):
+            pos_batch = self.pos_label_idx[i:i+self.half]
+            neg_batch = self.neg_label_idx[i:i+self.half]
+            if len(neg_batch) < self.half:
+                neg_batch = neg_batch + random.sample(self.neg_label_idx, self.half - len(neg_batch))
+            batch = random.shuffle(pos_batch + neg_batch)
+            yield batch
 
+    def __len__(self):
+        return self.pos_label_idx // self.half
 
 from random import random
 import numpy as np
@@ -200,7 +218,6 @@ string_complement_map = {
     "g": "c",
     "t": "a",
 }
-
 
 # augmentation
 def string_reverse_complement(seq):

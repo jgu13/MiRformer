@@ -13,7 +13,7 @@ import pandas as pd
 from time import time
 
 from utils import load_dataset
-from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset
+from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset, BatchStratifiedSampler
 
 
 class CNNTokenization(nn.Module):
@@ -21,15 +21,17 @@ class CNNTokenization(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         D = 2*embed_dim
-        self.conv1 = nn.Conv1d(embed_dim, D, padding=2, kernel_size=5)
+        # self.conv1 = nn.Conv1d(embed_dim, D, padding=2, kernel_size=5)
         self.conv2 = nn.Conv1d(embed_dim, D, padding=3, kernel_size=7)
+        self.conv3 = nn.Conv1d(embed_dim, D, padding=62, kernel_size=125)
+        self.conv4 = nn.Conv1d(embed_dim, D, padding=128, kernel_size=257)
         self.fc1 = nn.Linear(D, D)
         self.bn1 = nn.BatchNorm1d(D)
         self.fc2 = nn.Linear(D, embed_dim)
         self.act = nn.ReLU()
     
     def forward(self, x):
-        x1 = self.conv1(x) # (B, D, L)
+        x1 = self.conv2(x) # (B, D, L)
         x1 = x1.transpose(-1, -2) # (B, L. D)
         x1 = self.act(self.fc1(x1)) # (B, L, D)
         x1 = x1.transpose(-1, -2) # (B, D, L)
@@ -37,7 +39,7 @@ class CNNTokenization(nn.Module):
         x1 = x1.transpose(-1, -2) #(B, L, D)
         x1 = self.fc2(x1) # (B, L, embed_dim)
 
-        x2 = self.conv2(x)
+        x2 = self.conv3(x)
         x2 = x2.transpose(-1, -2) # (B, L. D)
         x2 = self.act(self.fc1(x2)) # (B, L, D)
         x2 = x2.transpose(-1, -2) # (B, D, L)
@@ -45,7 +47,15 @@ class CNNTokenization(nn.Module):
         x2 = x2.transpose(-1, -2) #(B, L, D)
         x2 = self.fc2(x2) # (B, L, embed_dim)
 
-        x = x1 + x2
+        x3 = self.conv4(x)
+        x3 = x3.transpose(-1, -2) # (B, L. D)
+        x3 = self.act(self.fc1(x3)) # (B, L, D)
+        x3 = x3.transpose(-1, -2) # (B, D, L)
+        x3 = self.bn1(x3) # (B, D, L)
+        x3 = x3.transpose(-1, -2) #(B, L, D)
+        x3 = self.fc2(x3) # (B, L, embed_dim)
+
+        x = x1 + x2 + x3
         return x
 
 class RotaryEmbedding(nn.Module):
@@ -131,7 +141,7 @@ class MultiHeadAttention(nn.Module):
             scores = scores.masked_fill(mask==0, float("-inf"))
         attention = F.softmax(scores, dim=-1)
         self.last_attention = attention.detach().cpu()
-        attention = F.dropout(attention, p=0.1)
+        attention = F.dropout(attention, p=0.2)
         output = torch.matmul(attention, V) # [batchsize, num_heads, q_len, head_dim]
 
         # Concatenate heads and apply final linear layer
@@ -172,7 +182,7 @@ class AdditivePositionalEncoding(nn.Module):
         return x + pos_emb
 
 class TransformerEncoderLayer(nn.Module):
-    def __init__(self, embed_dim, num_heads, ff_dim, max_seq_len=10000, dropout=0.1, device='cuda'):
+    def __init__(self, embed_dim, num_heads, ff_dim, max_seq_len=10000, dropout=0.2, device='cuda'):
         super(TransformerEncoderLayer, self).__init__()
         self.self_attn = MultiHeadAttention(embed_dim=embed_dim, 
                                             num_heads=num_heads, 
@@ -196,7 +206,7 @@ class TransformerEncoderLayer(nn.Module):
         return x
 
 class TransformerEncoder(nn.Module):
-    def __init__(self, num_layers, embed_dim, num_heads, ff_dim, max_seq_len=10000, dropout=0.1, device='cuda'):
+    def __init__(self, num_layers, embed_dim, num_heads, ff_dim, max_seq_len=10000, dropout=0.2, device='cuda'):
         super(TransformerEncoder, self).__init__()
         self.layers = nn.ModuleList(
             [TransformerEncoderLayer(embed_dim=embed_dim, 
@@ -245,7 +255,7 @@ class CrossAttentionPredictor(nn.Module):
                  ff_dim:int=512,
                  hidden_sizes:list[int]=[512, 512],
                  n_classes:int=1, 
-                 dropout_rate:float=0.1,
+                 dropout_rate:float=0.2,
                  device:str='cuda',
                  predict_span=True,
                  predict_binding=False):
@@ -253,9 +263,8 @@ class CrossAttentionPredictor(nn.Module):
         self.embed_dim = embed_dim
         self.dropout_rate = dropout_rate
         self.device = device
-        self.embedding = nn.Embedding(vocab_size, embed_dim)
-        # self.sn_embedding = nn.Embedding(vocab_size, embed_dim)
-        # self.cnn_embedding = CNNTokenization(embed_dim)
+        self.sn_embedding = nn.Embedding(vocab_size, embed_dim)
+        self.cnn_embedding = CNNTokenization(embed_dim)
         # self.mirna_positional_embedding = AdditivePositionalEncoding(max_len=mirna_max_len, d_model=embed_dim)
         # self.mrna_positional_embedding = AdditivePositionalEncoding(max_len=mrna_max_len, d_model=embed_dim)
         self.mirna_encoder = TransformerEncoder(
@@ -300,10 +309,10 @@ class CrossAttentionPredictor(nn.Module):
         # mrna_embedding = self.mrna_positional_embedding(mrna_embedding) # (batch_size, mrna_len, embed_dim)
         
         # add N-gram CNN-encoded embedding
-        # mirna_cnn_embedding = self.cnn_embedding(mirna_sn_embedding.transpose(-1, -2)) # (batch_size, embed_dim, mirna_len)
-        # mrna_cnn_embedding = self.cnn_embedding(mrna_sn_embedding.transpose(-1, -2))  # (batch_size, embed_dim, mrna_len)
-        mirna_embedding = mirna_sn_embedding #+ mirna_cnn_embedding # (batch_size, mirna_len, embed_dim)
-        mrna_embedding = mrna_sn_embedding #+ mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
+        mirna_cnn_embedding = self.cnn_embedding(mirna_sn_embedding.transpose(-1, -2)) # (batch_size, embed_dim, mirna_len)
+        mrna_cnn_embedding = self.cnn_embedding(mrna_sn_embedding.transpose(-1, -2))  # (batch_size, embed_dim, mrna_len)
+        mirna_embedding = mirna_sn_embedding + mirna_cnn_embedding # (batch_size, mirna_len, embed_dim)
+        mrna_embedding = mrna_sn_embedding + mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
 
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
         mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
@@ -429,7 +438,7 @@ class QuestionAnsweringModel(nn.Module):
               epoch,
               accumulation_step=1,
               alpha1=1,
-              alpha2=1):
+              alpha2=0.75):
         '''
         Training loop
         '''
@@ -524,7 +533,7 @@ class QuestionAnsweringModel(nn.Module):
                   dataloader, 
                   device,
                   alpha1=1,
-                  alpha2=0.25,
+                  alpha2=0.75,
                   evaluation=False):
         model.eval()
         total_loss = 0.0 
@@ -724,7 +733,7 @@ class QuestionAnsweringModel(nn.Module):
                 res_df = D_merged
             pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(mrna_max_len))
             os.makedirs(pred_df_path, exist_ok=True)
-            res_df.to_csv(os.path.join(pred_df_path, "negative_with_seed_prediction.csv"), index=False)
+            res_df.to_csv(os.path.join(pred_df_path, "seed_prediction.csv"), index=False)
             print(f"Prediction saved to {pred_df_path}")
         else:
             # weights and bias initialization
@@ -737,7 +746,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates", "CNN-5-7-kernel"],
+                tags=["binding-span", "primates", "CNN-7-125-257-kernel"],
                 save_code=True,
                 job_type="train"
             )
@@ -757,11 +766,13 @@ class QuestionAnsweringModel(nn.Module):
                                         tokenizer=tokenizer,
                                         seed_start_col="seed start",
                                         seed_end_col="seed end",)
+            train_sampler = BatchStratifiedSampler(labels = [example["target"].item() for example in ds_train],
+                                            batch_size = self.batch_size)
             train_loader = DataLoader(ds_train, 
-                                batch_size=self.batch_size, 
-                                shuffle=True)
+                                batch_sampler=train_sampler,
+                                shuffle=False)
             val_loader   = DataLoader(ds_val, 
-                                    batch_size=self.batch_size, 
+                                    batch_size=self.batch_size,
                                     shuffle=False)
             loss_fn   = nn.CrossEntropyLoss()
             model.to(self.device)
@@ -776,7 +787,7 @@ class QuestionAnsweringModel(nn.Module):
                     p.requires_grad = False
 
             trainable_params = [p for p in model.parameters() if p.requires_grad]
-            optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-2)
+            optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-3)
 
             start    = time()
             count    = 0
@@ -897,21 +908,21 @@ class QuestionAnsweringModel(nn.Module):
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
-    mrna_max_len = 30
+    mrna_max_len = 500
     mirna_max_len = 24
     PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_30_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_30_randomized_start.csv")
-    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_30_with_seed.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start_random_samples.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start_random_samples.csv")
+    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    device='cuda:2',
-                                   epochs=20,
-                                   embed_dim=256,
-                                   ff_dim=512,
+                                   epochs=1,
+                                   embed_dim=1024,
+                                   ff_dim=2048,
                                    batch_size=32,
-                                   lr=1e-4,
+                                   lr=3e-5,
                                    seed=54,
                                    predict_span=True,
                                    predict_binding=True)
