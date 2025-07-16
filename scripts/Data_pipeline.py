@@ -17,6 +17,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Sampler
+
+
+import random
+import numpy as np
+from pathlib import Path
 from functools import partial
 from einops import rearrange
 from typing import Optional
@@ -186,15 +191,14 @@ class BatchStratifiedSampler(Sampler):
             neg_batch = self.neg_label_idx[i:i+self.half]
             if len(neg_batch) < self.half:
                 neg_batch = neg_batch + random.sample(self.neg_label_idx, self.half - len(neg_batch))
-            batch = random.shuffle(pos_batch + neg_batch)
+            # Combine the positive and negative index batches
+            batch = pos_batch + neg_batch
+            # Shuffle the final batch to mix positive and negative samples
+            random.shuffle(batch)
             yield batch
 
     def __len__(self):
-        return self.pos_label_idx // self.half
-
-from random import random
-import numpy as np
-from pathlib import Path
+        return len(self.pos_label_idx) // self.half
 
 
 # helper functions

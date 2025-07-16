@@ -21,17 +21,17 @@ class CNNTokenization(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         D = 2*embed_dim
-        # self.conv1 = nn.Conv1d(embed_dim, D, padding=2, kernel_size=5)
+        self.conv1 = nn.Conv1d(embed_dim, D, padding=2, kernel_size=5)
         self.conv2 = nn.Conv1d(embed_dim, D, padding=3, kernel_size=7)
-        self.conv3 = nn.Conv1d(embed_dim, D, padding=62, kernel_size=125)
-        self.conv4 = nn.Conv1d(embed_dim, D, padding=128, kernel_size=257)
+        self.conv3 = nn.Conv1d(embed_dim, D, padding=32, kernel_size=65)
+        # self.conv4 = nn.Conv1d(embed_dim, D, padding=62, kernel_size=125)
         self.fc1 = nn.Linear(D, D)
         self.bn1 = nn.BatchNorm1d(D)
         self.fc2 = nn.Linear(D, embed_dim)
         self.act = nn.ReLU()
     
     def forward(self, x):
-        x1 = self.conv2(x) # (B, D, L)
+        x1 = self.conv1(x) # (B, D, L)
         x1 = x1.transpose(-1, -2) # (B, L. D)
         x1 = self.act(self.fc1(x1)) # (B, L, D)
         x1 = x1.transpose(-1, -2) # (B, D, L)
@@ -39,7 +39,7 @@ class CNNTokenization(nn.Module):
         x1 = x1.transpose(-1, -2) #(B, L, D)
         x1 = self.fc2(x1) # (B, L, embed_dim)
 
-        x2 = self.conv3(x)
+        x2 = self.conv2(x)
         x2 = x2.transpose(-1, -2) # (B, L. D)
         x2 = self.act(self.fc1(x2)) # (B, L, D)
         x2 = x2.transpose(-1, -2) # (B, D, L)
@@ -47,7 +47,7 @@ class CNNTokenization(nn.Module):
         x2 = x2.transpose(-1, -2) #(B, L, D)
         x2 = self.fc2(x2) # (B, L, embed_dim)
 
-        x3 = self.conv4(x)
+        x3 = self.conv3(x)
         x3 = x3.transpose(-1, -2) # (B, L. D)
         x3 = self.act(self.fc1(x3)) # (B, L, D)
         x3 = x3.transpose(-1, -2) # (B, D, L)
@@ -740,13 +740,13 @@ class QuestionAnsweringModel(nn.Module):
             wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
             run = wandb.init(
                 project="mirna-Question-Answering",
-                name=f"CNN_binding-span-random-start-len:{self.mrna_max_len}-epoch:{self.epochs}-batchsize:{self.batch_size}-2layerTrans-{self.ff_dim}MLP_hidden", 
+                name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-{self.ff_dim}MLP_hidden", 
                 config={
                     "batch_size": self.batch_size * accumulation_step,
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates", "CNN-7-125-257-kernel"],
+                tags=["binding-span", "primates", "CNN-5-7-kernel"],
                 save_code=True,
                 job_type="train"
             )
@@ -834,7 +834,7 @@ class QuestionAnsweringModel(nn.Module):
                         best_binding_acc      = acc_binding
                         best_f1_score         = f1
                         count = 0
-                        ckpt_name = f"alpha=1_best_composite_{f1:.4f}_{acc_binding:.4f}_epoch{epoch}.pth"
+                        ckpt_name = f"best_composite_{f1:.4f}_{acc_binding:.4f}_epoch{epoch}.pth"
                         ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
                         torch.save(model.state_dict(), ckpt_path)
                         model_art = wandb.Artifact(
@@ -917,8 +917,8 @@ if __name__ == "__main__":
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device='cuda:2',
-                                   epochs=1,
+                                   device='cuda:1',
+                                   epochs=3,
                                    embed_dim=1024,
                                    ff_dim=2048,
                                    batch_size=32,

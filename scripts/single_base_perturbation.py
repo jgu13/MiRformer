@@ -250,23 +250,23 @@ def main():
     # args_dict = vars(args)
 
     mirna_max_len   = 24
-    mrna_max_len    = 30
+    mrna_max_len    = 500
     predict_span    = True
     predict_binding = True
-    device          = "cuda:3" 
+    device          = "cuda:1" 
     args_dict = {"mirna_max_len": mirna_max_len,
                  "mrna_max_len": mrna_max_len,
                  "device": device,
-                 "embed_dim": 256,
-                 "ff_dim": 512,
+                 "embed_dim": 1024,
+                 "ff_dim": 2048,
                  "predict_span": predict_span,
                  "predict_binding": predict_binding,}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.9911_0.9977_epoch11.pth",
+    model = load_model(ckpt_name="kernel_size_5_7_65_best_composite_0.5904_0.6275_epoch1.pth",
                        **args_dict)
     
     test_data_path = os.path.join(PROJ_HOME, data_dir, 
-                                 "TargetScan_train_30_randomized_start.csv")
+                                 "TargetScan_train_500_randomized_start_random_samples.csv")
     test_data = pd.read_csv(test_data_path)
     mRNA_seqs = test_data[["mRNA sequence"]].values
     miRNA_seqs = test_data[["miRNA sequence"]].values
@@ -276,7 +276,7 @@ def main():
     os.makedirs(save_plot_dir, exist_ok=True)
 
     # Test sequence
-    i=299857
+    i=1
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]
@@ -364,7 +364,7 @@ def main():
                  seed_start=seed_start,
                  seed_end=seed_end,
                  base_ax=ax_attn,
-                 figsize=(15, 9),
+                 figsize=(35, 9),
                  file_name=file_path)
 
 if __name__ == '__main__':
