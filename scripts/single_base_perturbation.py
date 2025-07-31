@@ -11,7 +11,7 @@ import transformer_model as tm
 from Data_pipeline import CharacterTokenizer
 from plot_transformer_heatmap import plot_heatmap
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt"
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 def predict(model, 
@@ -91,7 +91,7 @@ def load_model(ckpt_name,
     ckpt_path = os.path.join(PROJ_HOME, 
                             "checkpoints", 
                             "TargetScan/TwoTowerTransformer",
-                            "CNN-tokenized",
+                            "longformer",
                             str(model.mrna_max_len), 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
@@ -253,7 +253,10 @@ def main():
     mrna_max_len    = 520
     predict_span    = True
     predict_binding = True
-    device          = "cuda:1" 
+    if torch.backends.mps.is_available():
+        device = "mps"
+    else:
+        device = "cpu" 
     args_dict = {"mirna_max_len": mirna_max_len,
                  "mrna_max_len": mrna_max_len,
                  "device": device,
@@ -262,7 +265,7 @@ def main():
                  "predict_span": predict_span,
                  "predict_binding": predict_binding,}
     print("Loading model ... ")
-    model = load_model(ckpt_name="kernel_size_5_7_65_best_composite_0.5904_0.6275_epoch1.pth",
+    model = load_model(ckpt_name="best_composite_0.7079_0.8952_epoch9.pth",
                        **args_dict)
     
     test_data_path = os.path.join(PROJ_HOME, data_dir, 
@@ -276,7 +279,7 @@ def main():
     os.makedirs(save_plot_dir, exist_ok=True)
 
     # Test sequence
-    i=1
+    i=3
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]
