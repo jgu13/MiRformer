@@ -139,8 +139,6 @@ class LongformerAttention(nn.Module):
             k = k.view(bsz, k_len, self.num_heads, self.head_dim).transpose(2, 1)
             v = v.view(bsz, v_len, self.num_heads, self.head_dim).transpose(2, 1)
 
-            q = self.rotary(q)
-            k = self.rotary(k)
             context_output = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask) # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
             context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
@@ -266,6 +264,7 @@ class LongformerEncoderLayer(nn.Module):
                 window_size=20, 
                 dilation=1, 
                 dropout=0.2,
+                max_seq_len=1000,
                 device='cuda',
                 cross_attn=False):
         super().__init__()
@@ -278,6 +277,7 @@ class LongformerEncoderLayer(nn.Module):
             layer_id=layer_id,
             dropout=dropout, 
             device=device,
+            max_seq_len=max_seq_len,
             cross_attn=cross_attn)
         self.feed_forward = FeedForward(embed_dim, ff_dim)
         self.norm1 = nn.LayerNorm(embed_dim)
@@ -317,6 +317,7 @@ class LongformerEncoder(nn.Module):
                 dilation=dilation,
                 dropout=dropout, 
                 device=device,
+                max_seq_len=max_seq_len,
                 cross_attn=cross_attn) for i in range(num_layers)]
         )
 
