@@ -15,6 +15,14 @@ from time import time
 from utils import load_dataset
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset, BatchStratifiedSampler
 
+from diagonaled_mm_tvm import mask_invalid_locations
+from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
+from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
+from sliding_chunks import sliding_window_cross_attention
+
+PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt"
+print("Project home directory: ",PROJ_HOME)
+
 
 class CNNTokenization(nn.Module):
     def __init__(self, embed_dim):
@@ -23,8 +31,6 @@ class CNNTokenization(nn.Module):
         D = 2*embed_dim
         self.conv1 = nn.Conv1d(embed_dim, D, padding=2, kernel_size=5)
         self.conv2 = nn.Conv1d(embed_dim, D, padding=3, kernel_size=7)
-        self.conv3 = nn.Conv1d(embed_dim, D, padding=32, kernel_size=65)
-        # self.conv4 = nn.Conv1d(embed_dim, D, padding=62, kernel_size=125)
         self.fc1 = nn.Linear(D, D)
         self.bn1 = nn.BatchNorm1d(D)
         self.fc2 = nn.Linear(D, embed_dim)
@@ -47,15 +53,7 @@ class CNNTokenization(nn.Module):
         x2 = x2.transpose(-1, -2) #(B, L, D)
         x2 = self.fc2(x2) # (B, L, embed_dim)
 
-        x3 = self.conv3(x)
-        x3 = x3.transpose(-1, -2) # (B, L. D)
-        x3 = self.act(self.fc1(x3)) # (B, L, D)
-        x3 = x3.transpose(-1, -2) # (B, D, L)
-        x3 = self.bn1(x3) # (B, D, L)
-        x3 = x3.transpose(-1, -2) #(B, L, D)
-        x3 = self.fc2(x3) # (B, L, embed_dim)
-
-        x = x1 + x2 + x3
+        x = x1 + x2
         return x
 
 class RotaryEmbedding(nn.Module):
@@ -79,6 +77,254 @@ class RotaryEmbedding(nn.Module):
         # rotate pairs
         x2 = torch.stack([-x[..., 1::2], x[..., 0::2]], -1).reshape_as(x)
         return x * cos + x2 * sin
+
+class LongformerAttention(nn.Module):
+    def __init__(self, 
+                embed_dim, 
+                num_heads, 
+                window_size, 
+                layer_id,
+                max_seq_len=1000,
+                dilation=1, 
+                autoregressive=False,
+                attention_mode="sliding_chunks", 
+                dropout=0.2,
+                device='cuda',
+                cross_attn=False):
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        assert (
+            self.head_dim * num_heads == embed_dim
+        ), "Embedding dimension must be divisible by number of heads"
+
+        self.query = nn.Linear(embed_dim, embed_dim)
+        self.key   = nn.Linear(embed_dim, embed_dim)
+        self.value = nn.Linear(embed_dim, embed_dim)
+        self.out   = nn.Linear(embed_dim, embed_dim)
+
+        self.rotary = RotaryEmbedding(dim=self.head_dim, 
+                                      max_seq_len=max_seq_len)
+
+        self.query_global = nn.Linear(embed_dim, embed_dim)
+        self.key_global = nn.Linear(embed_dim, embed_dim)
+        self.value_global = nn.Linear(embed_dim, embed_dim)
+
+        self.dropout = dropout
+
+        self.layer_id = layer_id
+        self.attention_window = window_size
+        self.attention_dilation = dilation
+        self.attention_mode = attention_mode
+        self.autoregressive = autoregressive
+        self.device = device
+        self.cross_attn = cross_attn
+
+    def forward(self, 
+                x=None, # only used in self-attention 
+                query=None, # only used in cross attention when q != k
+                key=None, # only used in cross attention when k != q
+                value=None, # only used in cross attention when v != k
+                attention_mask=None,
+                output_attentions=False):
+        if self.cross_attn:
+            bsz, q_len, _ = query.shape
+            _, k_len, _   = key.shape
+            _, v_len, _   = value.shape
+            q = self.query(query) # (B, L, D)
+            k = self.key(key)
+            v = self.value(value)
+
+            q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(2, 1) # (B, L, H, D)
+            k = k.view(bsz, k_len, self.num_heads, self.head_dim).transpose(2, 1)
+            v = v.view(bsz, v_len, self.num_heads, self.head_dim).transpose(2, 1)
+
+            q = self.rotary(q)
+            k = self.rotary(k)
+            context_output = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask) # (B, H, Lq, D)
+            B, H, Lq, D = context_output.shape
+            context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
+            context_output = context_output.view(B, Lq, H*D)                         # (B, Lq, embed_dim)
+            context_output = self.out(context_output)                                # (B, Lq, embed_dim)
+            return (context_output,)
+        else:
+            hidden_states = x
+            bsz, seq_len, _ = x.shape
+            q = self.query(hidden_states) # (B, L, D)
+            k = self.key(hidden_states)
+            v = self.value(hidden_states)
+
+            q = q.view(bsz, seq_len, self.num_heads, self.head_dim) # (B, L, H, D)
+            k = k.view(bsz, seq_len, self.num_heads, self.head_dim)
+            v = v.view(bsz, seq_len, self.num_heads, self.head_dim)
+
+            q = self.rotary(q)
+            k = self.rotary(k)
+            q /= math.sqrt(self.head_dim)
+            if attention_mask is not None:
+                attention_mask = torch.where(
+                    attention_mask > 0,
+                    torch.zeros_like(attention_mask),
+                    torch.full_like(attention_mask, fill_value=-10000.0)
+                )
+                key_padding_mask = attention_mask < 0
+                extra_attention_mask = attention_mask > 0
+                remove_from_windowed_attention_mask = attention_mask != 0
+
+                num_extra_indices_per_batch = extra_attention_mask.long().sum(dim=1)
+                max_num_extra_indices_per_batch = num_extra_indices_per_batch.max()
+                if max_num_extra_indices_per_batch <= 0:
+                    extra_attention_mask = None
+                else:
+                    # To support the case of variable number of global attention in the rows of a batch,
+                    # we use the following three selection masks to select global attention embeddings
+                    # in a 3d tensor and pad it to `max_num_extra_indices_per_batch`
+                    # 1) selecting embeddings that correspond to global attention
+                    extra_attention_mask_nonzeros = extra_attention_mask.nonzero(as_tuple=True)
+                    zero_to_max_range = torch.arange(0, max_num_extra_indices_per_batch,
+                                                        device=num_extra_indices_per_batch.device)
+                    # mask indicating which values are actually going to be padding
+                    selection_padding_mask = zero_to_max_range < num_extra_indices_per_batch.unsqueeze(dim=-1)
+                    # 2) location of the non-padding values in the selected global attention
+                    selection_padding_mask_nonzeros = selection_padding_mask.nonzero(as_tuple=True)
+                    # 3) location of the padding values in the selected global attention
+                    selection_padding_mask_zeros = (selection_padding_mask == 0).nonzero(as_tuple=True)
+            else:
+                remove_from_windowed_attention_mask = None
+                extra_attention_mask = None
+                key_padding_mask = None
+
+            if self.attention_mode == "sliding_chunks":
+                attn_weights = sliding_chunks_matmul_qk(q, k, self.attention_window, padding_value=0)
+            elif self.attention_mode == "sliding_chunks_no_overlap":
+                attn_weights = sliding_chunks_no_overlap_matmul_qk(q, k, self.attention_window, padding_value=0)
+            else:
+                raise False
+            mask_invalid_locations(attn_weights, self.attention_window, self.attention_dilation, False)
+            if remove_from_windowed_attention_mask is not None:
+                # This implementation is fast and takes very little memory because num_heads x hidden_size = 1
+                # from (bsz x seq_len) to (bsz x seq_len x num_heads x hidden_size)
+                remove_from_windowed_attention_mask = remove_from_windowed_attention_mask.unsqueeze(dim=-1).unsqueeze(dim=-1)
+                # cast to float/half then replace 1's with -inf
+                float_mask = remove_from_windowed_attention_mask.type_as(q).masked_fill(remove_from_windowed_attention_mask, -10000.0)
+                repeat_size = 1 if isinstance(self.attention_dilation, int) else len(self.attention_dilation)
+                float_mask = float_mask.repeat(1, 1, repeat_size, 1)
+                ones = float_mask.new_ones(size=float_mask.size())  # tensor of ones
+                # diagonal mask with zeros everywhere and -inf inplace of padding
+                if self.attention_mode == "sliding_chunks":
+                    d_mask = sliding_chunks_matmul_qk(ones, float_mask, self.attention_window, padding_value=0)
+                elif self.attention_mode == "sliding_chunks_no_overlap":
+                    d_mask = sliding_chunks_no_overlap_matmul_qk(ones, float_mask, self.attention_window, padding_value=0)
+
+                attn_weights += d_mask
+            assert list(attn_weights.size())[:3] == [bsz, seq_len, self.num_heads]
+            assert attn_weights.size(dim=3) in [self.attention_window * 2 + 1, self.attention_window * 3]
+
+            attn_weights_float = F.softmax(attn_weights, dim=-1, dtype=torch.float32)  # use fp32 for numerical stability
+            if key_padding_mask is not None:
+                # softmax sometimes inserts NaN if all positions are masked, replace them with 0
+                attn_weights_float = torch.masked_fill(attn_weights_float, key_padding_mask.unsqueeze(-1).unsqueeze(-1), 0.0)
+            attn_weights = attn_weights_float.type_as(attn_weights)
+            attn_probs = F.dropout(attn_weights_float.type_as(attn_weights), p=self.dropout, training=self.training)
+            attn = 0
+
+            if self.attention_mode == "sliding_chunks":
+                attn += sliding_chunks_matmul_pv(attn_probs, v, self.attention_window)
+            elif self.attention_mode == "sliding_chunks_no_overlap":
+                attn += sliding_chunks_no_overlap_matmul_pv(attn_probs, v, self.attention_window)
+            else:
+                raise False
+
+            attn = attn.type_as(hidden_states)
+            assert list(attn.size()) == [bsz, seq_len, self.num_heads, self.head_dim]
+            attn = attn.reshape(bsz, seq_len, self.embed_dim).contiguous()
+
+            context_layer = attn
+            if output_attentions:
+                if extra_attention_mask is not None:
+                    # With global attention, return global attention probabilities only
+                    # batch_size x num_heads x max_num_global_attention_tokens x sequence_length
+                    # which is the attention weights from tokens with global attention to all tokens
+                    # It doesn't not return local attention
+                    # In case of variable number of global attantion in the rows of a batch,
+                    # attn_weights are padded with -10000.0 attention scores
+                    attn_weights = attn_weights.view(bsz, self.num_heads, max_num_extra_indices_per_batch, seq_len)
+                else:
+                    # without global attention, return local attention probabilities
+                    # batch_size x num_heads x sequence_length x window_size
+                    # which is the attention weights of every token attending to its neighbours
+                    attn_weights = attn_weights.permute(0, 2, 1, 3)
+            outputs = (context_layer, attn_weights) if output_attentions else (context_layer,)
+            return outputs
+
+class LongformerEncoderLayer(nn.Module):
+    def __init__(self, 
+                embed_dim, 
+                num_heads, 
+                layer_id, 
+                ff_dim, 
+                window_size=20, 
+                dilation=1, 
+                dropout=0.2,
+                device='cuda',
+                cross_attn=False):
+        super().__init__()
+        self.self_attn = LongformerAttention(
+            embed_dim=embed_dim, 
+            num_heads=num_heads, 
+            window_size=window_size, 
+            dilation=dilation,
+            autoregressive=False,
+            layer_id=layer_id,
+            dropout=dropout, 
+            device=device,
+            cross_attn=cross_attn)
+        self.feed_forward = FeedForward(embed_dim, ff_dim)
+        self.norm1 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, mask=None):
+        attn_output = self.self_attn(x, attention_mask=mask)[0]
+        x = self.norm1(x + self.dropout(attn_output))
+
+        ff_output = self.feed_forward(x)
+        ff_output = self.dropout(ff_output)
+        x = self.norm2(x + self.dropout(ff_output))
+
+        return x
+
+class LongformerEncoder(nn.Module):
+    def __init__(self, 
+                num_layers, 
+                embed_dim, 
+                num_heads, 
+                ff_dim, 
+                window_size, 
+                dilation=1,
+                max_seq_len=10000, 
+                dropout=0.2, 
+                device='cuda',
+                cross_attn=False):
+        super().__init__()
+        self.layers = nn.ModuleList(
+            [LongformerEncoderLayer(
+                embed_dim=embed_dim, 
+                num_heads=num_heads, 
+                layer_id=i,
+                ff_dim=ff_dim, 
+                window_size=window_size, 
+                dilation=dilation,
+                dropout=dropout, 
+                device=device,
+                cross_attn=cross_attn) for i in range(num_layers)]
+        )
+
+    def forward(self, x, mask=None):
+        for layer in self.layers:
+            x = layer(x=x, mask=mask)
+        return x
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, 
@@ -252,13 +498,15 @@ class CrossAttentionPredictor(nn.Module):
                  num_layers:int=2, 
                  embed_dim:int=256, 
                  num_heads:int=2, 
+                 window_size:int=20,
                  ff_dim:int=512,
                  hidden_sizes:list[int]=[512, 512],
                  n_classes:int=1, 
                  dropout_rate:float=0.2,
                  device:str='cuda',
                  predict_span=True,
-                 predict_binding=False):
+                 predict_binding=False,
+                 use_longformer=False):
         super(CrossAttentionPredictor, self).__init__()
         self.embed_dim = embed_dim
         self.dropout_rate = dropout_rate
@@ -276,21 +524,45 @@ class CrossAttentionPredictor(nn.Module):
             device=device,
             dropout=dropout_rate,
         )
-        self.mrna_encoder = TransformerEncoder(
-            num_layers=num_layers,
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            ff_dim=ff_dim, 
-            max_seq_len=mrna_max_len,
-            device=device,
-            dropout=dropout_rate,
-        )
-        self.cross_attn_layer = MultiHeadAttention(
-            embed_dim=embed_dim,
-            num_heads=num_heads,
-            device=device,
-            cross_attn=True, # no positional encoding in cross attention
-        )
+        if use_longformer:
+            self.mrna_encoder = LongformerEncoder(
+                num_layers=num_layers,
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                ff_dim=ff_dim,
+                window_size=window_size,
+                max_seq_len=mrna_max_len,
+                dropout=dropout_rate,
+                device=device,
+            )
+        else:
+            self.mrna_encoder = TransformerEncoder(
+                num_layers=num_layers,
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                ff_dim=ff_dim, 
+                max_seq_len=mrna_max_len,
+                device=device,
+                dropout=dropout_rate,
+            )
+        if use_longformer:
+            self.cross_attn_layer = LongformerAttention(
+                embed_dim=embed_dim, 
+                num_heads=num_heads, 
+                window_size=window_size, 
+                autoregressive=False,
+                layer_id=None,
+                dropout=dropout_rate, 
+                device=device,
+                cross_attn=True
+            )
+        else:
+            self.cross_attn_layer = MultiHeadAttention(
+                embed_dim=embed_dim,
+                num_heads=num_heads,
+                device=device,
+                cross_attn=True, # no positional encoding in cross attention
+            )
         self.dropout = nn.Dropout(dropout_rate)
         self.cross_norm = nn.LayerNorm(embed_dim) # normalize over embedding dimension
         self.qa_outputs = nn.Linear(embed_dim, 2) # Linear head instead of one Linear transformation
@@ -301,6 +573,7 @@ class CrossAttentionPredictor(nn.Module):
             dropout=dropout_rate)
         self.predict_span = predict_span
         self.predict_binding = predict_binding
+        self.use_longformer = use_longformer
     
     def forward(self, mirna, mrna, mrna_mask, mirna_mask):
         mirna_sn_embedding = self.sn_embedding(mirna)
@@ -317,11 +590,20 @@ class CrossAttentionPredictor(nn.Module):
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
         mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
         
-        z = self.cross_attn_layer(query=mrna_embedding, 
-                                  key=mirna_embedding,
-                                  value=mirna_embedding,
-                                  mask=mirna_mask) # pass key-mask
-        self.cross_attn_output = z
+        if self.use_longformer:
+            z = self.cross_attn_layer(
+                query=mrna_embedding,
+                key=mirna_embedding,
+                value=mirna_embedding,
+                attention_mask=mirna_mask,
+            )[0]
+            self.cross_attn_output = z
+        else: 
+            z = self.cross_attn_layer(query=mrna_embedding, 
+                                    key=mirna_embedding,
+                                    value=mirna_embedding,
+                                    mask=mirna_mask) # pass key-mask
+            self.cross_attn_output = z
         z_res = self.dropout(z) + mrna_embedding # residual connection
         z_norm = self.cross_norm(z_res)
         z_norm = z_norm.masked_fill(mrna_mask.unsqueeze(-1)==0, 0) # (batch_size, mrna_len, embed_dim)
@@ -346,7 +628,7 @@ class QuestionAnsweringModel(nn.Module):
     def __init__(self,
                 mrna_max_len,
                 mirna_max_len,
-                device: str='cuda',
+                device: str=None,
                 epochs:int=100,
                 embed_dim=256,
                 ff_dim:int=512,
@@ -355,11 +637,20 @@ class QuestionAnsweringModel(nn.Module):
                 seed=42,
                 predict_span=True,
                 predict_binding=False,
-                use_cross_attn=True,):
+                use_cross_attn=True,
+                use_longformer=False):
         super(QuestionAnsweringModel, self).__init__()
         self.mrna_max_len = mrna_max_len
         self.mirna_max_len = mirna_max_len
-        self.device = device
+        if device is None:
+            if torch.cuda.is_available():
+                self.device = "cuda"
+            elif torch.backends.mps.is_available():
+                self.device = "mps"
+            else:
+                self.device = "cpu"
+        else:
+            self.device = device
         self.epochs = epochs
         self.ff_dim = ff_dim
         self.batch_size = batch_size
@@ -373,9 +664,10 @@ class QuestionAnsweringModel(nn.Module):
                                                     embed_dim = embed_dim,
                                                     ff_dim = ff_dim,
                                                     hidden_sizes = [ff_dim, ff_dim],
-                                                    device=device,
+                                                    device=self.device,
                                                     predict_span=predict_span,
-                                                    predict_binding=predict_binding)
+                                                    predict_binding=predict_binding,
+                                                    use_longformer=use_longformer)
     
     def forward(self, 
                 mirna, 
@@ -390,8 +682,8 @@ class QuestionAnsweringModel(nn.Module):
     @staticmethod
     def compute_span_metrics(start_preds, end_preds, start_labels, end_labels):
         """
-        计算 exact match 和 F1 score.
-        输入张量都是 [B]，代表每个样本的 start/end.
+        Computes exact match and F1 score.
+        Input tensors are all [B], representing the start/end of each sample.
         """
         exact_matches = 0
         f1_total = 0.0
@@ -401,7 +693,7 @@ class QuestionAnsweringModel(nn.Module):
             pred_start = int(start_preds[i])
             pred_end   = int(end_preds[i])
             true_start = int(start_labels[i])
-            true_end   = int(end_labels[i])
+            true_end = int(end_labels[i])
 
             # Compute overlap
             overlap_start = max(pred_start, true_start)
@@ -551,8 +843,8 @@ class QuestionAnsweringModel(nn.Module):
                 outputs    = model(
                     mirna=batch["mirna_input_ids"],
                     mrna=batch["mrna_input_ids"],
-                    mirna_mask=mirna_mask,
                     mrna_mask=mrna_mask,
+                    mirna_mask=mirna_mask,
                 )
                 binding_logits, start_logits, end_logits = outputs
 
@@ -731,7 +1023,7 @@ class QuestionAnsweringModel(nn.Module):
                     .astype(int)
                 )
                 res_df = D_merged
-            pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(mrna_max_len))
+            pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(self.mrna_max_len))
             os.makedirs(pred_df_path, exist_ok=True)
             res_df.to_csv(os.path.join(pred_df_path, "seed_prediction.csv"), index=False)
             print(f"Prediction saved to {pred_df_path}")
@@ -740,13 +1032,13 @@ class QuestionAnsweringModel(nn.Module):
             wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
             run = wandb.init(
                 project="mirna-Question-Answering",
-                name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-{self.ff_dim}MLP_hidden", 
+                name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-MLP_hidden:{self.ff_dim}", 
                 config={
                     "batch_size": self.batch_size * accumulation_step,
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates", "CNN-5-7-kernel"],
+                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention"],
                 save_code=True,
                 job_type="train"
             )
@@ -901,31 +1193,30 @@ class QuestionAnsweringModel(nn.Module):
 
             cost = time() - start
             print(f"Training takes {cost / 3600} hours.")
-            run.summary["best_binding_acc"] = best_binding_acc
-            run.summary["best F1 score"]    = best_f1_score
-            run.summary["best_epoch"]       = int(model_art.metadata["epoch"])
-            run.finish()
+            # run.summary["best_binding_acc"] = best_binding_acc
+            # run.summary["best F1 score"]    = best_f1_score
+            # run.summary["best_epoch"]       = int(model_art.metadata["epoch"])
+            # run.finish()
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
-    mrna_max_len = 500
+    mrna_max_len = 40
     mirna_max_len = 24
-    PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start_random_samples.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start_random_samples.csv")
-    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_30_randomized_start_random_samples.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_30_randomized_start_random_samples.csv")
+    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_30_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device='cuda:1',
-                                   epochs=3,
-                                   embed_dim=1024,
-                                   ff_dim=2048,
+                                   epochs=1,
+                                   embed_dim=256,
+                                   ff_dim=1024,
                                    batch_size=32,
-                                   lr=3e-5,
+                                   lr=1e-4,
                                    seed=54,
                                    predict_span=True,
-                                   predict_binding=True)
+                                   predict_binding=True,
+                                   use_longformer=True)
     # total_params = sum(param.numel() for param in model.parameters())
     # print(f"Total Parameters: {total_params}")
     model.run(model=model,
@@ -933,5 +1224,5 @@ if __name__ == "__main__":
               valid_path=valid_datapath,
               test_path =test_datapath,
               evaluation=False,
-              accumulation_step=8,
-              ckpt_name="best_composite_0.9911_0.9977_epoch11.pth")
+              accumulation_step=8)
+            #   ckpt_name="best_composite_0.9911_0.9977_epoch11.pth")
