@@ -176,6 +176,9 @@ def sliding_chunks_no_overlap_matmul_pv(prob: torch.Tensor, v: torch.Tensor, w: 
     context = torch.einsum('bcwhpd,bcdhep->bcwhe', (chunk_prob, chunk_v_extended))
     return context.reshape(bsz, seqlen, num_heads, head_dim)
 
+def _unchunk(x):
+    Bsh, C, X, 
+
 def sliding_window_cross_attention(Q, K, V, w, mask=None):
     """
     Q: (B, Lq, H, D)
@@ -211,6 +214,7 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None):
         chunk_mask = _chunk(mask_r, w) # (B*H, num_chunks, 2w, Lk)
         attn_chunk = attn_chunk.masked_fill(chunk_mask==0, value=float('-inf'))
     attn_chunk = F.softmax(attn_chunk, dim=-1)
+
     
     # chunk value and weight each chunk by corresponding attn
     Vr = V.reshape(B*H, Lk, D)

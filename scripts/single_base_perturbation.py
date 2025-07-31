@@ -250,7 +250,7 @@ def main():
     # args_dict = vars(args)
 
     mirna_max_len   = 24
-    mrna_max_len    = 500
+    mrna_max_len    = 520
     predict_span    = True
     predict_binding = True
     device          = "cuda:1" 
