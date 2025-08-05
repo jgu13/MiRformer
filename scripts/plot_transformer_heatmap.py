@@ -19,7 +19,7 @@ def load_model(
     ckpt_path = os.path.join(PROJ_HOME, 
                             "checkpoints", 
                             "TargetScan/TwoTowerTransformer",
-                            "CNN-tokenized",
+                            "Longformer",
                             str(model.mrna_max_len), 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
@@ -105,7 +105,7 @@ def plot_heatmap(model,
                  miRNA_id,
                  seed_start,
                  seed_end,
-                 figsize=(15,8),
+                 figsize=(35,5),
                  metrics=None,
                  file_name=None,
                  save_plot_dir=os.getcwd()):
@@ -184,7 +184,7 @@ def plot_heatmap(model,
 
 def main():
     mirna_max_len   = 24
-    mrna_max_len    = 500
+    mrna_max_len    = 520
     predict_span    = True
     predict_binding = True
     device          = "cuda:3" 
@@ -194,11 +194,12 @@ def main():
                  "embed_dim": 1024,
                  "ff_dim": 2048,
                  "predict_span": predict_span,
-                 "predict_binding": predict_binding,}
+                 "predict_binding": predict_binding,
+                 "use_longformer":True}
     
     data_dir = os.path.join(PROJ_HOME, 'TargetScan_dataset')
     test_datapath = os.path.join(PROJ_HOME, data_dir, 
-                                 "TargetScan_train_500_randomized_start.csv")
+                                 "TargetScan_train_500_randomized_start_random_samples.csv")
     test_data  = pd.read_csv(test_datapath, sep=',')
     mRNA_seqs  = test_data[["mRNA sequence"]].values
     miRNA_seqs = test_data[["miRNA sequence"]].values
@@ -208,11 +209,11 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    model = load_model(ckpt_name="best_composite_0.9262_0.9866_epoch9.pth",
+    model = load_model(ckpt_name="best_composite_0.7665_0.8950_epoch8.pth",
                        **args_dict)
 
     # Testing the first sequence
-    i=15 # row number - 2
+    i=3 # row number - 2
     mRNA_seq  = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     mRNA_ID   = mRNA_IDs[i][0]

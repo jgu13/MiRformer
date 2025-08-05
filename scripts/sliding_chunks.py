@@ -176,7 +176,7 @@ def sliding_chunks_no_overlap_matmul_pv(prob: torch.Tensor, v: torch.Tensor, w: 
     context = torch.einsum('bcwhpd,bcdhep->bcwhe', (chunk_prob, chunk_v_extended))
     return context.reshape(bsz, seqlen, num_heads, head_dim)
 
-def _unchunk(x, w, B, H, Lq):
+def _sum_unchunk(x, w, B, H, Lq):
     # unchunk to restore query length by taking the sum of two overlapping chunks
     # flatten the chunk dims
     bph, nc, two_w, d = x.shape
@@ -188,18 +188,50 @@ def _unchunk(x, w, B, H, Lq):
     #     global position = c*w + i
     idx = (torch.arange(nc, device=x.device).unsqueeze(1) * w
            + torch.arange(two_w, device=x.device).unsqueeze(0))  # (nc,2w)
-    idx = idx.reshape(-1)                                          # (M,)
+    idx = idx.reshape(-1)                                        # (M,)
 
     # build a [B*H, M, D] index tensor
-    index = idx.unsqueeze(0).unsqueeze(-1).expand(bph, M, d)       # (B*H, M, D)
+    index = idx.unsqueeze(0).unsqueeze(-1).expand(bph, M, d)      # (B*H, M, D)
 
     # scatter‐add into a zero‐tensor of length Lq
     unchunk = out_flat.new_zeros(bph, Lq, d)
-    unchunk.scatter_add_(1, index, out_flat)                      # (B*H, Lq, D)
+    unchunk.scatter_add_(1, index, out_flat)  
+    
+    #                     # (B*H, Lq, D)
 
     # reshape back to (B, H, Lq, D)
     unchunk = unchunk.view(B, H, Lq, d)
     return unchunk
+
+def _max_unchunk(x, w, B, H, Lq):
+    bsh, C, two_w, d = x.shape
+    assert Lq == (C + 1) * w
+
+    # build indices over which to take max
+    # chunk index: [0,...,C], one chunk jumps w steps to the next chunk
+    # Each chunk is 2w wide. Index inside each chunk: u = [0,...,2w] 
+    # global index = (C * w) + u
+    device = x.device
+    base = torch.arange(C, device=device) * w #(C, )
+    offset = torch.arange(two_w, device=device) #(2w, )
+    positions = base[:, None] + offset[None, :] #(C, 2w)
+    pos_flat = positions.reshape(-1) # flatten positions to (C * 2w)
+
+    # flatten chunks in input
+    chunks_in = x.reshape(-1, C*two_w, -1) # (bsh, C*2w, d)
+
+    # build output tensor
+    output = torch.full((bsh, Lq, d), value=float('-inf'), device=device, dtype=chunks_in.dtype) # (bsh, C*w+1, d)
+    indices = pos_flat[None, :, None].expand(bsh, -1, d) # (bsh, C*2w, d)
+
+    # take max between values that overlaps at the same position
+    chunk_out = output.scatter_reduce_(dim=1,
+                                       index=indices,
+                                       src=chunks_in,
+                                       reduce='amax',
+                                       include_self=True)
+    chunk_out = chunk_out.view(B, H, Lq, d)
+    return chunk_out
 
 def sliding_window_cross_attention(Q, K, V, w, mask=None):
     """
@@ -236,13 +268,13 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None):
         chunk_mask = _chunk(mask_r, w) # (B*H, num_chunks, 2w, Lk)
         attn_chunk = attn_chunk.masked_fill(chunk_mask==0, value=float('-inf'))
     attn_chunk = F.softmax(attn_chunk, dim=-1)
-    unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq) # (B, H, Lq, Lk)
+    unchunk_attn = _max_unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq) # (B, H, Lq, Lk)
     
     # chunk value and weight each chunk by corresponding attn
     Vr = V.reshape(B*H, Lk, D)
     Vc = Vr.unsqueeze(1).expand(-1, num_chunks, -1, -1)  # (B*H, num_chunks, Lk, D)
     output = torch.einsum('bcxk,bckd->bcxd', (attn_chunk, Vc)) # (B*H, num_chunks, 2w, D)
-    unchunk_output = _unchunk(output, w=w, B=B, H=H, Lq=Lq)
+    unchunk_output = _max_unchunk(output, w=w, B=B, H=H, Lq=Lq)
 
     return (unchunk_output, unchunk_attn)
     

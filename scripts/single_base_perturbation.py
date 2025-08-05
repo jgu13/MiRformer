@@ -11,7 +11,8 @@ import transformer_model as tm
 from Data_pipeline import CharacterTokenizer
 from plot_transformer_heatmap import plot_heatmap
 
-PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt"
+# PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt"
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 def predict(model, 
@@ -88,11 +89,13 @@ def load_model(ckpt_name,
     # load model checkpoint
     # model = mirLM.create_model(**args_dict)
     model = tm.QuestionAnsweringModel(**args_dict)
-    ckpt_path = os.path.join(PROJ_HOME, 
+    ckpt_path = os.path.join(
+                            PROJ_HOME, 
                             "checkpoints", 
                             "TargetScan/TwoTowerTransformer",
-                            "longformer",
-                            str(model.mrna_max_len), 
+                            "Longformer",
+                            str(520),
+                            # str(args_dict["mrna_max_len"]), 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -235,7 +238,7 @@ def viz_sequence(seq,
         
     if file_name:
         fig.savefig(file_name, dpi=500, bbox_inches='tight')  # Save as PNG
-    print(f"Logo plot saved to {file_name}")
+        print(f"Logo plot saved to {file_name}")
     return fig, logo_axes
 
 def main():
@@ -250,10 +253,12 @@ def main():
     # args_dict = vars(args)
 
     mirna_max_len   = 24
-    mrna_max_len    = 520
+    mrna_max_len    = 1000
     predict_span    = True
     predict_binding = True
-    if torch.backends.mps.is_available():
+    if torch.cuda.is_available():
+        device = "cuda:3"
+    elif torch.backends.mps.is_available():
         device = "mps"
     else:
         device = "cpu" 
@@ -263,23 +268,24 @@ def main():
                  "embed_dim": 1024,
                  "ff_dim": 2048,
                  "predict_span": predict_span,
-                 "predict_binding": predict_binding,}
+                 "predict_binding": predict_binding,
+                 "use_longformer": True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.7079_0.8952_epoch9.pth",
+    model = load_model(ckpt_name="best_composite_0.8352_0.9423_epoch2.pth",
                        **args_dict)
     
-    test_data_path = os.path.join(PROJ_HOME, data_dir, 
-                                 "TargetScan_train_500_randomized_start_random_samples.csv")
+    test_data_path = os.path.join(data_dir, 
+                                 "TargetScan_train_500_randomized_start.csv")
     test_data = pd.read_csv(test_data_path)
     mRNA_seqs = test_data[["mRNA sequence"]].values
     miRNA_seqs = test_data[["miRNA sequence"]].values
 
-    save_plot_dir = os.path.join(PROJ_HOME, 
-                                 f"Performance/TargetScan_test/viz_seq_perturbation/TwoTowerTransformer/{mrna_max_len}")
+    save_plot_dir = os.path.join(PROJ_HOME,
+                                 f"Performance/TargetScan_test/viz_seq_perturbation/TwoTowerTransformer/500")
     os.makedirs(save_plot_dir, exist_ok=True)
 
     # Test sequence
-    i=3
+    i=8
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]
@@ -367,7 +373,7 @@ def main():
                  seed_start=seed_start,
                  seed_end=seed_end,
                  base_ax=ax_attn,
-                 figsize=(35, 9),
+                 figsize=(100, 9),
                  file_name=file_path)
 
 if __name__ == '__main__':

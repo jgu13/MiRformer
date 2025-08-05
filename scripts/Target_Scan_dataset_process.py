@@ -24,17 +24,17 @@ top_predicted_targets = predicted_targets[
 # filter out non-canonical sites
 top_predicted_targets = top_predicted_targets.loc[~top_predicted_targets["Site Type"].isin([-2,-3])]
 
-# positive_pairs = top_predicted_targets[[
-#      "miRNA",
-#      "Transcript ID",
-#      "UTR_start",
-#      "UTR_end"
-# ]]
-# positive_pairs.loc[:, "label"] = 1
-# positive_pairs.columns = ["miRNA", "Transcript_ID", "UTR_start", "UTR_end", "label"]
-# positive_pairs.to_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t', index=False)
+positive_pairs = top_predicted_targets[[
+     "miRNA",
+     "Transcript ID",
+     "UTR_start",
+     "UTR_end"
+]]
+positive_pairs.loc[:, "label"] = 1
+positive_pairs.columns = ["miRNA", "Transcript_ID", "UTR_start", "UTR_end", "label"]
+positive_pairs.to_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t', index=False)
 
-# print("Total predicted mirna-transcript pairs = ", len(positive_pairs))
+print("Total predicted mirna-transcript pairs = ", len(positive_pairs))
 
 # # negative miRNA and mRNA pairs: select mRNA species that is not in positive pairs with the miRNA
 # all_mrnas       = set(predicted_targets["Transcript ID"].unique())
