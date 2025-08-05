@@ -197,7 +197,7 @@ def _sum_unchunk(x, w, B, H, Lq):
     unchunk = out_flat.new_zeros(bph, Lq, d)
     unchunk.scatter_add_(1, index, out_flat)  
     
-    #                     # (B*H, Lq, D)
+    # (B*H, Lq, D)
 
     # reshape back to (B, H, Lq, D)
     unchunk = unchunk.view(B, H, Lq, d)
@@ -218,10 +218,10 @@ def _max_unchunk(x, w, B, H, Lq):
     pos_flat = positions.reshape(-1) # flatten positions to (C * 2w)
 
     # flatten chunks in input
-    chunks_in = x.reshape(-1, C*two_w, -1) # (bsh, C*2w, d)
+    chunks_in = x.reshape(bsh, C*two_w, d) # (bsh, C*2w, d)
 
     # build output tensor
-    output = torch.full((bsh, Lq, d), value=float('-inf'), device=device, dtype=chunks_in.dtype) # (bsh, C*w+1, d)
+    output = torch.full((bsh, Lq, d), fill_value=float('-inf'), device=device, dtype=chunks_in.dtype) # (bsh, (C+1)*w, d)
     indices = pos_flat[None, :, None].expand(bsh, -1, d) # (bsh, C*2w, d)
 
     # take max between values that overlaps at the same position

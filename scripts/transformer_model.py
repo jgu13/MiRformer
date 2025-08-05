@@ -20,8 +20,8 @@ from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
 from sliding_chunks import sliding_window_cross_attention
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-# PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
+# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
 
 
 class CNNTokenization(nn.Module):
@@ -1040,7 +1040,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention", "50k-data-500nt"],
+                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention", "50k-data-500nt", "max_unchunk"],
                 save_code=True,
                 job_type="train"
             )
@@ -1204,17 +1204,17 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start_random_samples.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start_random_samples.csv")
     test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=10,
+                                   epochs=1,
                                    embed_dim=1024,
                                    ff_dim=2048,
                                    batch_size=32,
-                                   lr=1e-4,
+                                   lr=3e-5,
                                    seed=54,
                                    predict_span=True,
                                    predict_binding=True,
