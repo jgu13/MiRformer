@@ -39,7 +39,7 @@ def predict(model,
         # z_pooled = z_pooled[0].detach().cpu() # (L,)
         # predicted attention 
         attention_score = model.predictor.cross_attn_layer.last_attention[0] # (H, mrna_len, mirna_len)
-        attention_score = torch.amax(attention_score, dim=(0,2))
+        attention_score = torch.amax(attention_score, dim=(0,2)) # (mrna_len,)
         attention_score = attention_score.detach().cpu()
         # binding probability
         if model.predict_binding:
@@ -99,7 +99,7 @@ def load_model(ckpt_name,
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
-    print(f"Loaded checkpoint from {ckpt_path}")
+    print(f"Loaded checkpoint from {ckpt_path}", flush=True)
     return model
 
 def single_base_perturbation(seq, pos):
@@ -179,7 +179,7 @@ def viz_sequence(seq,
 
         # re-anchor the colorbar so its bar is the same height as the heatmap
         cax.set_position([
-            cpos.x0,         # keep the same left edge
+            cpos.x0-0.05,         # keep the same left edge
             heat_pos.y0,     # align bottom with heatmap
             cpos.width,      # keep the same width
             heat_pos.height  # match heatmap’s new height
@@ -238,7 +238,7 @@ def viz_sequence(seq,
         
     if file_name:
         fig.savefig(file_name, dpi=500, bbox_inches='tight')  # Save as PNG
-        print(f"Logo plot saved to {file_name}")
+        print(f"Logo plot saved to {file_name}", flush=True)
     return fig, logo_axes
 
 def main():
@@ -253,7 +253,7 @@ def main():
     # args_dict = vars(args)
 
     mirna_max_len   = 24
-    mrna_max_len    = 1000
+    mrna_max_len    = 520
     predict_span    = True
     predict_binding = True
     if torch.cuda.is_available():
@@ -271,7 +271,7 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer": True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.8352_0.9423_epoch2.pth",
+    model = load_model(ckpt_name="best_composite_mean_unchunk.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
@@ -292,8 +292,8 @@ def main():
     mRNA_id = test_data[["Transcript ID"]].iloc[i,0]
     seed_start = test_data[["seed start"]].iloc[i,0]
     seed_end = test_data[["seed end"]].iloc[i,0]
-    print("miRNA id = ",miRNA_id)
-    print("mRNA id = ", mRNA_id)
+    print(f"miRNA id = {mRNA_id}", flush=True)
+    print(f"mRNA id = {miRNA_id}", flush=True)
     # replace U with T and reverse miRNA to 3' to 5' 
     miRNA_seq = miRNA_seq.replace("U", "T")[::-1]
     
@@ -364,8 +364,8 @@ def main():
     print(len(prob_deltas))
     
     # print("Max in delta = ", max(deltas))
-    print("plot changes on base logos ...")
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed.png")
+    print("plot changes on base logos ...", flush=True)
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_mean_unchunk.png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
                 #  emb_changes=emb_deltas,
@@ -373,7 +373,7 @@ def main():
                  seed_start=seed_start,
                  seed_end=seed_end,
                  base_ax=ax_attn,
-                 figsize=(100, 9),
+                 figsize=(40, 9),
                  file_name=file_path)
 
 if __name__ == '__main__':

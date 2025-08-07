@@ -20,8 +20,8 @@ from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
 from sliding_chunks import sliding_window_cross_attention
 
-# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
 
 
 class CNNTokenization(nn.Module):
@@ -1040,7 +1040,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention", "50k-data-500nt", "max_unchunk"],
+                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention", "mean_unchunk"],
                 save_code=True,
                 job_type="train"
             )
@@ -1100,117 +1100,111 @@ class QuestionAnsweringModel(nn.Module):
             )
             os.makedirs(model_checkpoints_dir, exist_ok=True)
             for epoch in range(self.epochs):
-                train_loss = self.train_loop(model=model,
-                        dataloader=train_loader,
-                        loss_fn=loss_fn,
-                        optimizer=optimizer,
-                        device=self.device,
-                        epoch=epoch,
-                        accumulation_step=accumulation_step)
-                eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(model=model,
-                                                                                dataloader=val_loader,
-                                                                                device=self.device,)
-                wandb.log({
-                    "epoch": epoch,
-                    "train/loss": train_loss,
-                    "eval/loss": eval_loss,
-                    "eval/binding accuracy": acc_binding,
-                    "eval/start accuracy": acc_start,
-                    "eval/end accuracy": acc_end,
-                    "eval/exact match": exact_match,
-                    "eval/F1 score": f1
-                }, step=epoch)
-                
-                if self.predict_binding and self.predict_span:
-                    composite_metric = f1 + acc_binding
-                    if composite_metric > best_composite_metric:
-                        best_composite_metric = composite_metric
-                        best_binding_acc      = acc_binding
-                        best_f1_score         = f1
-                        count = 0
-                        ckpt_name = f"best_composite_{f1:.4f}_{acc_binding:.4f}_epoch{epoch}.pth"
-                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                        torch.save(model.state_dict(), ckpt_path)
-                        model_art = wandb.Artifact(
-                            name="binding-span-model",
-                            type="model",
-                            metadata={ "epoch": epoch, "f1 + acc_binding": composite_metric }
-                        )
-                        model_art.add_file(ckpt_path)
-                        run.log_artifact(model_art)
-                        # mark as the “latest”
-                        run.log_artifact(model_art).wait()
-                    else:
-                        count += 1
-                        if count == patience:
-                            print("Max patience reached with no improvement on accuracy. Early stop triggered.")
-                            break
-                elif self.predict_binding and not self.predict_span:
-                    if acc_binding >= best_binding_acc:
-                        best_binding_acc = acc_binding
-                        count = 0
-                        ckpt_name = f"primates_best_binding_acc_{acc_binding:.4f}_epoch{epoch}.pth"
-                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                        torch.save(model.state_dict(), ckpt_path)
-                        # create new artifact
-                        model_art = wandb.Artifact(
-                            name="mirna-binding-model",
-                            type="model",
-                            metadata={ "epoch": epoch, "binding_acc": acc_binding }
-                        )
-                        model_art.add_file(ckpt_path)
-                        run.log_artifact(model_art)
-                        # mark as the “latest”
-                        run.log_artifact(model_art).wait()
-                    else:
-                        count += 1
-                        if count == patience:
-                            print("Max patience reached with no improvement on accuracy. Early stop triggered.")
-                            break
-                elif self.predict_span and not self.predict_binding:
-                    if exact_match >= best_exact_match:
-                        best_exact_match = exact_match
-                        count = 0
-                        ckpt_name = f"best_exact_match_{exact_match:.4f}_epoch{epoch}.pth"
-                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                        torch.save(model.state_dict(), ckpt_path)
-                        # create new artifact
-                        model_art = wandb.Artifact(
-                            name="mirna-span-model",
-                            type="model",
-                            metadata={ "epoch": epoch, "exact_match": exact_match}
-                        )
-                        model_art.add_file(ckpt_path)
-                        run.log_artifact(model_art)
-                        # mark as the “latest”
-                        run.log_artifact(model_art).wait()
-                    else:
-                        count += 1
-                        if count == patience:
-                            print("Max patience reached with no improvement on accuracy. Early stop triggered.")
-                            break
-                cost = time() - start
-                remain = cost/(epoch + 1) * (self.epochs - epoch - 1) /3600
-                print(f'still remain: {remain} hrs.')
+                # TRAINING
+                train_loss = self.train_loop(
+                    model=model,
+                    dataloader=train_loader,
+                    loss_fn=loss_fn,
+                    optimizer=optimizer,
+                    device=self.device,
+                    epoch=epoch,
+                    accumulation_step=accumulation_step,
+                )
 
-            cost = time() - start
-            print(f"Training takes {cost / 3600} hours.")
-            # run.summary["best_binding_acc"] = best_binding_acc
-            # run.summary["best F1 score"]    = best_f1_score
-            # run.summary["best_epoch"]       = int(model_art.metadata["epoch"])
-            # run.finish()
+                # EVALUATION
+                eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(
+                    model=model,
+                    dataloader=val_loader,
+                    device=self.device,
+                )
+
+                # SAFE METRIC LOGGING
+                try:
+                    wandb.log({
+                        "epoch": epoch,
+                        "train/loss": train_loss,
+                        "eval/loss": eval_loss,
+                        "eval/binding_accuracy": acc_binding,
+                        "eval/start_accuracy": acc_start,
+                        "eval/end_accuracy": acc_end,
+                        "eval/exact_match": exact_match,
+                        "eval/F1_score": f1
+                    }, step=epoch)
+                except Exception as e:
+                    print(f"[W&B] log failed at epoch {epoch}: {e}")
+
+                # CHECK FOR IMPROVEMENT
+                if self.predict_binding and self.predict_span:
+                    composite = f1 + acc_binding
+                    improved = composite > best_composite_metric
+                elif self.predict_binding:
+                    improved = acc_binding >= best_binding_acc
+                else:  # predict_span only
+                    improved = exact_match >= best_exact_match
+
+                if improved:
+                    # update bests & reset patience
+                    best_composite_metric = composite if self.predict_binding and self.predict_span else best_composite_metric
+                    best_binding_acc      = acc_binding   if self.predict_binding else best_binding_acc
+                    best_f1_score         = f1            if self.predict_span    else best_f1_score
+                    best_exact_match      = exact_match   if self.predict_span    else best_exact_match
+                    count = 0
+
+                    # save checkpoint
+                    ckpt_name = (
+                        f"best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                        if (self.predict_binding and self.predict_span)
+                        else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                        if self.predict_binding
+                        else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
+                    )
+                    ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                    torch.save(model.state_dict(), ckpt_path)
+
+                    # create and log artifact with alias
+                    model_art = wandb.Artifact(
+                        name=(
+                            "binding-span-model" if (self.predict_binding and self.predict_span)
+                            else "mirna-binding-model" if self.predict_binding
+                            else "mirna-span-model"
+                        ),
+                        type="model",
+                        metadata={
+                            "epoch": epoch,
+                            **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                            **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                            **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                        }
+                    )
+                    model_art.add_file(ckpt_path)
+
+                    try:
+                        run.log_artifact(model_art, aliases=["major_mean_run"])
+                    except Exception as e:
+                        print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+
+                else:
+                    count += 1
+                    if count >= patience:
+                        print("Max patience reached with no improvement. Early stopping.")
+                        break
+
+                # ETA printout
+                elapsed = time() - start
+                remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
+                print(f"Still remain: {remaining:.2f} hrs.")
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start_random_samples.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start_random_samples.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
     test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=1,
+                                   epochs=100,
                                    embed_dim=1024,
                                    ff_dim=2048,
                                    batch_size=32,
