@@ -8,9 +8,10 @@ import numpy as np
 from Bio import SeqIO
 from sklearn.model_selection import train_test_split
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
-predicted_targets_f = "Human_Predicted_Targets_Context_Scores.default_predictions.txt.zip"
+predicted_targets_f = "Predicted_Targets_Context_Scores.default_predictions.txt.zip"
 
 # positive miRNA and mRNA pairs
 path = os.path.join(data_dir, predicted_targets_f)
@@ -30,67 +31,73 @@ positive_pairs = top_predicted_targets[[
      "UTR_start",
      "UTR_end"
 ]]
+positive_pairs.columns = ["miRNA", "Transcript_ID", "UTR_start", "UTR_end"]
+positive_pairs = positive_pairs.drop_duplicates(subset=["Transcript_ID", "miRNA", "UTR_start", "UTR_end"])
+# Build a single column that already holds the coordinate pair 
+positive_pairs["coords"] = list(zip(positive_pairs["UTR_start"], positive_pairs["UTR_end"]))
+# Group & aggregate into lists of tuples 
+positive_pairs = (positive_pairs
+               .groupby(["Transcript_ID", "miRNA"])["coords"]
+               .apply(list)                 # → list of tuples
+               .reset_index(name="UTR_coords"))
 positive_pairs.loc[:, "label"] = 1
-positive_pairs.columns = ["miRNA", "Transcript_ID", "UTR_start", "UTR_end", "label"]
 positive_pairs.to_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t', index=False)
 
 print("Total predicted mirna-transcript pairs = ", len(positive_pairs))
 
-# # negative miRNA and mRNA pairs: select mRNA species that is not in positive pairs with the miRNA
-# all_mrnas       = set(predicted_targets["Transcript ID"].unique())
-# print("Start generating an equal number of negative samples.")
-# with open(os.path.join(data_dir, "negative_pairs_human.csv"), "w", newline="") as f:
-#     writer = csv.DictWriter(f, fieldnames=["miRNA", "Transcript_ID", "UTR_start", "UTR_end", "label"], delimiter="\t")
-#     writer.writeheader()
-#     for mirna, group in positive_pairs.groupby("miRNA"):
-#         pos_set       = set(group['Transcript_ID'].tolist())
-#         n_pos         = len(group['Transcript_ID'].tolist())
-#         neg_mrna_pool = list(all_mrnas - pos_set)
-#         if len(neg_mrna_pool) < n_pos:
-#             raise ValueError(ValueError(f"Warning: {mirna}: Pool of negative mrna ({len(neg_mrna_pool)}) is fewer than positive mrnas ({n_pos})!"))
-#         chosen_neg = random.sample(neg_mrna_pool, k=n_pos)
-#         for mrna in chosen_neg:
-#             writer.writerow(
-#                 {"miRNA":        mirna,
-#                 "Transcript_ID": mrna,
-#                 "UTR_start":     -1,
-#                 "UTR_end":       -1,
-#                 "label":         0}
-#             )
+# negative miRNA and mRNA pairs: select mRNA species that is not in positive pairs with the miRNA
+all_mrnas       = set(predicted_targets["Transcript ID"].unique())
+print("Start generating an equal number of negative samples.")
+with open(os.path.join(data_dir, "negative_pairs_human.csv"), "w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=["miRNA", "Transcript_ID", "coords", "label"], delimiter="\t")
+    writer.writeheader()
+    for mirna, group in positive_pairs.groupby("miRNA"):
+        pos_set       = set(group['Transcript_ID'].tolist())
+        n_pos         = len(group['Transcript_ID'].tolist())
+        neg_mrna_pool = list(all_mrnas - pos_set)
+        if len(neg_mrna_pool) < n_pos:
+            raise ValueError(ValueError(f"Warning: {mirna}: Pool of negative mrna ({len(neg_mrna_pool)}) is fewer than positive mrnas ({n_pos})!"))
+        chosen_neg = random.sample(neg_mrna_pool, k=n_pos)
+        for mrna in chosen_neg:
+            writer.writerow(
+                {"miRNA":        mirna,
+                "Transcript_ID": mrna,
+                "coords":        -1,
+                "label":         0}
+            )
 
-# print("Finished generating negative samples")
+print("Finished generating negative samples")
 
 # Add bottom 30% to negative samples
-# tax_ids = [9606]
-# bot_predicted_targets = predicted_targets[
-#     (predicted_targets["Gene Tax ID"].isin(tax_ids)) &
-#     (predicted_targets["context++ score percentile"] <= np.int64(30)) # bottom 30% likely pairs
-#     ]
+tax_ids = [9606]
+bot_predicted_targets = predicted_targets[
+    (predicted_targets["Gene Tax ID"].isin(tax_ids)) &
+    (predicted_targets["context++ score percentile"] <= np.int64(30)) # bottom 30% likely pairs
+    ]
 
-# negative_pairs = bot_predicted_targets[[
-#     "miRNA",
-#     "Transcript ID"
-# ]].copy()
+negative_pairs = bot_predicted_targets[[
+    "miRNA",
+    "Transcript ID"
+]].copy()
 
-# print("Number of rows to add: ", len(negative_pairs))
-# out_path = os.path.join(data_dir, "negative_pairs_human.csv")
-# with open(out_path, "a", newline="") as f:
-#     writer = csv.DictWriter(
-#         f,
-#         fieldnames=["miRNA", "Transcript_ID", "UTR_start", "UTR_end","label"],
-#         delimiter="\t"
-#     )
-#     # don't write header, just append rows
-#     for _, row in negative_pairs.iterrows():
-#         writer.writerow({
-#             "miRNA":         row["miRNA"],
-#             "Transcript_ID": row["Transcript ID"],
-#             "UTR_start":     -1,
-#             "UTR_end":       -1,
-#             "label":         0
-#         })
+print("Number of rows to add: ", len(negative_pairs))
+out_path = os.path.join(data_dir, "negative_pairs_human.csv")
+with open(out_path, "a", newline="") as f:
+    writer = csv.DictWriter(
+        f,
+        fieldnames=["miRNA", "Transcript_ID", "coords","label"],
+        delimiter="\t"
+    )
+    # don't write header, just append rows
+    for _, row in negative_pairs.iterrows():
+        writer.writerow({
+            "miRNA":         row["miRNA"],
+            "Transcript_ID": row["Transcript ID"],
+            "coords":        -1,
+            "label":         0
+        })
 
-# print(f"Samples are saved to {data_dir}")
+print(f"Samples are saved to {data_dir}")
 
 # mRNAseq_path = os.path.join(data_dir, "mouse_3utr_sequences.fa.gz")
 # mRNA_seq_dict = []
