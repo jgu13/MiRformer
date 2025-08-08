@@ -433,5 +433,84 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
             "target": target
         }
       
+class TokenClassificationDataset(torch.utils.data.Dataset):
+    def __init__(self, 
+                 df, 
+                 tokenizer, 
+                 mrna_max_len: int,
+                 mirna_max_len: int):
+        """
+        df: pandas.DataFrame, needs to include three columns:
+            - "mRNA sequence": sequence string
+            - "miRNA sequence": sequence string
+            - "seeds": List[Tuple[int,int]], (start, end) of each seed region
+            - "label": 0 or 1
+        tokenizer: HuggingFace tokenizer that supports __call__(str, ...)
+        max_len: int, pad / truncate to this length
+        """
+        self.tokenizer = tokenizer
+        self.mrna_max_len = mrna_max_len
+        self.mirna_max_len = mirna_max_len
+        self.mrna_seqs = df["mRNA sequence"].tolist()
+        self.mirna_seqs = df["miRNA sequence"].tolist()
+        self.seed_l = df["seeds"].tolist()
+        self.labels = df["label"].tolist()
+
+    def __len__(self):
+        return len(self.mrna_seqs)
+
+    def __getitem__(self, idx):
+        mrna_seq = self.mrna_seqs[idx]
+        mirna_seq = self.mirna_seqs[idx]
+        seeds = self.seed_l[idx]
+        label = self.labels[idx]
+
+        mrna_tok = self.tokenizer(
+            mrna_seq,
+            padding="max_length",
+            truncation=True,
+            max_length=self.mrna_max_len,
+            return_attention_mask=True
+        )
+
+        mirna_tok = self.tokenizer(
+            mirna_seq,
+            padding="max_length",
+            truncation=True,
+            max_length=self.mirna_max_len,
+            return_attention_mask=True
+        )
         
+        if label == 1:
+            bio_labels = self._make_labels(mrna_seq, seeds)
+        else:
+            bio_labels = [-100] * self.mrna_max_len
+
+        return {
+            "mrna_input_ids":      torch.tensor(mrna_tok["input_ids"],      dtype=torch.long),
+            "mrna_attention_mask": torch.tensor(mrna_tok["attention_mask"], dtype=torch.long),
+            "mirna_input_ids":      torch.tensor(mirna_tok["input_ids"],      dtype=torch.long),
+            "mirna_attention_mask": torch.tensor(mirna_tok["attention_mask"], dtype=torch.long),
+            "labels":         torch.tensor(bio_labels, dtype=torch.long),
+            "binding_labels": torch.tensor([label],    dtype=torch.float)
+        }
+
+    def _make_labels(self, seq: str, seeds: list[tuple[int,int]]):
+        """
+        BIO tagging: O=0, B=1, I=2; padding part is ignored with -100
+        seq: original sequence
+        seeds: [(start,end), ...], all are indices on the sequence
+        Returns a List[int] of length exactly self.max_len
+        """
+        lab = [0] * len(seq)
+        for (s, e) in seeds:
+            if 0 <= s < len(seq):
+                lab[s] = 1
+            for i in range(s+1, min(e+1, len(seq))):
+                lab[i] = 2
+        if len(lab) >= self.mrna_max_len:
+            lab = lab[:self.mrna_max_len]
+        else:
+            lab = lab + [-100] * (self.mrna_max_len - len(lab))
+        return lab           
         

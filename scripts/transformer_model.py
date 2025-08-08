@@ -11,17 +11,18 @@ import random
 import numpy as np
 import pandas as pd
 from time import time
+import ast
 
 from utils import load_dataset
-from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset, BatchStratifiedSampler
+from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset, BatchStratifiedSampler, TokenClassificationDataset
 
 from diagonaled_mm_tvm import mask_invalid_locations
 from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
 from sliding_chunks import sliding_window_cross_attention
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
+PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
 
 
 class CNNTokenization(nn.Module):
@@ -568,6 +569,12 @@ class CrossAttentionPredictor(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
         self.cross_norm = nn.LayerNorm(embed_dim) # normalize over embedding dimension
         self.qa_outputs = nn.Linear(embed_dim, 2) # Linear head instead of one Linear transformation
+        self.token_classification_head = LinearHead(
+            input_size=embed_dim,
+            hidden_sizes=hidden_sizes,
+            output_size=3,
+            dropout=0.0,
+        ) # BIO
         self.binding_output = LinearHead(
             input_size=embed_dim, 
             hidden_sizes=hidden_sizes,
@@ -618,14 +625,33 @@ class CrossAttentionPredictor(nn.Module):
             binding_logits = self.binding_output(z_norm_mean) # (batchsize, 1)
         else:
             binding_logits = None
-        if self.predict_span:
-            # predict start and end
-            span_logits = self.qa_outputs(z_norm) # (batchsize, mrna_len, 2)
-            start_logits, end_logits = span_logits[...,0], span_logits[...,1] # (batchsize, mrna_len)
-        else:
-            start_logits, end_logits = None, None
-        return binding_logits, start_logits, end_logits
+
+        token_classification_logits = self.token_classification_head(z_norm) # (batchsize, mrna_len, 3)
+
+        return binding_logits, token_classification_logits
     
+def create_dataset(train_path, valid_path, tokenizer, mRNA_max_len):
+    D_train = load_dataset(train_path, sep=',', parse_seeds=True)
+    D_val = load_dataset(valid_path, sep=',', parse_seeds=True)
+    
+    # # Convert the 'seeds' column from string to list of tuples
+    # D_train['seeds'] = D_train['seeds']
+    # D_val['seeds'] = D_val['seeds']
+
+    ds_train = TokenClassificationDataset(
+        df=D_train,
+        tokenizer=tokenizer,
+        mrna_max_len=mRNA_max_len,
+        mirna_max_len=mirna_max_len
+    )
+    ds_val = TokenClassificationDataset(
+        df=D_val,
+        tokenizer=tokenizer,
+        mrna_max_len=mRNA_max_len,
+        mirna_max_len=mirna_max_len
+    )
+    return ds_train, ds_val
+
 class QuestionAnsweringModel(nn.Module):
     def __init__(self,
                 mrna_max_len,
@@ -965,6 +991,115 @@ class QuestionAnsweringModel(nn.Module):
         random.seed(seed)
         np.random.seed(seed)
     
+    def train_on_BIO(self, model, dataloader, optimizer, device, epoch, accumulation_step=1):
+        model.train()
+        total_loss = 0.0
+        optimizer.zero_grad()
+        loss_list = []
+        binding_loss_fn = nn.BCEWithLogitsLoss()
+        token_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+
+        for batch_idx, batch in enumerate(dataloader):
+            for k in batch:
+                batch[k] = batch[k].to(device)
+
+            binding_logits, token_logits = model(
+                mirna=batch["mirna_input_ids"], 
+                mrna=batch["mrna_input_ids"],
+                mrna_mask=batch["mrna_attention_mask"],
+                mirna_mask=batch["mirna_attention_mask"]
+            )
+
+            binding_loss = binding_loss_fn(binding_logits.squeeze(-1), batch["binding_labels"].view(-1).float())
+            token_loss = token_loss_fn(token_logits.view(-1, 3), batch["labels"].view(-1)) # num_labels = 3 (B, I, O)
+
+            loss = binding_loss + token_loss
+            loss = loss / accumulation_step
+            loss.backward()
+            bs = batch["mrna_input_ids"].size(0)
+            if accumulation_step != 1:
+                loss_list.append(loss.item())
+                if (batch_idx + 1) % accumulation_step == 0:
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    print(
+                        f"Train Epoch: {epoch} "
+                        f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
+                        f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
+                        f"Avg loss: {sum(loss_list) / len(loss_list):.6f}\n",
+                        flush=True
+                    )
+                    loss_list = []
+            else:
+                optimizer.step()
+                optimizer.zero_grad()
+                print(
+                    f"Train Epoch: {epoch} "
+                    f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
+                    f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
+                    f"Loss: {loss.item():.6f}\n",
+                    flush=True
+                )
+
+            total_loss += loss.item() * accumulation_step
+        if (batch_idx + 1) % accumulation_step != 0:
+            optimizer.step()
+            optimizer.zero_grad()
+        avg_loss = total_loss / len(dataloader)
+        return avg_loss
+
+    def eval_on_BIO(self, model, dataloader, device):
+        model.eval()
+        total_loss = 0.0
+        all_token_preds = []
+        all_token_labels = []
+        all_binding_preds = []
+        all_binding_labels = []
+
+        binding_loss_fn = nn.BCEWithLogitsLoss()
+        token_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+
+        with torch.no_grad():
+            for batch in dataloader:
+                for k in batch:
+                    batch[k] = batch[k].to(device)
+
+                binding_logits, token_logits = model(
+                    mirna=batch["mirna_input_ids"],
+                    mrna=batch["mrna_input_ids"],
+                    mrna_mask=batch["mrna_attention_mask"],
+                    mirna_mask=batch["mirna_attention_mask"]
+                )
+
+                binding_loss = binding_loss_fn(binding_logits.squeeze(-1), batch["binding_labels"].view(-1).float())
+                token_loss = token_loss_fn(token_logits.view(-1, 3), batch["labels"].view(-1))
+
+                loss = binding_loss + token_loss
+                total_loss += loss.item()
+
+                binding_preds = (torch.sigmoid(binding_logits) > 0.5).long()
+                all_binding_preds.extend(binding_preds.cpu().numpy().flatten())
+                all_binding_labels.extend(batch["binding_labels"].cpu().numpy().flatten())
+
+                token_preds = torch.argmax(token_logits, dim=-1)
+                all_token_preds.extend(token_preds.cpu().numpy().flatten())
+                all_token_labels.extend(batch["labels"].cpu().numpy().flatten())
+
+        avg_loss = total_loss / len(dataloader)
+        binding_accuracy = (np.array(all_binding_preds) == np.array(all_binding_labels)).mean()
+        
+        # Filter out the ignored index (-100) for token accuracy calculation
+        all_token_labels = np.array(all_token_labels)
+        all_token_preds = np.array(all_token_preds)
+        valid_indices = all_token_labels != -100
+        token_accuracy = (all_token_preds[valid_indices] == all_token_labels[valid_indices]).mean()
+
+        print(f"Validation Loss: {avg_loss*100}%\n"
+              f"Binding Accuracy: {binding_accuracy*100}\n"
+              f"Token Accuracy: {token_accuracy*100}\n")
+
+        return avg_loss, binding_accuracy, token_accuracy
+
     def run(self, 
             model,
             train_path="",
@@ -972,11 +1107,312 @@ class QuestionAnsweringModel(nn.Module):
             test_path="",
             evaluation=False,
             accumulation_step=1,
-            ckpt_name=""):
+            ckpt_name="",
+            training_mode="BIO"):
         tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
-                                       add_special_tokens=False, 
                                        model_max_length=self.mrna_max_len,
                                        padding_side="right")
+        if training_mode == "BIO":
+            ds_train, ds_val = create_dataset(train_path, valid_path, tokenizer, mRNA_max_len=self.mrna_max_len)
+            train_loader = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
+            val_loader = DataLoader(ds_val, batch_size=self.batch_size, shuffle=False)
+            loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+            optimizer = AdamW(model.parameters(), lr=self.lr)
+
+            wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+            run = wandb.init(
+                project="mirna-token-classification",
+                name=f"BIO-tagging-len:{self.mrna_max_len}-epoch:{self.epochs}", 
+                config={
+                    "batch_size": self.batch_size * accumulation_step,
+                    "epochs": self.epochs,
+                    "learning_rate": self.lr,
+                },
+                tags=["BIO-tagging"],
+                save_code=True,
+                job_type="train"
+            )
+
+            model.to(self.device)
+            start = time()
+            count = 0
+            patience = 10
+            best_accuracy = 0
+            model_checkpoints_dir = os.path.join(
+                PROJ_HOME, 
+                "checkpoints", 
+                "TargetScan", 
+                "TokenClassification", 
+                str(self.mrna_max_len),
+            )
+            os.makedirs(model_checkpoints_dir, exist_ok=True)
+            for epoch in range(self.epochs):
+                train_loss = self.train_on_BIO(
+                    model=model,
+                    dataloader=train_loader,
+                    optimizer=optimizer,
+                    device=self.device,
+                    epoch=epoch,
+                    accumulation_step=accumulation_step,
+                )
+                eval_loss, binding_accuracy, token_accuracy = self.eval_on_BIO(
+                    model=model,
+                    dataloader=val_loader,
+                    device=self.device,
+                )
+                wandb.log({
+                    "epoch": epoch,
+                    "train/loss": train_loss,
+                    "eval/loss": eval_loss,
+                    "eval/accuracy": accuracy,
+                }, step=epoch)
+
+                if accuracy > best_accuracy:
+                    best_accuracy = accuracy
+                    ckpt_name = f"best_accuracy_{best_accuracy:.4f}_epoch{epoch}.pth"
+                    ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                    torch.save(model.state_dict(), ckpt_path)
+
+                    model_art = wandb.Artifact(
+                        name="BIO-tagging-model",
+                        type="model",
+                        metadata={
+                            "epoch": epoch,
+                            "accuracy": best_accuracy
+                        }
+                    )
+                    model_art.add_file(ckpt_path)
+                    try:
+                        run.log_artifact(model_art, aliases=["best-bio"])
+                    except Exception as e:
+                        print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+                else:
+                    count += 1
+                    if count >= patience:
+                        print("Max patience reached with no improvement. Early stopping.")
+                        break
+                                    # ETA printout
+                elapsed = time() - start
+                remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
+                print(f"Still remain: {remaining:.2f} hrs.")
+
+        elif training_mode == "QA":
+            if evaluation:
+                D_test = load_dataset(test_path, sep=',')
+                ds_test = QuestionAnswerDataset(data=D_test,
+                                    mrna_max_len=self.mrna_max_len,
+                                    mirna_max_len=self.mirna_max_len,
+                                    tokenizer=tokenizer,
+                                    seed_start_col="seed start",
+                                    seed_end_col="seed end",)
+                test_loader = DataLoader(ds_test,
+                                        batch_size=self.batch_size, 
+                                        shuffle=False)
+                ckpt_path = os.path.join(PROJ_HOME, 
+                                "checkpoints", 
+                                "TargetScan/TwoTowerTransformer",
+                                "longformer",
+                                str(model.mrna_max_len), 
+                                ckpt_name)
+                loaded_data = torch.load(ckpt_path, map_location=model.device)
+                model.load_state_dict(loaded_data)
+                print(f"Loaded checkpoint from {ckpt_path}")
+                model.to(self.device)
+                self.eval_loop(model=model, 
+                               dataloader=test_loader,
+                               device=self.device,
+                               evaluation=evaluation)
+                D_test_w_pred = D_test.copy()
+                if self.predict_binding:
+                    D_test_w_pred["pred label"] = self.all_binding_preds
+                    D_test_w_pred["pred prob"]  = self.all_binding_probs
+                    res_df = D_test_w_pred
+                if self.predict_span:
+                    D_test_positive = D_test_w_pred.loc[D_test_w_pred["label"] == 1].copy()
+                    D_test_positive["pred start"] = self.all_start_preds
+                    D_test_positive["pred end"]   = self.all_end_preds
+                    # merge D_test_w_pred with D_test_positive
+                    cols = ['pred start', 'pred end']
+                    D_pred_se = D_test_positive[cols]
+
+                    # 2. Left join (keep all rows of D_test_w_pred)
+                    D_merged = D_test_w_pred.join(D_pred_se, how='left')
+
+                    # 3. Fill missing pred start/end with -1 and convert to integer
+                    D_merged[['pred start', 'pred end']] = (
+                        D_merged[['pred start', 'pred end']]
+                        .fillna(-1)
+                        .astype(int)
+                    )
+                    res_df = D_merged
+                pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(self.mrna_max_len))
+                os.makedirs(pred_df_path, exist_ok=True)
+                res_df.to_csv(os.path.join(pred_df_path, "seed_prediction.csv"), index=False)
+                print(f"Prediction saved to {pred_df_path}")
+            else:
+                # weights and bias initialization
+                wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+                run = wandb.init(
+                    project="mirna-Question-Answering",
+                    name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-MLP_hidden:{self.ff_dim}", 
+                    config={
+                        "batch_size": self.batch_size * accumulation_step,
+                        "epochs": self.epochs,
+                        "learning rate": self.lr,
+                    },
+                    tags=["binding-span", "primates", "CNN-5-7-kernel", "sliding-local-attention", "mean_unchunk"],
+                    save_code=True,
+                    job_type="train"
+                )
+                self.seed_everything(seed=self.seed)
+                # load dataset
+                D_train  = load_dataset(train_path, sep=',')
+                D_val    = load_dataset(valid_path, sep=',')
+                ds_train = QuestionAnswerDataset(data=D_train,
+                                                mrna_max_len=self.mrna_max_len,
+                                                mirna_max_len=self.mirna_max_len,
+                                                tokenizer=tokenizer,
+                                                seed_start_col="seed start",
+                                                seed_end_col="seed end",)
+                ds_val = QuestionAnswerDataset(data=D_val,
+                                            mrna_max_len=self.mrna_max_len,
+                                            mirna_max_len=self.mirna_max_len,
+                                            tokenizer=tokenizer,
+                                            seed_start_col="seed start",
+                                            seed_end_col="seed end",)
+                train_sampler = BatchStratifiedSampler(labels = [example["target"].item() for example in ds_train],
+                                                       batch_size = self.batch_size)
+                train_loader = DataLoader(ds_train, 
+                                    batch_sampler=train_sampler,
+                                    shuffle=False)
+                val_loader   = DataLoader(ds_val, 
+                                        batch_size=self.batch_size,
+                                        shuffle=False)
+                loss_fn      = nn.CrossEntropyLoss()
+                model.to(self.device)
+                
+                if self.predict_binding and not self.predict_span:
+                    # freeze update of params in the span prediction head
+                    for p in model.predictor.qa_outputs.parameters():
+                        p.requires_grad = False
+                elif self.predict_span and not self.predict_binding:
+                    # freeze update of params in the binding prediction head
+                    for p in model.predictor.binding_output.parameters():
+                        p.requires_grad = False
+
+                trainable_params = [p for p in model.parameters() if p.requires_grad]
+                optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-3)
+
+                start    = time()
+                count    = 0
+                patience = 10
+                best_binding_acc = 0
+                best_exact_match = 0
+                best_f1_score    = 0
+                best_composite_metric = 0
+                model_checkpoints_dir = os.path.join(
+                    PROJ_HOME, 
+                    "checkpoints", 
+                    "TargetScan", 
+                    "TwoTowerTransformer", 
+                    "Longformer",
+                    str(self.mrna_max_len),
+                )
+                os.makedirs(model_checkpoints_dir, exist_ok=True)
+                for epoch in range(self.epochs):
+                    # TRAINING
+                    train_loss = self.train_loop(
+                        model=model,
+                        dataloader=train_loader,
+                        loss_fn=loss_fn,
+                        optimizer=optimizer,
+                        device=self.device,
+                        epoch=epoch,
+                        accumulation_step=accumulation_step,
+                    )
+
+                    # EVALUATION
+                    eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(
+                        model=model,
+                        dataloader=val_loader,
+                        device=self.device,
+                    )
+
+                    # SAFE METRIC LOGGING
+                    try:
+                        wandb.log({
+                            "epoch": epoch,
+                            "train/loss": train_loss,
+                            "eval/loss": eval_loss,
+                            "eval/binding_accuracy": acc_binding,
+                            "eval/start_accuracy": acc_start,
+                            "eval/end_accuracy": acc_end,
+                            "eval/exact_match": exact_match,
+                            "eval/F1_score": f1
+                        }, step=epoch)
+                    except Exception as e:
+                        print(f"[W&B] log failed at epoch {epoch}: {e}")
+
+                    # CHECK FOR IMPROVEMENT
+                    if self.predict_binding and self.predict_span:
+                        composite = f1 + acc_binding
+                        improved = composite > best_composite_metric
+                    elif self.predict_binding:
+                        improved = acc_binding >= best_binding_acc
+                    else:  # predict_span only
+                        improved = exact_match >= best_exact_match
+
+                    if improved:
+                        # update bests & reset patience
+                        best_composite_metric = composite if self.predict_binding and self.predict_span else best_composite_metric
+                        best_binding_acc      = acc_binding   if self.predict_binding else best_binding_acc
+                        best_f1_score         = f1            if self.predict_span    else best_f1_score
+                        best_exact_match      = exact_match   if self.predict_span    else best_exact_match
+                        count = 0
+
+                        # save checkpoint
+                        ckpt_name = (
+                            f"best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                            if (self.predict_binding and self.predict_span)
+                            else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                            if self.predict_binding
+                            else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
+                        )
+                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                        torch.save(model.state_dict(), ckpt_path)
+
+                        # create and log artifact with alias
+                        model_art = wandb.Artifact(
+                            name=(
+                                "binding-span-model" if (self.predict_binding and self.predict_span)
+                                else "mirna-binding-model" if self.predict_binding
+                                else "mirna-span-model"
+                            ),
+                            type="model",
+                            metadata={
+                                "epoch": epoch,
+                                **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                                **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                                **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                            }
+                        )
+                        model_art.add_file(ckpt_path)
+
+                        try:
+                            run.log_artifact(model_art, aliases=["major_mean_run"])
+                        except Exception as e:
+                            print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+
+                    else:
+                        count += 1
+                        if count >= patience:
+                            print("Max patience reached with no improvement. Early stopping.")
+                            break
+
+                    # ETA printout
+                    elapsed = time() - start
+                    remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
+                    print(f"Still remain: {remaining:.2f} hrs.")
         if evaluation:
             D_test = load_dataset(test_path, sep=',')
             ds_test = QuestionAnswerDataset(data=D_test,
@@ -1040,7 +1476,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention", "mean_unchunk"],
+                tags=["binding-span", "primates", "CNN-5-7-kernel", "sliding-local-attention", "mean_unchunk", "BIO-tagging"],
                 save_code=True,
                 job_type="train"
             )
@@ -1182,7 +1618,6 @@ class QuestionAnsweringModel(nn.Module):
                         run.log_artifact(model_art, aliases=["major_mean_run"])
                     except Exception as e:
                         print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
-
                 else:
                     count += 1
                     if count >= patience:
@@ -1196,29 +1631,24 @@ class QuestionAnsweringModel(nn.Module):
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
-    mrna_max_len = 520
+    mrna_max_len = 500
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
-    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_multiseeds_random_samples.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_multiseeds_random_samples.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=100,
+                                   epochs=2,
                                    embed_dim=1024,
                                    ff_dim=2048,
                                    batch_size=32,
                                    lr=3e-5,
                                    seed=54,
-                                   predict_span=True,
+                                   predict_span=False,
                                    predict_binding=True,
-                                   use_longformer=True)
-    # total_params = sum(param.numel() for param in model.parameters())
-    # print(f"Total Parameters: {total_params}")
+                                   use_longformer=False)
     model.run(model=model,
               train_path=train_datapath,
               valid_path=valid_datapath,
-              test_path =test_datapath,
-              evaluation=False,
-              accumulation_step=8)
-            #   ckpt_name="best_composite_0.9911_0.9977_epoch11.pth")
+              accumulation_step=8,
+              training_mode="BIO")
