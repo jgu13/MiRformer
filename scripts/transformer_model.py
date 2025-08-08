@@ -21,8 +21,8 @@ from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
 from sliding_chunks import sliding_window_cross_attention
 
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
-PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
 
 
 class CNNTokenization(nn.Module):
@@ -672,7 +672,7 @@ class QuestionAnsweringModel(nn.Module):
         self.mirna_max_len = mirna_max_len
         if device is None:
             if torch.cuda.is_available():
-                self.device = "cuda:1"
+                self.device = "cuda:3"
             elif torch.backends.mps.is_available():
                 self.device = "mps"
             else:
@@ -1086,6 +1086,7 @@ class QuestionAnsweringModel(nn.Module):
                 all_token_labels.extend(batch["labels"].cpu().numpy().flatten())
 
         avg_loss = total_loss / len(dataloader)
+        print("dataset size: ",len(dataloader))
         binding_accuracy = (np.array(all_binding_preds) == np.array(all_binding_labels)).mean()
         
         # Filter out the ignored index (-100) for token accuracy calculation
@@ -1112,6 +1113,61 @@ class QuestionAnsweringModel(nn.Module):
         tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
                                        model_max_length=self.mrna_max_len,
                                        padding_side="right")
+        # TODO: modify to test BIO tagging
+        # if evaluation:
+        #     D_test = load_dataset(test_path, sep=',')
+        #     ds_test = QuestionAnswerDataset(data=D_test,
+        #                         mrna_max_len=self.mrna_max_len,
+        #                         mirna_max_len=self.mirna_max_len,
+        #                         tokenizer=tokenizer,
+        #                         seed_start_col="seed start",
+        #                         seed_end_col="seed end",)
+        #     test_loader = DataLoader(ds_test,
+        #                             batch_size=self.batch_size, 
+        #                             shuffle=False)
+        #     ckpt_path = os.path.join(PROJ_HOME, 
+        #                     "checkpoints", 
+        #                     "TargetScan/TwoTowerTransformer",
+        #                     "longformer",
+        #                     str(model.mrna_max_len), 
+        #                     ckpt_name)
+        #     loaded_data = torch.load(ckpt_path, map_location=model.device)
+        #     model.load_state_dict(loaded_data)
+        #     print(f"Loaded checkpoint from {ckpt_path}")
+        #     model.to(self.device)
+        #     self.eval_loop(model=model, 
+        #                    dataloader=test_loader,
+        #                    device=self.device,
+        #                    evaluation=evaluation)
+        #     D_test_w_pred = D_test.copy()
+        #     if self.predict_binding:
+        #         D_test_w_pred["pred label"] = self.all_binding_preds
+        #         D_test_w_pred["pred prob"]  = self.all_binding_probs
+        #         res_df = D_test_w_pred
+        #     if self.predict_span:
+        #         D_test_positive = D_test_w_pred.loc[D_test_w_pred["label"] == 1].copy()
+        #         D_test_positive["pred start"] = self.all_start_preds
+        #         D_test_positive["pred end"]   = self.all_end_preds
+        #         # merge D_test_w_pred with D_test_positive
+        #         cols = ['pred start', 'pred end']
+        #         D_pred_se = D_test_positive[cols]
+
+        #         # 2. 左连接（保留 D_test_w_pred 的所有行）
+        #         D_merged = D_test_w_pred.join(D_pred_se, how='left')
+
+        #         # 3. 将缺失的 pred start/end 填成 -1，并转成整数
+        #         D_merged[['pred start', 'pred end']] = (
+        #             D_merged[['pred start', 'pred end']]
+        #             .fillna(-1)
+        #             .astype(int)
+        #         )
+        #         res_df = D_merged
+        #     pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(self.mrna_max_len))
+        #     os.makedirs(pred_df_path, exist_ok=True)
+        #     res_df.to_csv(os.path.join(pred_df_path, "seed_prediction.csv"), index=False)
+        #     print(f"Prediction saved to {pred_df_path}")
+        #     return
+        
         if training_mode == "BIO":
             ds_train, ds_val = create_dataset(train_path, valid_path, tokenizer, mRNA_max_len=self.mrna_max_len)
             train_loader = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
@@ -1128,7 +1184,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning_rate": self.lr,
                 },
-                tags=["BIO-tagging"],
+                tags=["BIO-tagging", "sliding-window-local-attn"],
                 save_code=True,
                 job_type="train"
             )
@@ -1164,11 +1220,12 @@ class QuestionAnsweringModel(nn.Module):
                     "epoch": epoch,
                     "train/loss": train_loss,
                     "eval/loss": eval_loss,
-                    "eval/accuracy": accuracy,
+                    "eval/binding accuracy": binding_accuracy,
+                    "eval/BIO accuracy": token_accuracy
                 }, step=epoch)
 
-                if accuracy > best_accuracy:
-                    best_accuracy = accuracy
+                if token_accuracy > best_accuracy:
+                    best_accuracy = token_accuracy
                     ckpt_name = f"best_accuracy_{best_accuracy:.4f}_epoch{epoch}.pth"
                     ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
                     torch.save(model.state_dict(), ckpt_path)
@@ -1413,232 +1470,19 @@ class QuestionAnsweringModel(nn.Module):
                     elapsed = time() - start
                     remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
                     print(f"Still remain: {remaining:.2f} hrs.")
-        if evaluation:
-            D_test = load_dataset(test_path, sep=',')
-            ds_test = QuestionAnswerDataset(data=D_test,
-                                mrna_max_len=self.mrna_max_len,
-                                mirna_max_len=self.mirna_max_len,
-                                tokenizer=tokenizer,
-                                seed_start_col="seed start",
-                                seed_end_col="seed end",)
-            test_loader = DataLoader(ds_test,
-                                    batch_size=self.batch_size, 
-                                    shuffle=False)
-            ckpt_path = os.path.join(PROJ_HOME, 
-                            "checkpoints", 
-                            "TargetScan/TwoTowerTransformer",
-                            "longformer",
-                            str(model.mrna_max_len), 
-                            ckpt_name)
-            loaded_data = torch.load(ckpt_path, map_location=model.device)
-            model.load_state_dict(loaded_data)
-            print(f"Loaded checkpoint from {ckpt_path}")
-            model.to(self.device)
-            self.eval_loop(model=model, 
-                           dataloader=test_loader,
-                           device=self.device,
-                           evaluation=evaluation)
-            D_test_w_pred = D_test.copy()
-            if self.predict_binding:
-                D_test_w_pred["pred label"] = self.all_binding_preds
-                D_test_w_pred["pred prob"]  = self.all_binding_probs
-                res_df = D_test_w_pred
-            if self.predict_span:
-                D_test_positive = D_test_w_pred.loc[D_test_w_pred["label"] == 1].copy()
-                D_test_positive["pred start"] = self.all_start_preds
-                D_test_positive["pred end"]   = self.all_end_preds
-                # merge D_test_w_pred with D_test_positive
-                cols = ['pred start', 'pred end']
-                D_pred_se = D_test_positive[cols]
-
-                # 2. 左连接（保留 D_test_w_pred 的所有行）
-                D_merged = D_test_w_pred.join(D_pred_se, how='left')
-
-                # 3. 将缺失的 pred start/end 填成 -1，并转成整数
-                D_merged[['pred start', 'pred end']] = (
-                    D_merged[['pred start', 'pred end']]
-                    .fillna(-1)
-                    .astype(int)
-                )
-                res_df = D_merged
-            pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(self.mrna_max_len))
-            os.makedirs(pred_df_path, exist_ok=True)
-            res_df.to_csv(os.path.join(pred_df_path, "seed_prediction.csv"), index=False)
-            print(f"Prediction saved to {pred_df_path}")
         else:
-            # weights and bias initialization
-            wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-            run = wandb.init(
-                project="mirna-Question-Answering",
-                name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-MLP_hidden:{self.ff_dim}", 
-                config={
-                    "batch_size": self.batch_size * accumulation_step,
-                    "epochs": self.epochs,
-                    "learning rate": self.lr,
-                },
-                tags=["binding-span", "primates", "CNN-5-7-kernel", "sliding-local-attention", "mean_unchunk", "BIO-tagging"],
-                save_code=True,
-                job_type="train"
-            )
-            self.seed_everything(seed=self.seed)
-            # load dataset
-            D_train  = load_dataset(train_path, sep=',')
-            D_val    = load_dataset(valid_path, sep=',')
-            ds_train = QuestionAnswerDataset(data=D_train,
-                                            mrna_max_len=self.mrna_max_len,
-                                            mirna_max_len=self.mirna_max_len,
-                                            tokenizer=tokenizer,
-                                            seed_start_col="seed start",
-                                            seed_end_col="seed end",)
-            ds_val = QuestionAnswerDataset(data=D_val,
-                                        mrna_max_len=self.mrna_max_len,
-                                        mirna_max_len=self.mirna_max_len,
-                                        tokenizer=tokenizer,
-                                        seed_start_col="seed start",
-                                        seed_end_col="seed end",)
-            train_sampler = BatchStratifiedSampler(labels = [example["target"].item() for example in ds_train],
-                                            batch_size = self.batch_size)
-            train_loader = DataLoader(ds_train, 
-                                batch_sampler=train_sampler,
-                                shuffle=False)
-            val_loader   = DataLoader(ds_val, 
-                                    batch_size=self.batch_size,
-                                    shuffle=False)
-            loss_fn   = nn.CrossEntropyLoss()
-            model.to(self.device)
-            
-            if self.predict_binding and not self.predict_span:
-                # freeze update of params in the span prediction head
-                for p in model.predictor.qa_outputs.parameters():
-                    p.requires_grad = False
-            elif self.predict_span and not self.predict_binding:
-                # freeze update of params in the binding prediction head
-                for p in model.predictor.binding_output.parameters():
-                    p.requires_grad = False
-
-            trainable_params = [p for p in model.parameters() if p.requires_grad]
-            optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-3)
-
-            start    = time()
-            count    = 0
-            patience = 10
-            best_binding_acc = 0
-            best_exact_match = 0
-            best_f1_score    = 0
-            best_composite_metric = 0
-            model_checkpoints_dir = os.path.join(
-                PROJ_HOME, 
-                "checkpoints", 
-                "TargetScan", 
-                "TwoTowerTransformer", 
-                "Longformer",
-                str(self.mrna_max_len),
-            )
-            os.makedirs(model_checkpoints_dir, exist_ok=True)
-            for epoch in range(self.epochs):
-                # TRAINING
-                train_loss = self.train_loop(
-                    model=model,
-                    dataloader=train_loader,
-                    loss_fn=loss_fn,
-                    optimizer=optimizer,
-                    device=self.device,
-                    epoch=epoch,
-                    accumulation_step=accumulation_step,
-                )
-
-                # EVALUATION
-                eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(
-                    model=model,
-                    dataloader=val_loader,
-                    device=self.device,
-                )
-
-                # SAFE METRIC LOGGING
-                try:
-                    wandb.log({
-                        "epoch": epoch,
-                        "train/loss": train_loss,
-                        "eval/loss": eval_loss,
-                        "eval/binding_accuracy": acc_binding,
-                        "eval/start_accuracy": acc_start,
-                        "eval/end_accuracy": acc_end,
-                        "eval/exact_match": exact_match,
-                        "eval/F1_score": f1
-                    }, step=epoch)
-                except Exception as e:
-                    print(f"[W&B] log failed at epoch {epoch}: {e}")
-
-                # CHECK FOR IMPROVEMENT
-                if self.predict_binding and self.predict_span:
-                    composite = f1 + acc_binding
-                    improved = composite > best_composite_metric
-                elif self.predict_binding:
-                    improved = acc_binding >= best_binding_acc
-                else:  # predict_span only
-                    improved = exact_match >= best_exact_match
-
-                if improved:
-                    # update bests & reset patience
-                    best_composite_metric = composite if self.predict_binding and self.predict_span else best_composite_metric
-                    best_binding_acc      = acc_binding   if self.predict_binding else best_binding_acc
-                    best_f1_score         = f1            if self.predict_span    else best_f1_score
-                    best_exact_match      = exact_match   if self.predict_span    else best_exact_match
-                    count = 0
-
-                    # save checkpoint
-                    ckpt_name = (
-                        f"best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
-                        if (self.predict_binding and self.predict_span)
-                        else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
-                        if self.predict_binding
-                        else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
-                    )
-                    ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                    torch.save(model.state_dict(), ckpt_path)
-
-                    # create and log artifact with alias
-                    model_art = wandb.Artifact(
-                        name=(
-                            "binding-span-model" if (self.predict_binding and self.predict_span)
-                            else "mirna-binding-model" if self.predict_binding
-                            else "mirna-span-model"
-                        ),
-                        type="model",
-                        metadata={
-                            "epoch": epoch,
-                            **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
-                            **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
-                            **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
-                        }
-                    )
-                    model_art.add_file(ckpt_path)
-
-                    try:
-                        run.log_artifact(model_art, aliases=["major_mean_run"])
-                    except Exception as e:
-                        print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
-                else:
-                    count += 1
-                    if count >= patience:
-                        print("Max patience reached with no improvement. Early stopping.")
-                        break
-
-                # ETA printout
-                elapsed = time() - start
-                remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
-                print(f"Still remain: {remaining:.2f} hrs.")
+            raise ValueError("training_mode must be one of 'QA' or 'BIO'")
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
-    mrna_max_len = 500
+    mrna_max_len = 520
     mirna_max_len = 24
     train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_multiseeds_random_samples.csv")
     valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_multiseeds_random_samples.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=2,
+                                   epochs=1,
                                    embed_dim=1024,
                                    ff_dim=2048,
                                    batch_size=32,
@@ -1646,7 +1490,7 @@ if __name__ == "__main__":
                                    seed=54,
                                    predict_span=False,
                                    predict_binding=True,
-                                   use_longformer=False)
+                                   use_longformer=True)
     model.run(model=model,
               train_path=train_datapath,
               valid_path=valid_datapath,

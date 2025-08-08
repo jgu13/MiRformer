@@ -7,8 +7,8 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 import ast
 
-# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 def get_complementary_seq(seq, mRNA):

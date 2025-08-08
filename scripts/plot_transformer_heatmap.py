@@ -110,8 +110,10 @@ def plot_heatmap(model,
                  file_name=None,
                  save_plot_dir=os.getcwd()):
     attn_weights = model.predictor.cross_attn_layer.last_attention
-    attn_weights = torch.amax(attn_weights[0], dim=0) # (mrna, mirna)
-    attn_weights = attn_weights.transpose(0,1) # (mirna, mrna)
+    print(attn_weights.shape)
+    return
+    # attn_weights = torch.amax(attn_weights[0], dim=0) # (mrna, mirna)
+    attn_weights = attn_weights.transpose(0,1) # (H, mirna, mrna)
 
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=figsize)
 
@@ -199,7 +201,7 @@ def main():
     
     data_dir = os.path.join(PROJ_HOME, 'TargetScan_dataset')
     test_datapath = os.path.join(PROJ_HOME, data_dir, 
-                                 "TargetScan_train_500_randomized_start_random_samples.csv")
+                                 "TargetScan_train_500_randomized_start.csv")
     test_data  = pd.read_csv(test_datapath, sep=',')
     mRNA_seqs  = test_data[["mRNA sequence"]].values
     miRNA_seqs = test_data[["miRNA sequence"]].values
@@ -209,11 +211,11 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    model = load_model(ckpt_name="best_composite_0.7665_0.8950_epoch8.pth",
+    model = load_model(ckpt_name="best_composite_0.8970_0.9878_epoch22.pth",
                        **args_dict)
 
     # Testing the first sequence
-    i=3 # row number - 2
+    i=8 # row number - 2
     mRNA_seq  = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     mRNA_ID   = mRNA_IDs[i][0]

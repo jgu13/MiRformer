@@ -8,16 +8,16 @@ import numpy as np
 from Bio import SeqIO
 from sklearn.model_selection import train_test_split
 
-# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
-predicted_targets_f = "Predicted_Targets_Context_Scores.default_predictions.txt.zip"
+predicted_targets_f = "Mouse_Predicted_Targets_Context_Scores.default_predictions.txt.zip"
 
 # positive miRNA and mRNA pairs
 path = os.path.join(data_dir, predicted_targets_f)
 predicted_targets = pd.read_csv(path, sep='\t', compression="zip")
 # filter for human (9606), chimpanzee (9598), mouse (10090)
-tax_ids = [9606]
+tax_ids = [10090]
 top_predicted_targets = predicted_targets[
     (predicted_targets["Gene Tax ID"].isin(tax_ids)) &
     (predicted_targets["context++ score percentile"] >= np.int64(80)) # top 20% likely pairs
@@ -29,7 +29,7 @@ positive_pairs = top_predicted_targets[[
      "miRNA",
      "Transcript ID",
      "UTR_start",
-     "UTR_end"
+     "UTR end"
 ]]
 positive_pairs.columns = ["miRNA", "Transcript_ID", "UTR_start", "UTR_end"]
 positive_pairs = positive_pairs.drop_duplicates(subset=["Transcript_ID", "miRNA", "UTR_start", "UTR_end"])
@@ -41,14 +41,14 @@ positive_pairs = (positive_pairs
                .apply(list)                 # → list of tuples
                .reset_index(name="UTR_coords"))
 positive_pairs.loc[:, "label"] = 1
-positive_pairs.to_csv(os.path.join(data_dir, "Positive_pairs_human.csv"), sep='\t', index=False)
+positive_pairs.to_csv(os.path.join(data_dir, "Positive_pairs_mouse.csv"), sep='\t', index=False)
 
 print("Total predicted mirna-transcript pairs = ", len(positive_pairs))
 
 # negative miRNA and mRNA pairs: select mRNA species that is not in positive pairs with the miRNA
 all_mrnas       = set(predicted_targets["Transcript ID"].unique())
 print("Start generating an equal number of negative samples.")
-with open(os.path.join(data_dir, "negative_pairs_human.csv"), "w", newline="") as f:
+with open(os.path.join(data_dir, "negative_pairs_mouse.csv"), "w", newline="") as f:
     writer = csv.DictWriter(f, fieldnames=["miRNA", "Transcript_ID", "coords", "label"], delimiter="\t")
     writer.writeheader()
     for mirna, group in positive_pairs.groupby("miRNA"):
@@ -69,7 +69,7 @@ with open(os.path.join(data_dir, "negative_pairs_human.csv"), "w", newline="") a
 print("Finished generating negative samples")
 
 # Add bottom 30% to negative samples
-tax_ids = [9606]
+tax_ids = [10090]
 bot_predicted_targets = predicted_targets[
     (predicted_targets["Gene Tax ID"].isin(tax_ids)) &
     (predicted_targets["context++ score percentile"] <= np.int64(30)) # bottom 30% likely pairs
@@ -81,7 +81,7 @@ negative_pairs = bot_predicted_targets[[
 ]].copy()
 
 print("Number of rows to add: ", len(negative_pairs))
-out_path = os.path.join(data_dir, "negative_pairs_human.csv")
+out_path = os.path.join(data_dir, "negative_pairs_mouse.csv")
 with open(out_path, "a", newline="") as f:
     writer = csv.DictWriter(
         f,

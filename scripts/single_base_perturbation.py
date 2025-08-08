@@ -94,8 +94,8 @@ def load_model(ckpt_name,
                             "checkpoints", 
                             "TargetScan/TwoTowerTransformer",
                             "Longformer",
-                            str(520),
-                            # str(args_dict["mrna_max_len"]), 
+                            # "CNN-tokenized",
+                            str(args_dict["mrna_max_len"]), 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -271,7 +271,7 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer": True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_mean_unchunk.pth",
+    model = load_model(ckpt_name="best_composite_0.8747_0.9693_epoch7.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
