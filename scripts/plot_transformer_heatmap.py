@@ -110,9 +110,7 @@ def plot_heatmap(model,
                  file_name=None,
                  save_plot_dir=os.getcwd()):
     attn_weights = model.predictor.cross_attn_layer.last_attention
-    print(attn_weights.shape)
-    return
-    # attn_weights = torch.amax(attn_weights[0], dim=0) # (mrna, mirna)
+    attn_weights = torch.amax(attn_weights[0], dim=0) # (mrna, mirna)
     attn_weights = attn_weights.transpose(0,1) # (H, mirna, mrna)
 
     fig, ax = plt.subplots(nrows=1, ncols=1, figsize=figsize)

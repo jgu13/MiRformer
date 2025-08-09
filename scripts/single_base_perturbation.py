@@ -24,7 +24,7 @@ def predict(model,
         miRNA_seq = kwargs["miRNA_seq"]
         mRNA_seq_mask = kwargs["mRNA_seq_mask"]
         miRNA_seq_mask = kwargs["miRNA_seq_mask"] # (B, L)
-        binding_logits, _, _ = model(
+        binding_logits, token_logits = model(
                                 mirna = miRNA_seq,
                                 mrna = mRNA_seq,
                                 mirna_mask = miRNA_seq_mask,
@@ -92,7 +92,9 @@ def load_model(ckpt_name,
     ckpt_path = os.path.join(
                             PROJ_HOME, 
                             "checkpoints", 
+                            # "TargetScan",
                             "TargetScan/TwoTowerTransformer",
+                            # "TokenClassification",
                             "Longformer",
                             # "CNN-tokenized",
                             str(args_dict["mrna_max_len"]), 
@@ -271,7 +273,7 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer": True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.8747_0.9693_epoch7.pth",
+    model = load_model(ckpt_name="best_composite_0.9015_0.9889_epoch42.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 

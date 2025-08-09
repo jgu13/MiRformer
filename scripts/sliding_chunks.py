@@ -203,7 +203,7 @@ def _sum_unchunk(x, w, B, H, Lq):
     unchunk = unchunk.view(B, H, Lq, d)
     return unchunk
 
-def _unchunk(x, w, B, H, Lq, reduce='sum'):
+def _unchunk(x, w, B, H, Lq, reduce='mean'):
     bsh, C, two_w, d = x.shape
     assert Lq == (C + 1) * w
 
@@ -261,7 +261,7 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None):
     # 4) 对每个 chunk 做 matmul  -> (B*H, num_chunks, 2w, Lk)
     #    b    c    x   d       b    c    k    d
     scale = 1.0 / math.sqrt(D)
-    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale
+    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale # (B*H, num_chunks, 2w, Lk)
 
     # 对每个 chunk 内部掩码
     if mask is not None:
@@ -269,14 +269,14 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None):
         mask_r = mask.reshape(B*H, Lq, Lk)
         chunk_mask = _chunk(mask_r, w) # (B*H, num_chunks, 2w, Lk)
         attn_chunk = attn_chunk.masked_fill(chunk_mask==0, value=float('-inf'))
-    attn_chunk = F.softmax(attn_chunk, dim=-1)
+    attn_chunk = F.softmax(attn_chunk, dim=(1,2)) # (B*H, num_chunks, 2w, Lk)
     unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq) # (B, H, Lq, Lk)
     
     # chunk value and weight each chunk by corresponding attn
     Vr = V.reshape(B*H, Lk, D)
     Vc = Vr.unsqueeze(1).expand(-1, num_chunks, -1, -1)  # (B*H, num_chunks, Lk, D)
     output = torch.einsum('bcxk,bckd->bcxd', (attn_chunk, Vc)) # (B*H, num_chunks, 2w, D)
-    unchunk_output = _unchunk(output, w=w, B=B, H=H, Lq=Lq, reduce='mean')
+    unchunk_output = _unchunk(output, w=w, B=B, H=H, Lq=Lq)
 
     return (unchunk_output, unchunk_attn)
     
