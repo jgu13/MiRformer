@@ -257,7 +257,7 @@ def main():
     predict_span    = True
     predict_binding = True
     if torch.cuda.is_available():
-        device = "cuda:3"
+        device = "cuda:2"
     elif torch.backends.mps.is_available():
         device = "mps"
     else:
@@ -271,11 +271,11 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer": True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_mean_unchunk.pth",
+    model = load_model(ckpt_name="best_composite_0.9015_0.9889_epoch42.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
-                                 "TargetScan_train_500_randomized_start.csv")
+                                 "TargetScan_train_30_randomized_start.csv")
     test_data = pd.read_csv(test_data_path)
     mRNA_seqs = test_data[["mRNA sequence"]].values
     miRNA_seqs = test_data[["miRNA sequence"]].values
@@ -285,7 +285,7 @@ def main():
     os.makedirs(save_plot_dir, exist_ok=True)
 
     # Test sequence
-    i=8
+    i=17
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]
@@ -365,7 +365,7 @@ def main():
     
     # print("Max in delta = ", max(deltas))
     print("plot changes on base logos ...", flush=True)
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_mean_unchunk.png")
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_30nt.png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
                 #  emb_changes=emb_deltas,
@@ -373,7 +373,7 @@ def main():
                  seed_start=seed_start,
                  seed_end=seed_end,
                  base_ax=ax_attn,
-                 figsize=(40, 9),
+                 figsize=(60, 9),
                  file_name=file_path)
 
 if __name__ == '__main__':

@@ -140,6 +140,9 @@ class LongformerAttention(nn.Module):
             k = k.view(bsz, k_len, self.num_heads, self.head_dim).transpose(2, 1)
             v = v.view(bsz, v_len, self.num_heads, self.head_dim).transpose(2, 1)
 
+            q = self.rotary(q)
+            k = self.rotary(k)
+
             context_output, attn_weights = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask) # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
             context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
@@ -515,6 +518,7 @@ class CrossAttentionPredictor(nn.Module):
         self.device = device
         self.sn_embedding = nn.Embedding(vocab_size, embed_dim)
         self.cnn_embedding = CNNTokenization(embed_dim)
+        self.ln_merge = nn.LayerNorm(embed_dim)
         # self.mirna_positional_embedding = AdditivePositionalEncoding(max_len=mirna_max_len, d_model=embed_dim)
         # self.mrna_positional_embedding = AdditivePositionalEncoding(max_len=mrna_max_len, d_model=embed_dim)
         self.mirna_encoder = TransformerEncoder(
@@ -554,6 +558,7 @@ class CrossAttentionPredictor(nn.Module):
                 window_size=window_size, 
                 autoregressive=False,
                 layer_id=None,
+                max_seq_len=mrna_max_len,
                 dropout=dropout_rate, 
                 device=device,
                 cross_attn=True
@@ -585,9 +590,11 @@ class CrossAttentionPredictor(nn.Module):
         
         # add N-gram CNN-encoded embedding
         mirna_cnn_embedding = self.cnn_embedding(mirna_sn_embedding.transpose(-1, -2)) # (batch_size, embed_dim, mirna_len)
-        mrna_cnn_embedding = self.cnn_embedding(mrna_sn_embedding.transpose(-1, -2))  # (batch_size, embed_dim, mrna_len)
-        mirna_embedding = mirna_sn_embedding + mirna_cnn_embedding # (batch_size, mirna_len, embed_dim)
-        mrna_embedding = mrna_sn_embedding + mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
+        mrna_cnn_embedding  = self.cnn_embedding(mrna_sn_embedding.transpose(-1, -2))  # (batch_size, embed_dim, mrna_len)
+        mirna_embedding     = mirna_sn_embedding + mirna_cnn_embedding # (batch_size, mirna_len, embed_dim)
+        mrna_embedding      = mrna_sn_embedding + mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
+        mirna_embedding     = self.ln_merge(mirna_embedding) # normalize across features
+        mrna_embedding      = self.ln_merge(mrna_embedding)
 
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
         mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
@@ -633,6 +640,8 @@ class QuestionAnsweringModel(nn.Module):
                 device: str=None,
                 epochs:int=100,
                 embed_dim=256,
+                num_heads=2,
+                num_layers=2,
                 ff_dim:int=512,
                 batch_size:int=32,
                 lr=0.001,
@@ -646,7 +655,7 @@ class QuestionAnsweringModel(nn.Module):
         self.mirna_max_len = mirna_max_len
         if device is None:
             if torch.cuda.is_available():
-                self.device = "cuda:1"
+                self.device = "cuda:2"
             elif torch.backends.mps.is_available():
                 self.device = "mps"
             else:
@@ -654,6 +663,7 @@ class QuestionAnsweringModel(nn.Module):
         else:
             self.device = device
         self.epochs = epochs
+        self.embed_dim = embed_dim
         self.ff_dim = ff_dim
         self.batch_size = batch_size
         self.lr = lr
@@ -664,6 +674,8 @@ class QuestionAnsweringModel(nn.Module):
             self.predictor = CrossAttentionPredictor(mrna_max_len=mrna_max_len,
                                                     mirna_max_len=mirna_max_len,
                                                     embed_dim = embed_dim,
+                                                    num_heads=num_heads,
+                                                    num_layers=num_layers,
                                                     ff_dim = ff_dim,
                                                     hidden_sizes = [ff_dim, ff_dim],
                                                     device=self.device,
@@ -1097,6 +1109,7 @@ class QuestionAnsweringModel(nn.Module):
                 "TwoTowerTransformer", 
                 "Longformer",
                 str(self.mrna_max_len),
+                f"embed={self.embed_dim}d",
             )
             os.makedirs(model_checkpoints_dir, exist_ok=True)
             for epoch in range(self.epochs):
@@ -1205,11 +1218,13 @@ if __name__ == "__main__":
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    epochs=100,
-                                   embed_dim=1024,
-                                   ff_dim=2048,
+                                   embed_dim=256,
+                                   num_heads=2,
+                                   num_layers=4,
+                                   ff_dim=512,
                                    batch_size=32,
                                    lr=3e-5,
-                                   seed=54,
+                                   seed=8907,
                                    predict_span=True,
                                    predict_binding=True,
                                    use_longformer=True)
