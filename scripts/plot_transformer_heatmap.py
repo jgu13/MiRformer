@@ -20,7 +20,8 @@ def load_model(
                             "checkpoints", 
                             "TargetScan/TwoTowerTransformer",
                             "Longformer",
-                            str(model.mrna_max_len), 
+                            str(model.mrna_max_len),
+                            f"embed={model.embed_dim}d", 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -106,7 +107,7 @@ def plot_heatmap(model,
                  seed_start,
                  seed_end,
                  plot_max_only=False,
-                 figsize=(35,40),
+                 figsize=(35, 12),
                  metrics=None,
                  file_name=None,
                  save_plot_dir=os.getcwd()):
@@ -272,7 +273,7 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    model = load_model(ckpt_name="best_composite_0.6512_0.6604_epoch0.pth",
+    model = load_model(ckpt_name="best_composite_0.8441_0.9358_epoch20.pth",
                        **args_dict)
 
     # Testing the first sequence

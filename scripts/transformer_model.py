@@ -3,6 +3,8 @@ import torch.nn as nn
 from torch.optim import AdamW
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.nn.utils import clip_grad_norm_
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 import os
 import math
@@ -143,7 +145,7 @@ class LongformerAttention(nn.Module):
             q = self.rotary(q)
             k = self.rotary(k)
 
-            context_output, attn_weights = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask) # (B, H, Lq, D)
+            context_output, attn_weights = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask, norm_by_query=True) # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
             context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
             context_output = context_output.view(B, Lq, H*D)                         # (B, Lq, embed_dim)
@@ -655,7 +657,7 @@ class QuestionAnsweringModel(nn.Module):
         self.mirna_max_len = mirna_max_len
         if device is None:
             if torch.cuda.is_available():
-                self.device = "cuda:2"
+                self.device = "cuda:1"
             elif torch.backends.mps.is_available():
                 self.device = "mps"
             else:
@@ -742,9 +744,11 @@ class QuestionAnsweringModel(nn.Module):
               optimizer, 
               device,
               epoch,
+              scheduler=None,
               accumulation_step=1,
               alpha1=1,
-              alpha2=0.75):
+              alpha2=0.75,
+              trainable_params=None):
         '''
         Training loop
         '''
@@ -801,10 +805,13 @@ class QuestionAnsweringModel(nn.Module):
             loss = loss / accumulation_step
             loss.backward()
             bs = batch["mrna_input_ids"].size(0)
+            trainable_params = model.parameters() if trainable_params is None else trainable_params
             if accumulation_step != 1:
                 loss_list.append(loss.item())
                 if (batch_idx + 1) % accumulation_step == 0:
+                    clip_grad_norm_(trainable_params, max_norm=1.0)
                     optimizer.step()
+                    scheduler.step()
                     optimizer.zero_grad()
                     print(
                         f"Train Epoch: {epoch} "
@@ -815,7 +822,9 @@ class QuestionAnsweringModel(nn.Module):
                     )
                     loss_list = []
             else:
+                clip_grad_norm_(trainable_params, max_norm=1.0)
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
                 print(
                     f"Train Epoch: {epoch} "
@@ -829,7 +838,9 @@ class QuestionAnsweringModel(nn.Module):
             total_loss += loss.item() * accumulation_step
         # After the loop, if gradients remain (for non-divisible number of batches)
         if (batch_idx + 1) % accumulation_step != 0:
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad()
         avg_loss = total_loss / len(dataloader)
         return avg_loss
@@ -1052,7 +1063,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention", "mean_unchunk"],
+                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention", "mean_unchunk", "8-heads-4-layer"],
                 save_code=True,
                 job_type="train"
             )
@@ -1093,7 +1104,15 @@ class QuestionAnsweringModel(nn.Module):
                     p.requires_grad = False
 
             trainable_params = [p for p in model.parameters() if p.requires_grad]
-            optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-3)
+            optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-2)
+
+            total_steps   = math.ceil(len(train_loader) * self.epochs / accumulation_step)
+            warmup_steps  = int(0.05 * total_steps)  # 5% warmup (3–5% is typical)
+            eta_min       = 3e-5                     # final floor
+
+            warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_steps)
+            cosine = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=eta_min)
+            scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
 
             start    = time()
             count    = 0
@@ -1119,9 +1138,11 @@ class QuestionAnsweringModel(nn.Module):
                     dataloader=train_loader,
                     loss_fn=loss_fn,
                     optimizer=optimizer,
+                    scheduler=scheduler,
                     device=self.device,
                     epoch=epoch,
                     accumulation_step=accumulation_step,
+                    trainable_params=trainable_params,
                 )
 
                 # EVALUATION
@@ -1211,20 +1232,20 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start_random_samples.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start_random_samples.csv")
     test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=100,
-                                   embed_dim=256,
-                                   num_heads=2,
+                                   epochs=1,
+                                   embed_dim=1024,
+                                   num_heads=8,
                                    num_layers=4,
-                                   ff_dim=512,
+                                   ff_dim=4096,
                                    batch_size=32,
                                    lr=3e-5,
-                                   seed=8907,
+                                   seed=10020,
                                    predict_span=True,
                                    predict_binding=True,
                                    use_longformer=True)
