@@ -67,12 +67,8 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     q = q.transpose(1, 2).reshape(bsz * num_heads, seqlen, head_dim)
     k = k.transpose(1, 2).reshape(bsz * num_heads, seqlen, head_dim)
 
-    # Normalize Q and K for better numerical stability
-    q_norm = F.normalize(q, p=2, dim=-1, eps=eps)
-    k_norm = F.normalize(k, p=2, dim=-1, eps=eps)
-
-    chunk_q = _chunk(q_norm, w)
-    chunk_k = _chunk(k_norm, w)
+    chunk_q = _chunk(q, w)
+    chunk_k = _chunk(k, w)
 
     # matrix multiplication with improved stability
     # bcxd: bsz*num_heads x chunks x 2w x head_dim
@@ -209,6 +205,22 @@ def sliding_chunks_no_overlap_matmul_pv(prob: torch.Tensor, v: torch.Tensor, w: 
     context = torch.einsum('bcwhpd,bcdhep->bcwhe', (chunk_prob, chunk_v_extended))
     return context.reshape(bsz, seqlen, num_heads, head_dim)
 
+def check_key_mask_rows(key_mask, name="key_mask"):
+    """
+    key_mask: (B, Lk), 1=valid, 0=pad (or bool)
+    Prints indices of samples that have no valid keys at all.
+    """
+    km = key_mask
+    if km.dtype != torch.bool:
+        km = km != 0  # cast to bool
+
+    empty = ~km.any(dim=1)   # (B,), True if that sample has all zeros
+    if empty.any():
+        bad_idx = empty.nonzero(as_tuple=True)[0]
+        counts = km.sum(dim=1)
+        raise RuntimeError(f"[{name}] Found {bad_idx.numel()} samples with ALL-ZERO key mask. "
+              f"indices={bad_idx.tolist()}, valid_counts={counts[bad_idx].tolist()}")
+
 def _sum_unchunk(x, w, B, H, Lq):
     # unchunk to restore query length by taking the sum of two overlapping chunks
     # flatten the chunk dims
@@ -319,13 +331,8 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
     # Use more stable scaling
     scale = 1.0 / math.sqrt(D)
     
-    # Compute QK^T with better numerical stability
-    # First normalize Q and K to prevent large values
-    Qc_norm = F.normalize(Qc, p=2, dim=-1, eps=eps)
-    Kc_norm = F.normalize(Kc, p=2, dim=-1, eps=eps)
-    
     # Compute attention scores
-    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc_norm, Kc_norm)) * scale
+    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale
     
     # Clip attention scores to prevent overflow
     attn_chunk = torch.clamp(attn_chunk, min=-max_attn_value, max=max_attn_value)
@@ -342,7 +349,7 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
         chunk_mask = _chunk(mask_r, w)  # (B*H, num_chunks, 2w, Lk)
         
         # Apply mask with large negative value (but not too large to prevent overflow)
-        mask_value = -1e4  # More stable than -1e5
+        mask_value = -10000.0  # More stable than -1e5
         attn_chunk = attn_chunk.masked_fill(chunk_mask == 0, value=mask_value)
     
     # Apply softmax with improved numerical stability

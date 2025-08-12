@@ -20,7 +20,7 @@ from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset, BatchStrati
 from diagonaled_mm_tvm import mask_invalid_locations
 from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
-from sliding_chunks import sliding_window_cross_attention
+from sliding_chunks import sliding_window_cross_attention, check_key_mask_rows
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
@@ -130,6 +130,8 @@ class LongformerAttention(nn.Module):
                 value=None, # only used in cross attention when v != k
                 attention_mask=None,
                 output_attentions=False):
+
+        bad_index = check_key_mask_rows(attention_mask)
         if self.cross_attn:
             bsz, q_len, _ = query.shape
             _, k_len, _   = key.shape
@@ -138,9 +140,9 @@ class LongformerAttention(nn.Module):
             k = self.key(key)
             v = self.value(value)
 
-            q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(2, 1) # (B, L, H, D)
-            k = k.view(bsz, k_len, self.num_heads, self.head_dim).transpose(2, 1)
-            v = v.view(bsz, v_len, self.num_heads, self.head_dim).transpose(2, 1)
+            q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(2, 1).contiguous() # (B, L, H, D)
+            k = k.view(bsz, k_len, self.num_heads, self.head_dim).transpose(2, 1).contiguous()
+            v = v.view(bsz, v_len, self.num_heads, self.head_dim).transpose(2, 1).contiguous()
 
             q = self.rotary(q)
             k = self.rotary(k)
@@ -657,7 +659,7 @@ class QuestionAnsweringModel(nn.Module):
         self.mirna_max_len = mirna_max_len
         if device is None:
             if torch.cuda.is_available():
-                self.device = "cuda:2"
+                self.device = "cuda:1"
             elif torch.backends.mps.is_available():
                 self.device = "mps"
             else:
@@ -1233,17 +1235,17 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start_random_samples.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start_random_samples.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
     test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    epochs=100,
                                    embed_dim=1024,
-                                   num_heads=2,
-                                   num_layers=2,
-                                   ff_dim=2048,
+                                   num_heads=8,
+                                   num_layers=4,
+                                   ff_dim=4096,
                                    batch_size=32,
                                    lr=3e-5,
                                    seed=10020,
