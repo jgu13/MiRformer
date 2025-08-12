@@ -145,7 +145,7 @@ class LongformerAttention(nn.Module):
             q = self.rotary(q)
             k = self.rotary(k)
 
-            context_output, attn_weights = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask, norm_by_query=True) # (B, H, Lq, D)
+            context_output, attn_weights = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask, norm_by_query=False) # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
             context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
             context_output = context_output.view(B, Lq, H*D)                         # (B, Lq, embed_dim)
@@ -657,7 +657,7 @@ class QuestionAnsweringModel(nn.Module):
         self.mirna_max_len = mirna_max_len
         if device is None:
             if torch.cuda.is_available():
-                self.device = "cuda:1"
+                self.device = "cuda:2"
             elif torch.backends.mps.is_available():
                 self.device = "mps"
             else:
@@ -1063,7 +1063,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "primates", "CNN-5-7-kernel", "longformer", "sliding-local-attention", "mean_unchunk", "8-heads-4-layer"],
+                tags=["binding-span", "longformer", "mean_unchunk", "8-heads-4-layer","norm_by_key","50k-data-500nt"],
                 save_code=True,
                 job_type="train"
             )
@@ -1129,6 +1129,7 @@ class QuestionAnsweringModel(nn.Module):
                 "Longformer",
                 str(self.mrna_max_len),
                 f"embed={self.embed_dim}d",
+                "norm_by_key",
             )
             os.makedirs(model_checkpoints_dir, exist_ok=True)
             for epoch in range(self.epochs):
@@ -1158,11 +1159,11 @@ class QuestionAnsweringModel(nn.Module):
                         "epoch": epoch,
                         "train/loss": train_loss,
                         "eval/loss": eval_loss,
-                        "eval/binding_accuracy": acc_binding,
-                        "eval/start_accuracy": acc_start,
-                        "eval/end_accuracy": acc_end,
-                        "eval/exact_match": exact_match,
-                        "eval/F1_score": f1
+                        "eval/binding accuracy": acc_binding,
+                        "eval/start accuracy": acc_start,
+                        "eval/end accuracy": acc_end,
+                        "eval/exact match": exact_match,
+                        "eval/F1 score": f1
                     }, step=epoch)
                 except Exception as e:
                     print(f"[W&B] log failed at epoch {epoch}: {e}")
@@ -1238,11 +1239,11 @@ if __name__ == "__main__":
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=1,
+                                   epochs=100,
                                    embed_dim=1024,
-                                   num_heads=8,
-                                   num_layers=4,
-                                   ff_dim=4096,
+                                   num_heads=2,
+                                   num_layers=2,
+                                   ff_dim=2048,
                                    batch_size=32,
                                    lr=3e-5,
                                    seed=10020,

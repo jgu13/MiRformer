@@ -21,7 +21,8 @@ def load_model(
                             "TargetScan/TwoTowerTransformer",
                             "Longformer",
                             str(model.mrna_max_len),
-                            f"embed={model.embed_dim}d", 
+                            f"embed={model.embed_dim}d",
+                            "norm_by_query", 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -175,7 +176,7 @@ def plot_heatmap(model,
     else: # plot each head
         attn_weights = attn_weights[0]
         attn_weights = attn_weights.transpose(1,2) # (H, mirna, mrna)
-        fig, axs = plt.subplots(nrows=2, ncols=1, figsize=figsize)
+        fig, axs = plt.subplots(nrows=attn_weights.shape[0], ncols=1, figsize=figsize)
 
         a, b = 0.1, attn_weights.max().item()
         norm = colors.Normalize(vmin=a, vmax=b)
@@ -230,16 +231,16 @@ def plot_heatmap(model,
             ax.set_ylabel(miRNA_id, fontsize=15)
             ax.tick_params(axis='x', labelsize=12)
             ax.tick_params(axis='y', labelsize=12)
-            ax.set_title(f"Head {h+1}", fontsize=10)
+            ax.set_title(f"Head {h+1}", fontsize=15)
     # fig.suptitle("miRNA-mRNA Cross-Attention Heatmap")
     if metrics is not None:
         fig.text(0.5, 0.93, 
                 f"(Binding probability = {metrics['binding_prob']:.3f}, Overlap = {metrics['f1']})", 
-                fontsize=10, ha='center')
+                fontsize=20, ha='center')
     if file_name is not None:
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
     else:
-        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer.png")
+        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_query.png")
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
         print(f"Heatmap is saved to {file_name}")
     return fig, ax
@@ -253,10 +254,10 @@ def main():
     args_dict = {"mirna_max_len": mirna_max_len,
                  "mrna_max_len": mrna_max_len,
                  "device": device,
-                 "embed_dim": 256,
-                 "num_heads": 2,
+                 "embed_dim": 1024,
+                 "num_heads": 8,
                  "num_layers": 4,
-                 "ff_dim": 512,
+                 "ff_dim": 4096,
                  "predict_span": predict_span,
                  "predict_binding": predict_binding,
                  "use_longformer":True}
@@ -273,7 +274,7 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    model = load_model(ckpt_name="best_composite_0.8441_0.9358_epoch20.pth",
+    model = load_model(ckpt_name="best_composite_0.5725_0.8027_epoch27.pth",
                        **args_dict)
 
     # Testing the first sequence
@@ -328,6 +329,7 @@ def main():
                  mRNA_id = mRNA_ID,
                  seed_start = seed_start,
                  seed_end = seed_end,
+                 figsize=(35, 45),
                  metrics = {"binding_prob": binding_prob, "f1": f1},
                  save_plot_dir=save_plot_dir)
     

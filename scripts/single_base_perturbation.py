@@ -271,7 +271,7 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer": True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.9015_0.9889_epoch42.pth",
+    model = load_model(ckpt_name="best_composite_0.1317_0.6663_epoch0.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
@@ -365,7 +365,7 @@ def main():
     
     # print("Max in delta = ", max(deltas))
     print("plot changes on base logos ...", flush=True)
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_30nt.png")
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_query.png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
                 #  emb_changes=emb_deltas,
@@ -373,7 +373,7 @@ def main():
                  seed_start=seed_start,
                  seed_end=seed_end,
                  base_ax=ax_attn,
-                 figsize=(60, 9),
+                 figsize=(35, 9),
                  file_name=file_path)
 
 if __name__ == '__main__':
