@@ -281,15 +281,50 @@ def _unchunk(x, w, B, H, Lq, reduce='sum'):
     chunk_out = chunk_out.view(B, H, Lq, d)
     return chunk_out
 
+def _unchunk_lse_logits(logits_chunk, w, B, H, Lq, eps=1e-10):
+    """
+    logits_chunk: (B*H, C, 2w, Lk)  -- per-chunk attention *logits* (NOT softmaxed)
+    returns:      (B, H, Lq, Lk)    -- merged logits via log-sum-exp over overlaps
+
+    If average=True, returns log-mean-exp (LSE - log(count)).
+    """
+    bsh, C, two_w, Lk = logits_chunk.shape
+    assert Lq == (C + 1) * w, f"Lq={Lq}, expected {(C+1)*w}"
+
+    device = logits_chunk.device
+    # Map chunk indices (c,u) -> global query index i = c*w + u
+    base   = torch.arange(C, device=device) * w                 # (C,)
+    offset = torch.arange(two_w, device=device)                 # (2w,)
+    pos    = base[:, None] + offset[None, :]                    # (C, 2w)
+    idx    = pos.reshape(-1)                                    # (C*2w,)
+
+    flat = logits_chunk.reshape(bsh, C*two_w, Lk)               # (bsh, C*2w, Lk)
+
+    # 1) max per (bsh, i, k) for numerical stability
+    m = torch.full((bsh, Lq, Lk), -float('inf'), device=device, dtype=flat.dtype)
+    m.scatter_reduce_(1, idx[None, :, None].expand(bsh, -1, Lk),
+                      flat, reduce='amax', include_self=True)
+
+    # 2) sum exp(logit - m) across overlapping contributions
+    exp_acc = torch.zeros_like(m)
+    # gather m back to the flat layout to align
+    m_flat = m.gather(1, idx[None, :, None].expand(bsh, -1, Lk))
+    exp_acc.scatter_add_(1, idx[None, :, None].expand(bsh, -1, Lk), torch.exp(flat - m_flat))
+
+    # 3) LSE = m + log(sum_exp)
+    merged = m + torch.log(exp_acc + eps)
+    return merged.view(B,H,Lq,Lk)
+
+
 def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False, 
-                                  eps=1e-8, max_attn_value=1e6, clip_grad_norm=None):
+                                  eps=1e-8, max_attn_value=1e6, use_lse=False):
     """
     Enhanced sliding window cross-attention with improved numerical stability.
     
     Args:
-        Q: (B, Lq, H, D) - Query tensor
-        K: (B, Lk, H, D) - Key tensor  
-        V: (B, Lk, H, D) - Value tensor
+        Q: (B, H, Lq, D) - Query tensor
+        K: (B, H, Lk, D) - Key tensor  
+        V: (B, H, Lk, D) - Value tensor
         w: window size
         mask: attention mask (B, Lq, Lk) where 1 = attend, 0 = mask
         norm_by_query: whether to normalize attention by query dimension
@@ -332,67 +367,49 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
     scale = 1.0 / math.sqrt(D)
     
     # Compute attention scores
-    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale
+    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale # (B*H, num_chunks, 2w, Lk)
     
     # Clip attention scores to prevent overflow
     attn_chunk = torch.clamp(attn_chunk, min=-max_attn_value, max=max_attn_value)
-    
+
     # Apply attention mask if provided
     if mask is not None:
-        # Ensure mask is properly shaped and contains valid values
-        if mask.dtype != torch.bool:
-            mask = mask.bool()
-        
-        # Expand mask to match attention dimensions
-        mask = mask.unsqueeze(1).unsqueeze(1).expand(B, H, Lq, Lk)
+        # Expand mask to match attention dimensions (B,H,Lq,Lk)
+        if mask.dim() == 2:           # (B, Lk) key mask
+            mask = mask[:, None, None, :].expand(B, H, Lq, Lk)
+        elif mask.dim() == 3:         # (B, Lq, Lk)
+            mask = mask[:, None, :, :].expand(B, H, Lq, Lk)
+        mask = mask.bool()
         mask_r = mask.reshape(B*H, Lq, Lk)
         chunk_mask = _chunk(mask_r, w)  # (B*H, num_chunks, 2w, Lk)
         
         # Apply mask with large negative value (but not too large to prevent overflow)
         mask_value = -10000.0  # More stable than -1e5
-        attn_chunk = attn_chunk.masked_fill(chunk_mask == 0, value=mask_value)
+        attn_chunk = attn_chunk.masked_fill(~chunk_mask, value=mask_value) # (B*H, num_chunks, 2w, Lk)
+
+    if use_lse:
+        # unchunk by LSE
+        unchunk_attn = _unchunk_lse_logits(attn_chunk, w=w, B=B, H=H, Lq=Lq) # (B, H, Lq, Lk)
+    else:
+        # fallback to mean unchunk
+        unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq, reduce="mean")  # (B, H, Lq, Lk)
     
-    # Apply softmax with improved numerical stability
+    print("logits stats:", unchunk_attn.min().item(), unchunk_attn.max().item())
+
+    # Apply softmax 
     if norm_by_query:
-        bh, nc, two_w, Lk = attn_chunk.shape
-        # Reshape for query-wise normalization
-        attn_chunk = attn_chunk.permute(0, 3, 1, 2).contiguous()  # (B*H, Lk, num_chunks, 2w)
-        attn_chunk = attn_chunk.view(bh, Lk, nc*two_w)  # (B*H, Lk, num_chunks*2w)
-        
-        # Enhanced numerical stability for softmax
-        attn_chunk = _stable_softmax(attn_chunk, dim=-1, eps=eps)
-        
-        # Reshape back
-        attn_chunk = attn_chunk.view(bh, Lk, nc, two_w).permute(0, 2, 3, 1).contiguous()
+        attn_weights = _stable_softmax(unchunk_attn, dim=-2, eps=eps) # (B, H, Lq, Lk)
     else:
         # Enhanced numerical stability for softmax
-        attn_chunk = _stable_softmax(attn_chunk, dim=-1, eps=eps)
-    
-    # Unchunk attention weights
-    unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq)  # (B, H, Lq, Lk)
-    
-    # Compute weighted values with improved stability
-    Vr = V.reshape(B*H, Lk, D)
-    Vc = Vr.unsqueeze(1).expand(-1, num_chunks, -1, -1)  # (B*H, num_chunks, Lk, D)
+        attn_weights = _stable_softmax(unchunk_attn, dim=-1, eps=eps) # (B, H, Lq, Lk)
+    # check all zero rows
+    row_sums = attn_weights.sum(dim=-1)
+    print("row_sums min/max:", row_sums.min().item(), row_sums.max().item())
     
     # Apply attention weights to values
-    output = torch.einsum('bcxk,bckd->bcxd', (attn_chunk, Vc))  # (B*H, num_chunks, 2w, D)
+    output = torch.einsum('bcxk,bckd->bcxd', (attn_weights, V))  # (B, H, Lq, Lk) * (B, H, Lk, D) -> (B, H, Lq, D)
     
-    # Unchunk output
-    unchunk_output = _unchunk(output, w=w, B=B, H=H, Lq=Lq, reduce='mean')
-    
-    # Final stability checks
-    if torch.isnan(unchunk_output).any() or torch.isinf(unchunk_output).any():
-        # Fallback: use mean pooling if attention fails
-        print("Warning: Attention output contains NaN/Inf, falling back to mean pooling")
-        unchunk_output = V.mean(dim=2, keepdim=True).expand(-1, -1, Lq, -1)
-    
-    if torch.isnan(unchunk_attn).any() or torch.isinf(unchunk_attn).any():
-        # Fallback: uniform attention if attention weights fail
-        print("Warning: Attention weights contain NaN/Inf, falling back to uniform weights")
-        unchunk_attn = torch.ones_like(unchunk_attn) / Lk
-    
-    return (unchunk_output, unchunk_attn)
+    return (output, attn_weights)
 
 
 def _stable_softmax(x, dim=-1, eps=1e-8):

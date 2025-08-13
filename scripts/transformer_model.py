@@ -129,6 +129,7 @@ class LongformerAttention(nn.Module):
                 key=None, # only used in cross attention when k != q
                 value=None, # only used in cross attention when v != k
                 attention_mask=None,
+                query_attention_mask=None, # only used in cross attention when q != k 
                 output_attentions=False):
 
         bad_index = check_key_mask_rows(attention_mask)
@@ -146,6 +147,14 @@ class LongformerAttention(nn.Module):
 
             q = self.rotary(q)
             k = self.rotary(k)
+
+            if query_attention_mask is not None:
+                assert attention_mask.shape == (bsz, k_len)
+                assert query_attention_mask.shape == (bsz, q_len)
+                attention_mask = (attention_mask > 0) # bool
+                query_attention_mask = (query_attention_mask > 0) # bool
+                attention_mask = attention_mask[:, None, :] & query_attention_mask[:, :, None]
+                assert attention_mask.shape == (bsz, q_len, k_len) 
 
             context_output, attn_weights = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask, norm_by_query=False) # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
@@ -223,7 +232,7 @@ class LongformerAttention(nn.Module):
                 elif self.attention_mode == "sliding_chunks_no_overlap":
                     d_mask = sliding_chunks_no_overlap_matmul_qk(ones, float_mask, self.attention_window, padding_value=0)
 
-                attn_weights += d_mask
+                attn_weights += d_mask # apply per chunk mask
             assert list(attn_weights.size())[:3] == [bsz, seq_len, self.num_heads]
             assert attn_weights.size(dim=3) in [self.attention_window * 2 + 1, self.attention_window * 3]
 
@@ -609,6 +618,7 @@ class CrossAttentionPredictor(nn.Module):
                 key=mirna_embedding,
                 value=mirna_embedding,
                 attention_mask=mirna_mask,
+                query_attention_mask=mrna_mask,
             )[0]
             self.cross_attn_output = z
         else: 
