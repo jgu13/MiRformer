@@ -23,6 +23,7 @@ def load_model(
                             str(model.mrna_max_len),
                             f"embed={model.embed_dim}d",
                             "norm_by_key", 
+                            "LSE",
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -240,7 +241,7 @@ def plot_heatmap(model,
     if file_name is not None:
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
     else:
-        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_key.png")
+        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_key_LSE.png")
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
         print(f"Heatmap is saved to {file_name}")
     return fig, ax
@@ -274,7 +275,7 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    model = load_model(ckpt_name="best_composite_0.4566_0.6604_epoch0.pth",
+    model = load_model(ckpt_name="best_composite_0.7901_0.8728_epoch2.pth",
                        **args_dict)
 
     # Testing the first sequence

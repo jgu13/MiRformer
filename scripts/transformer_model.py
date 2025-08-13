@@ -156,7 +156,12 @@ class LongformerAttention(nn.Module):
                 attention_mask = attention_mask[:, None, :] & query_attention_mask[:, :, None]
                 assert attention_mask.shape == (bsz, q_len, k_len) 
 
-            context_output, attn_weights = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask, norm_by_query=False) # (B, H, Lq, D)
+            context_output, attn_weights = sliding_window_cross_attention(
+                Q=q, K=k, V=v, 
+                w=self.attention_window, 
+                mask=attention_mask, 
+                norm_by_query=False,
+                use_lse=True) # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
             context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
             context_output = context_output.view(B, Lq, H*D)                         # (B, Lq, embed_dim)
@@ -1075,7 +1080,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "longformer", "mean_unchunk", "8-heads-4-layer","norm_by_key","50k-data-500nt"],
+                tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key","LSE"],
                 save_code=True,
                 job_type="train"
             )
@@ -1142,6 +1147,7 @@ class QuestionAnsweringModel(nn.Module):
                 str(self.mrna_max_len),
                 f"embed={self.embed_dim}d",
                 "norm_by_key",
+                "LSE",
             )
             os.makedirs(model_checkpoints_dir, exist_ok=True)
             for epoch in range(self.epochs):
@@ -1199,7 +1205,7 @@ class QuestionAnsweringModel(nn.Module):
 
                     # save checkpoint
                     ckpt_name = (
-                        f"best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                        f"50k_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
                         if (self.predict_binding and self.predict_span)
                         else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
                         if self.predict_binding
@@ -1226,7 +1232,7 @@ class QuestionAnsweringModel(nn.Module):
                     model_art.add_file(ckpt_path)
 
                     try:
-                        run.log_artifact(model_art, aliases=["major_mean_run"])
+                        run.log_artifact(model_art, aliases=["test_lse_run"])
                     except Exception as e:
                         print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
 
@@ -1245,13 +1251,13 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start_random_samples.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start_random_samples.csv")
     test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=100,
+                                   epochs=20,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,

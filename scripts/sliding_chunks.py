@@ -394,7 +394,7 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
         # fallback to mean unchunk
         unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq, reduce="mean")  # (B, H, Lq, Lk)
     
-    print("logits stats:", unchunk_attn.min().item(), unchunk_attn.max().item())
+    # print("logits stats:", unchunk_attn.min().item(), unchunk_attn.max().item())
 
     # Apply softmax 
     if norm_by_query:
@@ -404,7 +404,7 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
         attn_weights = _stable_softmax(unchunk_attn, dim=-1, eps=eps) # (B, H, Lq, Lk)
     # check all zero rows
     row_sums = attn_weights.sum(dim=-1)
-    print("row_sums min/max:", row_sums.min().item(), row_sums.max().item())
+    # print("row_sums min/max:", row_sums.min().item(), row_sums.max().item())
     
     # Apply attention weights to values
     output = torch.einsum('bcxk,bckd->bcxd', (attn_weights, V))  # (B, H, Lq, Lk) * (B, H, Lk, D) -> (B, H, Lq, D)
