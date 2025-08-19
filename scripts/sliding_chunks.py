@@ -38,13 +38,28 @@ def _chunk(x, w):
     return x.as_strided(size=chunk_size, stride=chunk_stride)
 
 
-def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_value: float):
-    '''Matrix multiplicatio of query x key tensors using with a sliding window attention pattern.
+def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_value: float, eps=1e-8):
+    '''Matrix multiplication of query x key tensors using a sliding window attention pattern.
     This implementation splits the input into overlapping chunks of size 2w (e.g. 512 for pretrained Longformer)
-    with an overlap of size w'''
+    with an overlap of size w. Enhanced with numerical stability improvements.
+    
+    Args:
+        q: Query tensor (bsz, seqlen, num_heads, head_dim)
+        k: Key tensor (bsz, seqlen, num_heads, head_dim)
+        w: Window size (one-sided)
+        padding_value: Value to use for padding
+        eps: Small epsilon for numerical stability
+    '''
     bsz, seqlen, num_heads, head_dim = q.size()
-    assert seqlen % (w * 2) == 0
-    assert q.size() == k.size()
+    assert seqlen % (w * 2) == 0, f"Sequence length {seqlen} must be divisible by {2*w}"
+    assert q.size() == k.size(), f"Query and key must have same size: {q.size()} vs {k.size()}"
+    assert head_dim > 0, "Head dimension must be positive"
+
+    # Check for NaN/Inf in inputs
+    if torch.isnan(q).any() or torch.isinf(q).any():
+        raise ValueError("Query tensor contains NaN or Inf values")
+    if torch.isnan(k).any() or torch.isinf(k).any():
+        raise ValueError("Key tensor contains NaN or Inf values")
 
     chunks_count = seqlen // w - 1
 
@@ -55,23 +70,26 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     chunk_q = _chunk(q, w)
     chunk_k = _chunk(k, w)
 
-    # matrix multipication
+    # matrix multiplication with improved stability
     # bcxd: bsz*num_heads x chunks x 2w x head_dim
     # bcyd: bsz*num_heads x chunks x 2w x head_dim
     # bcxy: bsz*num_heads x chunks x 2w x 2w
     chunk_attn = torch.einsum('bcxd,bcyd->bcxy', (chunk_q, chunk_k))  # multiply
 
+    # Clip attention scores to prevent overflow
+    chunk_attn = torch.clamp(chunk_attn, min=-1e6, max=1e6)
+
     # convert diagonals into columns
     diagonal_chunk_attn = _skew(chunk_attn, direction=(0, 0, 0, 1), padding_value=padding_value)
 
-    # allocate space for the overall attention matrix where the chunks are compined. The last dimension
+    # allocate space for the overall attention matrix where the chunks are combined. The last dimension
     # has (w * 2 + 1) columns. The first (w) columns are the w lower triangles (attention from a word to
     # w previous words). The following column is attention score from each word to itself, then
     # followed by w columns for the upper triangle.
 
     diagonal_attn = diagonal_chunk_attn.new_empty((bsz * num_heads, chunks_count + 1, w, w * 2 + 1))
 
-    # copy parts from diagonal_chunk_attn into the compined matrix of attentions
+    # copy parts from diagonal_chunk_attn into the combined matrix of attentions
     # - copying the main diagonal and the upper triangle
     diagonal_attn[:, :-1, :, w:] = diagonal_chunk_attn[:, :, :w, :w + 1]
     diagonal_attn[:, -1, :, w:] = diagonal_chunk_attn[:, -1, w:, :w + 1]
@@ -82,7 +100,18 @@ def sliding_chunks_matmul_qk(q: torch.Tensor, k: torch.Tensor, w: int, padding_v
     # separate bsz and num_heads dimensions again
     diagonal_attn = diagonal_attn.view(bsz, num_heads, seqlen, 2 * w + 1).transpose(2, 1)
 
+    # Apply masking for invalid locations
     mask_invalid_locations(diagonal_attn, w, 1, False)
+    
+    # Final stability check
+    if torch.isnan(diagonal_attn).any() or torch.isinf(diagonal_attn).any():
+        print("Warning: Attention scores contain NaN/Inf, applying fallback")
+        diagonal_attn = torch.where(
+            torch.isnan(diagonal_attn) | torch.isinf(diagonal_attn),
+            torch.zeros_like(diagonal_attn),
+            diagonal_attn
+        )
+    
     return diagonal_attn
 
 
@@ -176,6 +205,22 @@ def sliding_chunks_no_overlap_matmul_pv(prob: torch.Tensor, v: torch.Tensor, w: 
     context = torch.einsum('bcwhpd,bcdhep->bcwhe', (chunk_prob, chunk_v_extended))
     return context.reshape(bsz, seqlen, num_heads, head_dim)
 
+def check_key_mask_rows(key_mask, name="key_mask"):
+    """
+    key_mask: (B, Lk), 1=valid, 0=pad (or bool)
+    Prints indices of samples that have no valid keys at all.
+    """
+    km = key_mask
+    if km.dtype != torch.bool:
+        km = km != 0  # cast to bool
+
+    empty = ~km.any(dim=1)   # (B,), True if that sample has all zeros
+    if empty.any():
+        bad_idx = empty.nonzero(as_tuple=True)[0]
+        counts = km.sum(dim=1)
+        raise RuntimeError(f"[{name}] Found {bad_idx.numel()} samples with ALL-ZERO key mask. "
+              f"indices={bad_idx.tolist()}, valid_counts={counts[bad_idx].tolist()}")
+
 def _sum_unchunk(x, w, B, H, Lq):
     # unchunk to restore query length by taking the sum of two overlapping chunks
     # flatten the chunk dims
@@ -221,9 +266,10 @@ def _unchunk(x, w, B, H, Lq, reduce='mean'):
     chunks_in = x.reshape(bsh, C*two_w, d) # (bsh, C*2w, d)
 
     # build output tensor
-    output = torch.full((bsh, Lq, d), fill_value=float('-inf'), device=device, dtype=chunks_in.dtype) # (bsh, (C+1)*w, d)
     if reduce == 'sum' or reduce == 'mean':
         output = torch.zeros((bsh, Lq, d), device=x.device, dtype=x.dtype) # so that values do not reduce to -inf
+    elif reduce == 'amax':
+        output = torch.full((bsh, Lq, d), fill_value=float('-inf'), device=device, dtype=chunks_in.dtype) # (bsh, (C+1)*w, d)
     indices = pos_flat[None, :, None].expand(bsh, -1, d) # (bsh, C*2w, d)
 
     # take max between values that overlaps at the same position
@@ -235,48 +281,236 @@ def _unchunk(x, w, B, H, Lq, reduce='mean'):
     chunk_out = chunk_out.view(B, H, Lq, d)
     return chunk_out
 
-def sliding_window_cross_attention(Q, K, V, w, mask=None):
+def _unchunk_lse_logits(logits_chunk, w, B, H, Lq, eps=1e-10):
     """
-    Q: (B, Lq, H, D)
-    K: (B, Lk, H, D)
-    V: (B, lk, H, D)
-    w: window size
-    返回 attn_scores: (B, H, Lq, Lk)
+    logits_chunk: (B*H, C, 2w, Lk)  -- per-chunk attention *logits* (NOT softmaxed)
+    returns:      (B, H, Lq, Lk)    -- merged logits via log-sum-exp over overlaps
+
+    If average=True, returns log-mean-exp (LSE - log(count)).
+    """
+    bsh, C, two_w, Lk = logits_chunk.shape
+    assert Lq == (C + 1) * w, f"Lq={Lq}, expected {(C+1)*w}"
+
+    device = logits_chunk.device
+    # Map chunk indices (c,u) -> global query index i = c*w + u
+    base   = torch.arange(C, device=device) * w                 # (C,)
+    offset = torch.arange(two_w, device=device)                 # (2w,)
+    pos    = base[:, None] + offset[None, :]                    # (C, 2w)
+    idx    = pos.reshape(-1)                                    # (C*2w,)
+
+    flat = logits_chunk.reshape(bsh, C*two_w, Lk)               # (bsh, C*2w, Lk)
+
+    # 1) max per (bsh, i, k) for numerical stability
+    m = torch.full((bsh, Lq, Lk), -float('inf'), device=device, dtype=flat.dtype)
+    m.scatter_reduce_(1, idx[None, :, None].expand(bsh, -1, Lk),
+                      flat, reduce='amax', include_self=True)
+
+    # 2) sum exp(logit - m) across overlapping contributions
+    exp_acc = torch.zeros_like(m)
+    # gather m back to the flat layout to align
+    m_flat = m.gather(1, idx[None, :, None].expand(bsh, -1, Lk))
+    exp_acc.scatter_add_(1, idx[None, :, None].expand(bsh, -1, Lk), torch.exp(flat - m_flat))
+
+    # 3) LSE = m + log(sum_exp)
+    merged = m + torch.log(exp_acc + eps)
+    return merged.view(B,H,Lq,Lk)
+
+
+def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False, 
+                                  eps=1e-8, max_attn_value=1e6, use_lse=False,
+                                  tau=0.1):
+    """
+    Enhanced sliding window cross-attention with improved numerical stability.
+    
+    Args:
+        Q: (B, H, Lq, D) - Query tensor
+        K: (B, H, Lk, D) - Key tensor  
+        V: (B, H, Lk, D) - Value tensor
+        w: window size
+        mask: attention mask (B, Lq, Lk) where 1 = attend, 0 = mask
+        norm_by_query: whether to normalize attention by query dimension
+        eps: small epsilon for numerical stability
+        max_attn_value: maximum attention value to prevent overflow
+        clip_grad_norm: gradient clipping norm (if None, no clipping)
+    
+    Returns:
+        (output, attention_weights) where:
+        - output: (B, H, Lq, D) - weighted value output
+        - attention_weights: (B, H, Lq, Lk) - attention probabilities
     """
     B, H, Lq, D = Q.shape
-    _, _, Lk, _  = K.shape
+    _, _, Lk, _ = K.shape
 
-    assert Lq % (2*w) == 0
+    assert Lq % (2*w) == 0, f"Lq ({Lq}) must be divisible by 2*w ({2*w})"
+    assert D > 0, "Head dimension must be positive"
+    
+    # Check for NaN/Inf in inputs
+    if torch.isnan(Q).any() or torch.isinf(Q).any():
+        raise ValueError("Query tensor contains NaN or Inf values")
+    if torch.isnan(K).any() or torch.isinf(K).any():
+        raise ValueError("Key tensor contains NaN or Inf values")
+    if torch.isnan(V).any() or torch.isinf(V).any():
+        raise ValueError("Value tensor contains NaN or Inf values")
 
-    # 1) 合并 B,H 维度
+    # 1) Merge B,H dimensions for efficient processing
     Qr = Q.reshape(B*H, Lq, D)   # (B*H, Lq, D)
     Kr = K.reshape(B*H, Lk, D)   # (B*H, Lk, D)
 
-    # 2) chunk 只有 Q
+    # 2) Chunk only Q for sliding window
     Qc = _chunk(Qr, w)  # (B*H, num_chunks, 2w, D)
-    # 3) 把 K expand 到相同的 num_chunks
     num_chunks = Qc.shape[1]
+    
+    # 3) Expand K to match chunk structure
     Kc = Kr.unsqueeze(1).expand(-1, num_chunks, -1, -1)  # (B*H, num_chunks, Lk, D)
 
-    # 4) 对每个 chunk 做 matmul  -> (B*H, num_chunks, 2w, Lk)
-    #    b    c    x   d       b    c    k    d
+    # 4) Compute attention scores with improved numerical stability
+    # Use more stable scaling
     scale = 1.0 / math.sqrt(D)
-    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale # (B*H, num_chunks, 2w, Lk)
-
-    # 对每个 chunk 内部掩码
-    if mask is not None:
-        mask = mask.unsqueeze(1).unsqueeze(1).expand(B, H, Lq, Lk)
-        mask_r = mask.reshape(B*H, Lq, Lk)
-        chunk_mask = _chunk(mask_r, w) # (B*H, num_chunks, 2w, Lk)
-        attn_chunk = attn_chunk.masked_fill(chunk_mask==0, value=float('-inf'))
-    attn_chunk = F.softmax(attn_chunk, dim=(1,2)) # (B*H, num_chunks, 2w, Lk)
-    unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq) # (B, H, Lq, Lk)
     
-    # chunk value and weight each chunk by corresponding attn
-    Vr = V.reshape(B*H, Lk, D)
-    Vc = Vr.unsqueeze(1).expand(-1, num_chunks, -1, -1)  # (B*H, num_chunks, Lk, D)
-    output = torch.einsum('bcxk,bckd->bcxd', (attn_chunk, Vc)) # (B*H, num_chunks, 2w, D)
-    unchunk_output = _unchunk(output, w=w, B=B, H=H, Lq=Lq)
+    # Compute attention scores
+    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale # (B*H, num_chunks, 2w, Lk)
+    
+    # Clip attention scores to prevent overflow
+    attn_chunk = torch.clamp(attn_chunk, min=-max_attn_value, max=max_attn_value)
 
-    return (unchunk_output, unchunk_attn)
+    # Apply attention mask if provided
+    if mask is not None:
+        # Expand mask to match attention dimensions (B,H,Lq,Lk)
+        if mask.dim() == 2:           # (B, Lk) key mask
+            mask = mask[:, None, None, :].expand(B, H, Lq, Lk)
+        elif mask.dim() == 3:         # (B, Lq, Lk)
+            mask = mask[:, None, :, :].expand(B, H, Lq, Lk)
+        mask = mask.bool()
+        mask_r = mask.reshape(B*H, Lq, Lk)
+        chunk_mask = _chunk(mask_r, w)  # (B*H, num_chunks, 2w, Lk)
+        
+        # Apply mask with large negative value (but not too large to prevent overflow)
+        mask_value = -10000.0  # More stable than -1e5
+        attn_chunk = attn_chunk.masked_fill(~chunk_mask, value=mask_value) # (B*H, num_chunks, 2w, Lk)
+
+    if use_lse:
+        # unchunk by LSE
+        unchunk_attn = _unchunk_lse_logits(attn_chunk, w=w, B=B, H=H, Lq=Lq) # (B, H, Lq, Lk)
+    else:
+        # fallback to mean unchunk
+        unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq, reduce="mean")  # (B, H, Lq, Lk)
+    
+    # print("logits stats:", unchunk_attn.min().item(), unchunk_attn.max().item())
+
+    # Apply softmax 
+    if norm_by_query:
+        attn_weights = _stable_softmax(unchunk_attn, tau=tau, dim=-2, eps=eps) # (B, H, Lq, Lk)
+    else:
+        # Enhanced numerical stability for softmax
+        attn_weights = _stable_softmax(unchunk_attn, tau=tau, dim=-1, eps=eps) # (B, H, Lq, Lk)
+    # check all zero rows
+    row_sums = attn_weights.sum(dim=-1)
+    # print("row_sums min/max:", row_sums.min().item(), row_sums.max().item())
+    
+    # Apply attention weights to values
+    output = torch.einsum('bcxk,bckd->bcxd', (attn_weights, V))  # (B, H, Lq, Lk) * (B, H, Lk, D) -> (B, H, Lq, D)
+    
+    return (output, attn_weights)
+
+
+def _stable_softmax(x, tau=0.1, dim=-1, eps=1e-8):
+    """
+    Numerically stable softmax implementation.
+    
+    Args:
+        x: input tensor
+        dim: dimension to apply softmax
+        eps: small epsilon for numerical stability
+    
+    Returns:
+        softmax output
+    """
+    if not torch.is_tensor(tau):
+        tau = torch.tensor(tau, device=x.device, dtype=x.dtype)
+    tau = tau.to(dtype=x.dtype, device=x.device)
+    # Subtract max for numerical stability
+    x_max = x.max(dim=dim, keepdim=True).values
+    
+    # Handle case where max is -inf
+    if torch.isinf(x_max).any():
+        x_max = torch.where(torch.isinf(x_max), torch.zeros_like(x_max), x_max)
+    
+    # Compute exp(x - x_max)
+    z = (x - x_max) / tau
+    exp_z = torch.exp(z).clamp(max=1e6)
+    
+    # Compute sum
+    sum_exp = exp_z.sum(dim=dim, keepdim=True).clamp_min(min=eps)
+    
+    # Return softmax
+    return exp_z / sum_exp
+
+
+def _stable_log_softmax(x, dim=-1, eps=1e-8):
+    """
+    Numerically stable log_softmax implementation.
+    
+    Args:
+        x: input tensor
+        dim: dimension to apply log_softmax
+        eps: small epsilon for numerical stability
+    
+    Returns:
+        log_softmax output
+    """
+    # Subtract max for numerical stability
+    x_max = x.max(dim=dim, keepdim=True).values
+    
+    # Handle case where max is -inf
+    if torch.isinf(x_max).any():
+        x_max = torch.where(torch.isinf(x_max), torch.zeros_like(x_max), x_max)
+    
+    # Compute x - x_max
+    x_stable = x - x_max
+    
+    # Compute log sum exp
+    log_sum_exp = torch.logsumexp(x_stable, dim=dim, keepdim=True)
+    
+    # Return log_softmax
+    return x_stable - log_sum_exp 
+
+
+def compute_attention_with_fallback(Q, K, V, mask=None, eps=1e-8):
+    """
+    Compute attention with fallback to mean pooling if numerical issues occur.
+    
+    Args:
+        Q, K, V: Query, Key, Value tensors
+        mask: Attention mask
+        eps: Small epsilon for stability
+    
+    Returns:
+        (output, attention_weights)
+    """
+    try:
+        # Try standard attention computation
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(Q.size(-1))
+        
+        if mask is not None:
+            scores = scores.masked_fill(mask == 0, -1e4)
+        
+        attention_weights = F.softmax(scores, dim=-1)
+        output = torch.matmul(attention_weights, V)
+        
+        return output, attention_weights
+        
+    except (RuntimeError, ValueError) as e:
+        print(f"Attention computation failed: {e}. Using fallback.")
+        
+        # Fallback: mean pooling
+        if mask is not None:
+            V_masked = V * mask.unsqueeze(-1)
+            output = V_masked.sum(dim=-2) / (mask.sum(dim=-1, keepdim=True) + eps)
+        else:
+            output = V.mean(dim=-2)
+        
+        # Create uniform attention weights
+        attention_weights = torch.ones_like(Q[..., :1, :]) / Q.size(-2)
+        
+        return output, attention_weights 
     

@@ -3,6 +3,8 @@ import torch.nn as nn
 from torch.optim import AdamW
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torch.nn.utils import clip_grad_norm_
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 
 import os
 import math
@@ -11,7 +13,7 @@ import random
 import numpy as np
 import pandas as pd
 from time import time
-import ast
+from itertools import chain
 
 from utils import load_dataset
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset, BatchStratifiedSampler, TokenClassificationDataset
@@ -19,7 +21,7 @@ from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset, BatchStrati
 from diagonaled_mm_tvm import mask_invalid_locations
 from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
-from sliding_chunks import sliding_window_cross_attention
+from sliding_chunks import sliding_window_cross_attention, check_key_mask_rows
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
@@ -79,6 +81,20 @@ class RotaryEmbedding(nn.Module):
         x2 = torch.stack([-x[..., 1::2], x[..., 0::2]], -1).reshape_as(x)
         return x * cos + x2 * sin
 
+class CrossAttnTempPerHead(nn.Module):
+    def __init__(self, num_heads, init_tau=0.5, tau_min=0.1, tau_max=2.0):
+        super().__init__()
+        self.tau_raw = nn.Parameter(torch.full((num_heads,), init_tau))
+        self.tau_min = tau_min
+        self.tau_max = tau_max
+
+    def tau(self):
+        # positive, differentiable, no in-place ops
+        tau = F.softplus(self.tau_raw) + self.tau_min   # shape [H]
+        if self.tau_max is not None:
+            tau = torch.minimum(tau, torch.tensor(self.tau_max, device=tau.device, dtype=tau.dtype))
+        return tau.view(1, -1, 1, 1)  # (1, H, 1, 1) for broadcasting
+
 class LongformerAttention(nn.Module):
     def __init__(self, 
                 embed_dim, 
@@ -122,13 +138,18 @@ class LongformerAttention(nn.Module):
         self.device = device
         self.cross_attn = cross_attn
 
+        self.temp_per_head = CrossAttnTempPerHead(num_heads=num_heads)
+
     def forward(self, 
                 x=None, # only used in self-attention 
                 query=None, # only used in cross attention when q != k
                 key=None, # only used in cross attention when k != q
                 value=None, # only used in cross attention when v != k
                 attention_mask=None,
+                query_attention_mask=None, # only used in cross attention when q != k 
                 output_attentions=False):
+
+        bad_index = check_key_mask_rows(attention_mask)
         if self.cross_attn:
             bsz, q_len, _ = query.shape
             _, k_len, _   = key.shape
@@ -137,11 +158,29 @@ class LongformerAttention(nn.Module):
             k = self.key(key)
             v = self.value(value)
 
-            q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(2, 1) # (B, L, H, D)
-            k = k.view(bsz, k_len, self.num_heads, self.head_dim).transpose(2, 1)
-            v = v.view(bsz, v_len, self.num_heads, self.head_dim).transpose(2, 1)
+            q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(2, 1).contiguous() # (B, L, H, D)
+            k = k.view(bsz, k_len, self.num_heads, self.head_dim).transpose(2, 1).contiguous()
+            v = v.view(bsz, v_len, self.num_heads, self.head_dim).transpose(2, 1).contiguous()
 
-            context_output, attn_weights = sliding_window_cross_attention(Q=q, K=k, V=v, w=self.attention_window, mask=attention_mask) # (B, H, Lq, D)
+            q = self.rotary(q)
+            k = self.rotary(k)
+
+            if query_attention_mask is not None:
+                assert attention_mask.shape == (bsz, k_len)
+                assert query_attention_mask.shape == (bsz, q_len)
+                attention_mask = (attention_mask > 0) # bool
+                query_attention_mask = (query_attention_mask > 0) # bool
+                attention_mask = attention_mask[:, None, :] & query_attention_mask[:, :, None]
+                assert attention_mask.shape == (bsz, q_len, k_len) 
+
+            tau = self.temp_per_head.tau()
+            context_output, attn_weights = sliding_window_cross_attention(
+                Q=q, K=k, V=v, 
+                w=self.attention_window, 
+                mask=attention_mask, 
+                norm_by_query=False,
+                use_lse=True,
+                tau=tau)     # (1,H,1,1)) # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
             context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
             context_output = context_output.view(B, Lq, H*D)                         # (B, Lq, embed_dim)
@@ -217,7 +256,7 @@ class LongformerAttention(nn.Module):
                 elif self.attention_mode == "sliding_chunks_no_overlap":
                     d_mask = sliding_chunks_no_overlap_matmul_qk(ones, float_mask, self.attention_window, padding_value=0)
 
-                attn_weights += d_mask
+                attn_weights += d_mask # apply per chunk mask
             assert list(attn_weights.size())[:3] == [bsz, seq_len, self.num_heads]
             assert attn_weights.size(dim=3) in [self.attention_window * 2 + 1, self.attention_window * 3]
 
@@ -516,6 +555,7 @@ class CrossAttentionPredictor(nn.Module):
         self.device = device
         self.sn_embedding = nn.Embedding(vocab_size, embed_dim)
         self.cnn_embedding = CNNTokenization(embed_dim)
+        self.ln_merge = nn.LayerNorm(embed_dim)
         # self.mirna_positional_embedding = AdditivePositionalEncoding(max_len=mirna_max_len, d_model=embed_dim)
         # self.mrna_positional_embedding = AdditivePositionalEncoding(max_len=mrna_max_len, d_model=embed_dim)
         self.mirna_encoder = TransformerEncoder(
@@ -555,6 +595,7 @@ class CrossAttentionPredictor(nn.Module):
                 window_size=window_size, 
                 autoregressive=False,
                 layer_id=None,
+                max_seq_len=mrna_max_len,
                 dropout=dropout_rate, 
                 device=device,
                 cross_attn=True
@@ -592,9 +633,11 @@ class CrossAttentionPredictor(nn.Module):
         
         # add N-gram CNN-encoded embedding
         mirna_cnn_embedding = self.cnn_embedding(mirna_sn_embedding.transpose(-1, -2)) # (batch_size, embed_dim, mirna_len)
-        mrna_cnn_embedding = self.cnn_embedding(mrna_sn_embedding.transpose(-1, -2))  # (batch_size, embed_dim, mrna_len)
-        mirna_embedding = mirna_sn_embedding + mirna_cnn_embedding # (batch_size, mirna_len, embed_dim)
-        mrna_embedding = mrna_sn_embedding + mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
+        mrna_cnn_embedding  = self.cnn_embedding(mrna_sn_embedding.transpose(-1, -2))  # (batch_size, embed_dim, mrna_len)
+        mirna_embedding     = mirna_sn_embedding + mirna_cnn_embedding # (batch_size, mirna_len, embed_dim)
+        mrna_embedding      = mrna_sn_embedding + mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
+        mirna_embedding     = self.ln_merge(mirna_embedding) # normalize across features
+        mrna_embedding      = self.ln_merge(mrna_embedding)
 
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
         mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
@@ -605,6 +648,7 @@ class CrossAttentionPredictor(nn.Module):
                 key=mirna_embedding,
                 value=mirna_embedding,
                 attention_mask=mirna_mask,
+                query_attention_mask=mrna_mask,
             )[0]
             self.cross_attn_output = z
         else: 
@@ -659,6 +703,8 @@ class QuestionAnsweringModel(nn.Module):
                 device: str=None,
                 epochs:int=100,
                 embed_dim=256,
+                num_heads=2,
+                num_layers=2,
                 ff_dim:int=512,
                 batch_size:int=32,
                 lr=0.001,
@@ -680,6 +726,7 @@ class QuestionAnsweringModel(nn.Module):
         else:
             self.device = device
         self.epochs = epochs
+        self.embed_dim = embed_dim
         self.ff_dim = ff_dim
         self.batch_size = batch_size
         self.lr = lr
@@ -690,6 +737,8 @@ class QuestionAnsweringModel(nn.Module):
             self.predictor = CrossAttentionPredictor(mrna_max_len=mrna_max_len,
                                                     mirna_max_len=mirna_max_len,
                                                     embed_dim = embed_dim,
+                                                    num_heads=num_heads,
+                                                    num_layers=num_layers,
                                                     ff_dim = ff_dim,
                                                     hidden_sizes = [ff_dim, ff_dim],
                                                     device=self.device,
@@ -756,9 +805,11 @@ class QuestionAnsweringModel(nn.Module):
               optimizer, 
               device,
               epoch,
+              scheduler=None,
               accumulation_step=1,
               alpha1=1,
-              alpha2=0.75):
+              alpha2=0.75,
+              trainable_params=None):
         '''
         Training loop
         '''
@@ -815,10 +866,13 @@ class QuestionAnsweringModel(nn.Module):
             loss = loss / accumulation_step
             loss.backward()
             bs = batch["mrna_input_ids"].size(0)
+            trainable_params = model.parameters() if trainable_params is None else trainable_params
             if accumulation_step != 1:
                 loss_list.append(loss.item())
                 if (batch_idx + 1) % accumulation_step == 0:
+                    clip_grad_norm_(trainable_params, max_norm=1.0)
                     optimizer.step()
+                    scheduler.step()
                     optimizer.zero_grad()
                     print(
                         f"Train Epoch: {epoch} "
@@ -829,7 +883,9 @@ class QuestionAnsweringModel(nn.Module):
                     )
                     loss_list = []
             else:
+                clip_grad_norm_(trainable_params, max_norm=1.0)
                 optimizer.step()
+                scheduler.step()
                 optimizer.zero_grad()
                 print(
                     f"Train Epoch: {epoch} "
@@ -843,7 +899,9 @@ class QuestionAnsweringModel(nn.Module):
             total_loss += loss.item() * accumulation_step
         # After the loop, if gradients remain (for non-divisible number of batches)
         if (batch_idx + 1) % accumulation_step != 0:
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad()
         avg_loss = total_loss / len(dataloader)
         return avg_loss
@@ -1357,36 +1415,58 @@ class QuestionAnsweringModel(nn.Module):
                     for p in model.predictor.binding_output.parameters():
                         p.requires_grad = False
 
-                trainable_params = [p for p in model.parameters() if p.requires_grad]
-                optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-3)
+            decay, no_decay = [], []
+            for n,p in model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                (no_decay if ('tau' in n) else decay).append(p)
 
-                start    = time()
-                count    = 0
-                patience = 10
-                best_binding_acc = 0
-                best_exact_match = 0
-                best_f1_score    = 0
-                best_composite_metric = 0
-                model_checkpoints_dir = os.path.join(
-                    PROJ_HOME, 
-                    "checkpoints", 
-                    "TargetScan", 
-                    "TwoTowerTransformer", 
-                    "Longformer",
-                    str(self.mrna_max_len),
+            params_group = [{'params': decay, 'weight_decay': 1e-2},
+                                {'params': no_decay, 'weight_decay': 0.0}]
+
+            optimizer = AdamW(params_group, lr=self.lr)
+            trainable_params = list(chain.from_iterable(g['params'] for g in optimizer.param_groups))
+
+            total_steps   = math.ceil(len(train_loader) * self.epochs / accumulation_step)
+            warmup_steps  = int(0.05 * total_steps)  # 5% warmup (3–5% is typical)
+            eta_min       = 3e-5                     # final floor
+
+            warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_steps)
+            cosine = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=eta_min)
+            scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
+
+            start    = time()
+            count    = 0
+            patience = 10
+            best_binding_acc = 0
+            best_exact_match = 0
+            best_f1_score    = 0
+            best_composite_metric = 0
+            model_checkpoints_dir = os.path.join(
+                PROJ_HOME, 
+                "checkpoints", 
+                "TargetScan", 
+                "TwoTowerTransformer", 
+                "Longformer",
+                str(self.mrna_max_len),
+                f"embed={self.embed_dim}d",
+                "norm_by_key",
+                "LSE",
+            )
+            os.makedirs(model_checkpoints_dir, exist_ok=True)
+            for epoch in range(self.epochs):
+                # TRAINING
+                train_loss = self.train_loop(
+                    model=model,
+                    dataloader=train_loader,
+                    loss_fn=loss_fn,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    device=self.device,
+                    epoch=epoch,
+                    accumulation_step=accumulation_step,
+                    trainable_params=trainable_params,
                 )
-                os.makedirs(model_checkpoints_dir, exist_ok=True)
-                for epoch in range(self.epochs):
-                    # TRAINING
-                    train_loss = self.train_loop(
-                        model=model,
-                        dataloader=train_loader,
-                        loss_fn=loss_fn,
-                        optimizer=optimizer,
-                        device=self.device,
-                        epoch=epoch,
-                        accumulation_step=accumulation_step,
-                    )
 
                     # EVALUATION
                     eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(
@@ -1395,20 +1475,20 @@ class QuestionAnsweringModel(nn.Module):
                         device=self.device,
                     )
 
-                    # SAFE METRIC LOGGING
-                    try:
-                        wandb.log({
-                            "epoch": epoch,
-                            "train/loss": train_loss,
-                            "eval/loss": eval_loss,
-                            "eval/binding_accuracy": acc_binding,
-                            "eval/start_accuracy": acc_start,
-                            "eval/end_accuracy": acc_end,
-                            "eval/exact_match": exact_match,
-                            "eval/F1_score": f1
-                        }, step=epoch)
-                    except Exception as e:
-                        print(f"[W&B] log failed at epoch {epoch}: {e}")
+                # SAFE METRIC LOGGING
+                try:
+                    wandb.log({
+                        "epoch": epoch,
+                        "train/loss": train_loss,
+                        "eval/loss": eval_loss,
+                        "eval/binding accuracy": acc_binding,
+                        "eval/start accuracy": acc_start,
+                        "eval/end accuracy": acc_end,
+                        "eval/exact match": exact_match,
+                        "eval/F1 score": f1
+                    }, step=epoch)
+                except Exception as e:
+                    print(f"[W&B] log failed at epoch {epoch}: {e}")
 
                     # CHECK FOR IMPROVEMENT
                     if self.predict_binding and self.predict_span:
@@ -1427,16 +1507,16 @@ class QuestionAnsweringModel(nn.Module):
                         best_exact_match      = exact_match   if self.predict_span    else best_exact_match
                         count = 0
 
-                        # save checkpoint
-                        ckpt_name = (
-                            f"best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
-                            if (self.predict_binding and self.predict_span)
-                            else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
-                            if self.predict_binding
-                            else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
-                        )
-                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                        torch.save(model.state_dict(), ckpt_path)
+                    # save checkpoint
+                    ckpt_name = (
+                        f"tau_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                        if (self.predict_binding and self.predict_span)
+                        else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                        if self.predict_binding
+                        else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
+                    )
+                    ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                    torch.save(model.state_dict(), ckpt_path)
 
                         # create and log artifact with alias
                         model_art = wandb.Artifact(
@@ -1455,10 +1535,10 @@ class QuestionAnsweringModel(nn.Module):
                         )
                         model_art.add_file(ckpt_path)
 
-                        try:
-                            run.log_artifact(model_art, aliases=["major_mean_run"])
-                        except Exception as e:
-                            print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+                    try:
+                        run.log_artifact(model_art, aliases=["test_lse_run"])
+                    except Exception as e:
+                        print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
 
                     else:
                         count += 1
@@ -1477,20 +1557,27 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_multiseeds_random_samples.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_multiseeds_random_samples.csv")
+    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start_random_samples.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start_random_samples.csv")
+    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=1,
+                                   epochs=30,
                                    embed_dim=1024,
-                                   ff_dim=2048,
+                                   num_heads=8,
+                                   num_layers=4,
+                                   ff_dim=4096,
                                    batch_size=32,
                                    lr=3e-5,
-                                   seed=54,
-                                   predict_span=False,
+                                   seed=10020,
+                                   predict_span=True,
                                    predict_binding=True,
                                    use_longformer=True)
+    # total_params = sum(param.numel() for param in model.parameters())
+    # print(f"Total Parameters: {total_params}")
+    # trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # print(f"Total trainable parameters = ", len(trainable_params))
     model.run(model=model,
               train_path=train_datapath,
               valid_path=valid_datapath,
