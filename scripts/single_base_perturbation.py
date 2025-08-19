@@ -89,13 +89,14 @@ def load_model(ckpt_name,
     # load model checkpoint
     # model = mirLM.create_model(**args_dict)
     model = tm.QuestionAnsweringModel(**args_dict)
-    ckpt_path = os.path.join(
-                            PROJ_HOME, 
+    ckpt_path = os.path.join(PROJ_HOME, 
                             "checkpoints", 
                             "TargetScan/TwoTowerTransformer",
                             "Longformer",
-                            str(520),
-                            # str(args_dict["mrna_max_len"]), 
+                            str(model.mrna_max_len),
+                            f"embed={model.embed_dim}d",
+                            "norm_by_key", 
+                            "LSE",
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -214,7 +215,7 @@ def viz_sequence(seq,
 
         # Style the plot
         logo.style_spines(visible=False)
-        ax.set_ylim(0.0, 1.0)
+        # ax.set_ylim(0.0, 1.0)
         ax.set_xticks(range(len(seq)))
         ax.set_xticklabels(list(seq))
         ax.tick_params(axis='x', labelsize=12)
@@ -266,16 +267,18 @@ def main():
                  "mrna_max_len": mrna_max_len,
                  "device": device,
                  "embed_dim": 1024,
-                 "ff_dim": 2048,
+                 "num_heads": 8,
+                 "num_layers": 4,
+                 "ff_dim": 4096,
                  "predict_span": predict_span,
                  "predict_binding": predict_binding,
-                 "use_longformer": True}
+                 "use_longformer":True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.1317_0.6663_epoch0.pth",
+    model = load_model(ckpt_name="tau_best_composite_0.7305_0.9115_epoch20.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
-                                 "TargetScan_train_30_randomized_start.csv")
+                                 "TargetScan_train_500_randomized_start.csv")
     test_data = pd.read_csv(test_data_path)
     mRNA_seqs = test_data[["mRNA sequence"]].values
     miRNA_seqs = test_data[["miRNA sequence"]].values
@@ -285,7 +288,7 @@ def main():
     os.makedirs(save_plot_dir, exist_ok=True)
 
     # Test sequence
-    i=17
+    i=8
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]
@@ -328,7 +331,8 @@ def main():
                  miRNA_id = miRNA_id,
                  mRNA_id = mRNA_id,
                  seed_start = seed_start,
-                 seed_end = seed_end,) 
+                 seed_end = seed_end,
+                 plot_max_only=True) 
 
     # perturb mRNA sequence
     attn_deltas = []
@@ -365,7 +369,7 @@ def main():
     
     # print("Max in delta = ", max(deltas))
     print("plot changes on base logos ...", flush=True)
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_query.png")
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_key_LSE_tau.png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
                 #  emb_changes=emb_deltas,
@@ -373,7 +377,7 @@ def main():
                  seed_start=seed_start,
                  seed_end=seed_end,
                  base_ax=ax_attn,
-                 figsize=(35, 9),
+                 figsize=(45, 12),
                  file_name=file_path)
 
 if __name__ == '__main__':

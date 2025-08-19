@@ -120,7 +120,7 @@ def plot_heatmap(model,
     
         fig, ax = plt.subplots(nrows=1, ncols=1, figsize=figsize)
 
-        a, b = 0.1, attn_weights.max().item()
+        a, b = 0.02, attn_weights.max().item()
         norm = colors.Normalize(vmin=a, vmax=b)
         # plot attn weights for each head
         # for h in range(attn_weights.shape[0]):
@@ -179,7 +179,7 @@ def plot_heatmap(model,
         attn_weights = attn_weights.transpose(1,2) # (H, mirna, mrna)
         fig, axs = plt.subplots(nrows=attn_weights.shape[0], ncols=1, figsize=figsize)
 
-        a, b = 0.1, attn_weights.max().item()
+        a, b = 0.02, 0.2#attn_weights.max().item()
         norm = colors.Normalize(vmin=a, vmax=b)
         # plot attn weights for each head
         for h, ax in zip(range(attn_weights.shape[0]), axs):
@@ -241,7 +241,7 @@ def plot_heatmap(model,
     if file_name is not None:
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
     else:
-        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_key_LSE.png")
+        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_key_LSE_max.png")
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
         print(f"Heatmap is saved to {file_name}")
     return fig, ax
@@ -275,7 +275,7 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    model = load_model(ckpt_name="best_composite_0.7901_0.8728_epoch2.pth",
+    model = load_model(ckpt_name="tau_best_composite_0.7305_0.9115_epoch20.pth",
                        **args_dict)
 
     # Testing the first sequence
@@ -330,7 +330,8 @@ def main():
                  mRNA_id = mRNA_ID,
                  seed_start = seed_start,
                  seed_end = seed_end,
-                 figsize=(35, 45),
+                 figsize=(45, 7),
+                 plot_max_only=True,
                  metrics = {"binding_prob": binding_prob, "f1": f1},
                  save_plot_dir=save_plot_dir)
     

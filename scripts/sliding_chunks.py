@@ -317,7 +317,8 @@ def _unchunk_lse_logits(logits_chunk, w, B, H, Lq, eps=1e-10):
 
 
 def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False, 
-                                  eps=1e-8, max_attn_value=1e6, use_lse=False):
+                                  eps=1e-8, max_attn_value=1e6, use_lse=False,
+                                  tau=0.1):
     """
     Enhanced sliding window cross-attention with improved numerical stability.
     
@@ -398,10 +399,10 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
 
     # Apply softmax 
     if norm_by_query:
-        attn_weights = _stable_softmax(unchunk_attn, dim=-2, eps=eps) # (B, H, Lq, Lk)
+        attn_weights = _stable_softmax(unchunk_attn, tau=tau, dim=-2, eps=eps) # (B, H, Lq, Lk)
     else:
         # Enhanced numerical stability for softmax
-        attn_weights = _stable_softmax(unchunk_attn, dim=-1, eps=eps) # (B, H, Lq, Lk)
+        attn_weights = _stable_softmax(unchunk_attn, tau=tau, dim=-1, eps=eps) # (B, H, Lq, Lk)
     # check all zero rows
     row_sums = attn_weights.sum(dim=-1)
     # print("row_sums min/max:", row_sums.min().item(), row_sums.max().item())
@@ -412,7 +413,7 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
     return (output, attn_weights)
 
 
-def _stable_softmax(x, dim=-1, eps=1e-8):
+def _stable_softmax(x, tau=0.1, dim=-1, eps=1e-8):
     """
     Numerically stable softmax implementation.
     
@@ -424,6 +425,9 @@ def _stable_softmax(x, dim=-1, eps=1e-8):
     Returns:
         softmax output
     """
+    if not torch.is_tensor(tau):
+        tau = torch.tensor(tau, device=x.device, dtype=x.dtype)
+    tau = tau.to(dtype=x.dtype, device=x.device)
     # Subtract max for numerical stability
     x_max = x.max(dim=dim, keepdim=True).values
     
@@ -432,19 +436,14 @@ def _stable_softmax(x, dim=-1, eps=1e-8):
         x_max = torch.where(torch.isinf(x_max), torch.zeros_like(x_max), x_max)
     
     # Compute exp(x - x_max)
-    exp_x = torch.exp(x - x_max)
-    
-    # Handle overflow in exp
-    exp_x = torch.clamp(exp_x, max=1e6)
+    z = (x - x_max) / tau
+    exp_z = torch.exp(z).clamp(max=1e6)
     
     # Compute sum
-    sum_exp = exp_x.sum(dim=dim, keepdim=True)
-    
-    # Handle zero sum case
-    sum_exp = torch.clamp(sum_exp, min=eps)
+    sum_exp = exp_z.sum(dim=dim, keepdim=True).clamp_min(min=eps)
     
     # Return softmax
-    return exp_x / sum_exp
+    return exp_z / sum_exp
 
 
 def _stable_log_softmax(x, dim=-1, eps=1e-8):

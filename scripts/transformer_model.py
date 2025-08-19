@@ -13,6 +13,7 @@ import random
 import numpy as np
 import pandas as pd
 from time import time
+from itertools import chain
 
 from utils import load_dataset
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset, BatchStratifiedSampler
@@ -80,6 +81,20 @@ class RotaryEmbedding(nn.Module):
         x2 = torch.stack([-x[..., 1::2], x[..., 0::2]], -1).reshape_as(x)
         return x * cos + x2 * sin
 
+class CrossAttnTempPerHead(nn.Module):
+    def __init__(self, num_heads, init_tau=0.5, tau_min=0.1, tau_max=2.0):
+        super().__init__()
+        self.tau_raw = nn.Parameter(torch.full((num_heads,), init_tau))
+        self.tau_min = tau_min
+        self.tau_max = tau_max
+
+    def tau(self):
+        # positive, differentiable, no in-place ops
+        tau = F.softplus(self.tau_raw) + self.tau_min   # shape [H]
+        if self.tau_max is not None:
+            tau = torch.minimum(tau, torch.tensor(self.tau_max, device=tau.device, dtype=tau.dtype))
+        return tau.view(1, -1, 1, 1)  # (1, H, 1, 1) for broadcasting
+
 class LongformerAttention(nn.Module):
     def __init__(self, 
                 embed_dim, 
@@ -123,6 +138,8 @@ class LongformerAttention(nn.Module):
         self.device = device
         self.cross_attn = cross_attn
 
+        self.temp_per_head = CrossAttnTempPerHead(num_heads=num_heads)
+
     def forward(self, 
                 x=None, # only used in self-attention 
                 query=None, # only used in cross attention when q != k
@@ -156,12 +173,14 @@ class LongformerAttention(nn.Module):
                 attention_mask = attention_mask[:, None, :] & query_attention_mask[:, :, None]
                 assert attention_mask.shape == (bsz, q_len, k_len) 
 
+            tau = self.temp_per_head.tau()
             context_output, attn_weights = sliding_window_cross_attention(
                 Q=q, K=k, V=v, 
                 w=self.attention_window, 
                 mask=attention_mask, 
                 norm_by_query=False,
-                use_lse=True) # (B, H, Lq, D)
+                use_lse=True,
+                tau=tau)     # (1,H,1,1)) # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
             context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
             context_output = context_output.view(B, Lq, H*D)                         # (B, Lq, embed_dim)
@@ -1080,7 +1099,7 @@ class QuestionAnsweringModel(nn.Module):
                     "epochs": self.epochs,
                     "learning rate": self.lr,
                 },
-                tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key","LSE"],
+                tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key", "LSE", "tau-per-head"],
                 save_code=True,
                 job_type="train"
             )
@@ -1120,8 +1139,17 @@ class QuestionAnsweringModel(nn.Module):
                 for p in model.predictor.binding_output.parameters():
                     p.requires_grad = False
 
-            trainable_params = [p for p in model.parameters() if p.requires_grad]
-            optimizer = AdamW(trainable_params, lr=self.lr, weight_decay=1e-2)
+            decay, no_decay = [], []
+            for n,p in model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                (no_decay if ('tau' in n) else decay).append(p)
+
+            params_group = [{'params': decay, 'weight_decay': 1e-2},
+                                {'params': no_decay, 'weight_decay': 0.0}]
+
+            optimizer = AdamW(params_group, lr=self.lr)
+            trainable_params = list(chain.from_iterable(g['params'] for g in optimizer.param_groups))
 
             total_steps   = math.ceil(len(train_loader) * self.epochs / accumulation_step)
             warmup_steps  = int(0.05 * total_steps)  # 5% warmup (3–5% is typical)
@@ -1205,7 +1233,7 @@ class QuestionAnsweringModel(nn.Module):
 
                     # save checkpoint
                     ckpt_name = (
-                        f"50k_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                        f"tau_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
                         if (self.predict_binding and self.predict_span)
                         else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
                         if self.predict_binding
@@ -1257,7 +1285,7 @@ if __name__ == "__main__":
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=20,
+                                   epochs=30,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
@@ -1270,6 +1298,8 @@ if __name__ == "__main__":
                                    use_longformer=True)
     # total_params = sum(param.numel() for param in model.parameters())
     # print(f"Total Parameters: {total_params}")
+    # trainable_params = [p for p in model.parameters() if p.requires_grad]
+    # print(f"Total trainable parameters = ", len(trainable_params))
     model.run(model=model,
               train_path=train_datapath,
               valid_path=valid_datapath,
