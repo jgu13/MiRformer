@@ -1,3 +1,4 @@
+import token
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,7 +19,8 @@ from Attention_regularization import kl_diag_seed_loss
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset
 from utils import load_dataset
 
-PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
 
 def cosine_decay(total, step, min_factor=0.1):
     """
@@ -59,9 +61,9 @@ def pretrain_loop(
         )
 
         # === MLM loss (both) ===
-        loss1 = loss_stage1_baseline(pretrain_wrapper, batch, pad_id, mask_id)  
-        loss2 = loss_stage2_seed_mrna(pretrain_wrapper, batch, mask_id, vocab_size)
-        loss3 = loss_stage3_bispan(pretrain_wrapper, batch, pad_id, mask_id, vocab_size)
+        loss1 = loss_stage1_baseline(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)  
+        loss2 = loss_stage2_seed_mrna(wrapper=pretrain_wrapper, batch=batch, mask_id=mask_id, vocab_size=vocab_size)
+        loss3 = loss_stage3_bispan(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)
         loss_mlm = loss1 + loss2 + loss3
 
         # === KL regularization on seed rows (positives only) ===
@@ -156,10 +158,10 @@ def run(epochs,
                                 model_max_length=mrna_max_len,
                                 padding_side="right")
     
-    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start_random_samples.csv")
-    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start_random_samples.csv")
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start.csv")
 
-    print(f"   Loading training data from: {train_path}")
+    print(f"Loading training data from: {train_path}")
     ds_train = QuestionAnswerDataset(data=load_dataset(train_path, sep=','),
                                     mrna_max_len=mrna_max_len,
                                     mirna_max_len=mirna_max_len,
@@ -167,7 +169,7 @@ def run(epochs,
                                     seed_start_col="seed start",
                                     seed_end_col="seed end",)
     
-    print(f"   Loading validation data from: {valid_path}")
+    print(f"Loading validation data from: {valid_path}")
     ds_val = QuestionAnswerDataset(data=load_dataset(valid_path, sep=','),
                                   mrna_max_len=mrna_max_len,
                                   mirna_max_len=mirna_max_len,
@@ -178,9 +180,10 @@ def run(epochs,
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(ds_val, batch_size=batch_size, shuffle=False)
     
-    print("4. Creating model...")
+    print("Creating model...")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
+                                   device=device,
                                    epochs=epochs,
                                    embed_dim=embed_dim,
                                    num_heads=num_heads,
@@ -193,7 +196,7 @@ def run(epochs,
                                    predict_binding=True,
                                    use_longformer=True)
     
-    print("5. Creating pretrain wrapper...")
+    print("Creating pretrain wrapper...")
     pretrain_wrapper = PairedPretrainWrapper(
                         base_model = model, 
                         vocab_size = tokenizer.vocab_size, 
@@ -202,24 +205,24 @@ def run(epochs,
 
     optimizer = AdamW(pretrain_wrapper.parameters(), lr=lr)
 
-    # wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-    # run = wandb.init(
-    #     project="mirna-pretraining",
-    #     name=f"Pretrain:{mrna_max_len}-epoch:{epochs}", 
-    #     config={
-    #         "batch_size": 32 * accumulation_step,
-    #         "epochs": epochs,
-    #         "learning_rate": lr,
-    #     },
-    #     tags=["MLM", "Attn_reg"],
-    #     save_code=True,
-    #     job_type="train"
-    # )
+    wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+    run = wandb.init(
+        project="mirna-pretraining",
+        name=f"Pretrain:{mrna_max_len}-epoch:{epochs}", 
+        config={
+            "batch_size": batch_size * accumulation_step,
+            "epochs": epochs,
+            "learning_rate": lr,
+        },
+        tags=["Pre-train", "MLM", "Attn_reg"],
+        save_code=True,
+        job_type="train"
+    )
 
     model.to(device)
     pretrain_wrapper.to(device)
     
-    print("8. Setting up training...")
+    print("Setting up training...")
     start = time()
     patience = 10
     best_accuracy = 0
@@ -244,7 +247,7 @@ def run(epochs,
     cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
 
-    print("10. Starting training loop...")
+    print("Starting training loop...")
     for epoch in range(epochs):
         print(f"   Starting epoch {epoch+1}/{epochs}")
         train_loss = pretrain_loop(
@@ -275,12 +278,12 @@ def run(epochs,
             pad_id=tokenizer.pad_token_id,
             mask_id=tokenizer.mask_token_id,
         )
-        # wandb.log({
-        #             "epoch": epoch,
-        #             "train/loss": train_loss,
-        #             "eval/loss": eval_loss,
-        #             "eval/token accuracy": acc
-        #         }, step=epoch)
+        wandb.log({
+                    "epoch": epoch,
+                    "train/loss": train_loss,
+                    "eval/loss": eval_loss,
+                    "eval/token accuracy": acc
+                }, step=epoch)
         
         if acc > best_accuracy:
             best_accuracy = acc
@@ -288,19 +291,19 @@ def run(epochs,
             ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
             torch.save(model.state_dict(), ckpt_path)
 
-            # model_art = wandb.Artifact(
-            #     name="Pretrained-model",
-            #     type="model",
-            #     metadata={
-            #         "epoch": epoch,
-            #         "accuracy": best_accuracy
-            #     }
-            # )
-            # model_art.add_file(ckpt_path)
-            # try:
-            #     run.log_artifact(model_art, aliases=["best-pretrain"])
-            # except Exception as e:
-            #     print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+            model_art = wandb.Artifact(
+                name="Pretrained-model",
+                type="model",
+                metadata={
+                    "epoch": epoch,
+                    "accuracy": best_accuracy
+                }
+            )
+            model_art.add_file(ckpt_path)
+            try:
+                run.log_artifact(model_art, aliases=["best-pretrain"])
+            except Exception as e:
+                print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
         else:
             count += 1
             if count >= patience:
@@ -316,14 +319,14 @@ if __name__ == "__main__":
         device = "mps"
         print("Using MPS (Apple Silicon GPU)")
     elif torch.cuda.is_available():
-        device = "cuda:1"
+        device = "cuda:0"
         print("Using CUDA GPU")
     else:
         device = "cpu"
         print("Using CPU")
     run(epochs=1, 
         device=device, 
-        embed_dim=256,  
-        ff_dim=512,     
-        batch_size=16, 
+        embed_dim=1024,  
+        ff_dim=2048,     
+        batch_size=32, 
         accumulation_step=16)  

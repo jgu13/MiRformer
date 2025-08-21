@@ -721,7 +721,7 @@ class QuestionAnsweringModel(nn.Module):
         self.mirna_max_len = mirna_max_len
         if device is None:
             if torch.cuda.is_available():
-                self.device = "cuda:3"
+                self.device = "cuda"
             elif torch.backends.mps.is_available():
                 self.device = "mps"
             else:
