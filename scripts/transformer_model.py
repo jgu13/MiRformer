@@ -22,6 +22,7 @@ from diagonaled_mm_tvm import mask_invalid_locations
 from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
 from sliding_chunks import sliding_window_cross_attention, check_key_mask_rows
+from Attention_regularization import kl_diag_seed_loss
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
@@ -186,7 +187,7 @@ class LongformerAttention(nn.Module):
             context_output = context_output.view(B, Lq, H*D)                         # (B, Lq, embed_dim)
             context_output = self.out(context_output)                                # (B, Lq, embed_dim)
             self.last_attention = attn_weights.detach().cpu()                                      
-            return (context_output,)
+            return (context_output,attn_weights)
         else:
             hidden_states = x
             bsz, seq_len, _ = x.shape
@@ -555,7 +556,7 @@ class CrossAttentionPredictor(nn.Module):
         self.device = device
         self.sn_embedding = nn.Embedding(vocab_size, embed_dim)
         self.cnn_embedding = CNNTokenization(embed_dim)
-        self.ln_merge = nn.LayerNorm(embed_dim)
+        # self.ln_merge = nn.LayerNorm(embed_dim)
         # self.mirna_positional_embedding = AdditivePositionalEncoding(max_len=mirna_max_len, d_model=embed_dim)
         # self.mrna_positional_embedding = AdditivePositionalEncoding(max_len=mrna_max_len, d_model=embed_dim)
         self.mirna_encoder = TransformerEncoder(
@@ -636,20 +637,22 @@ class CrossAttentionPredictor(nn.Module):
         mrna_cnn_embedding  = self.cnn_embedding(mrna_sn_embedding.transpose(-1, -2))  # (batch_size, embed_dim, mrna_len)
         mirna_embedding     = mirna_sn_embedding + mirna_cnn_embedding # (batch_size, mirna_len, embed_dim)
         mrna_embedding      = mrna_sn_embedding + mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
-        mirna_embedding     = self.ln_merge(mirna_embedding) # normalize across features
-        mrna_embedding      = self.ln_merge(mrna_embedding)
+        # mirna_embedding     = self.ln_merge(mirna_embedding) # normalize across features
+        # mrna_embedding      = self.ln_merge(mrna_embedding)
 
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
         mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
         
         if self.use_longformer:
-            z = self.cross_attn_layer(
+            output = self.cross_attn_layer(
                 query=mrna_embedding,
                 key=mirna_embedding,
                 value=mirna_embedding,
                 attention_mask=mirna_mask,
                 query_attention_mask=mrna_mask,
-            )[0]
+            )
+            z = output[0]
+            attn_weights = output[1]
             self.cross_attn_output = z
         else: 
             z = self.cross_attn_layer(query=mrna_embedding, 
@@ -672,7 +675,7 @@ class CrossAttentionPredictor(nn.Module):
 
         token_classification_logits = self.token_classification_head(z_norm) # (batchsize, mrna_len, 3)
 
-        return binding_logits, token_classification_logits
+        return binding_logits, token_classification_logits, attn_weights
     
 def create_dataset(train_path, valid_path, tokenizer, mRNA_max_len):
     D_train = load_dataset(train_path, sep=',', parse_seeds=True)
@@ -733,6 +736,7 @@ class QuestionAnsweringModel(nn.Module):
         self.seed = seed
         self.predict_binding = predict_binding
         self.predict_span = predict_span
+        self.attn_cache = []
         if use_cross_attn:
             self.predictor = CrossAttentionPredictor(mrna_max_len=mrna_max_len,
                                                     mirna_max_len=mirna_max_len,
@@ -1061,7 +1065,7 @@ class QuestionAnsweringModel(nn.Module):
             for k in batch:
                 batch[k] = batch[k].to(device)
 
-            binding_logits, token_logits = model(
+            binding_logits, token_logits, attn_weights = model(
                 mirna=batch["mirna_input_ids"], 
                 mrna=batch["mrna_input_ids"],
                 mrna_mask=batch["mrna_attention_mask"],
@@ -1070,8 +1074,17 @@ class QuestionAnsweringModel(nn.Module):
 
             binding_loss = binding_loss_fn(binding_logits.squeeze(-1), batch["binding_labels"].view(-1).float())
             token_loss = token_loss_fn(token_logits.view(-1, 3), batch["labels"].view(-1)) # num_labels = 3 (B, I, O)
+            reg_loss = kl_diag_seed_loss(
+                        attn=a,
+                        seed_q_start=batch["seed_start"],
+                        seed_q_end=batch["seed_end"],
+                        q_mask=batch["mrna_attention_mask"],
+                        k_mask=batch["mirna_attention_mask"],
+                        y_pos=batch["target"],
+                        sigma=sigma,
+                        k_seed_start=1)
 
-            loss = binding_loss + token_loss
+            loss = binding_loss + token_loss + reg_loss
             loss = loss / accumulation_step
             loss.backward()
             bs = batch["mrna_input_ids"].size(0)
@@ -1468,12 +1481,12 @@ class QuestionAnsweringModel(nn.Module):
                     trainable_params=trainable_params,
                 )
 
-                    # EVALUATION
-                    eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(
-                        model=model,
-                        dataloader=val_loader,
-                        device=self.device,
-                    )
+                # EVALUATION
+                eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(
+                    model=model,
+                    dataloader=val_loader,
+                    device=self.device,
+                )
 
                 # SAFE METRIC LOGGING
                 try:
@@ -1518,22 +1531,22 @@ class QuestionAnsweringModel(nn.Module):
                     ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
                     torch.save(model.state_dict(), ckpt_path)
 
-                        # create and log artifact with alias
-                        model_art = wandb.Artifact(
-                            name=(
-                                "binding-span-model" if (self.predict_binding and self.predict_span)
-                                else "mirna-binding-model" if self.predict_binding
-                                else "mirna-span-model"
-                            ),
-                            type="model",
-                            metadata={
-                                "epoch": epoch,
-                                **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
-                                **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
-                                **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
-                            }
-                        )
-                        model_art.add_file(ckpt_path)
+                    # create and log artifact with alias
+                    model_art = wandb.Artifact(
+                        name=(
+                            "binding-span-model" if (self.predict_binding and self.predict_span)
+                            else "mirna-binding-model" if self.predict_binding
+                            else "mirna-span-model"
+                        ),
+                        type="model",
+                        metadata={
+                            "epoch": epoch,
+                            **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                            **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                            **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                        }
+                    )
+                    model_art.add_file(ckpt_path)
 
                     try:
                         run.log_artifact(model_art, aliases=["test_lse_run"])

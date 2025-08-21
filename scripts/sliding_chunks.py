@@ -248,9 +248,13 @@ def _sum_unchunk(x, w, B, H, Lq):
     unchunk = unchunk.view(B, H, Lq, d)
     return unchunk
 
-def _unchunk(x, w, B, H, Lq, reduce='mean'):
-    bsh, C, two_w, d = x.shape
-    assert Lq == (C + 1) * w
+def _unchunk(x, w, B, H, Lq, Lk, slide_on_query=True, reduce='mean'):
+    if slide_on_query:
+        bsh, C, two_w, Lk = x.shape
+        assert Lq == (C + 1) * w, f"Lq={Lq}, expected {(C+1)*w}"
+    else:
+        bsh, Lq, C, two_w = x.shape
+        assert Lk == (C + 1) * w, f"Lk={Lk}, expected {(C+1)*w}"
 
     # build indices over which to take max
     # chunk index: [0,...,C], one chunk jumps w steps to the next chunk
@@ -263,33 +267,50 @@ def _unchunk(x, w, B, H, Lq, reduce='mean'):
     pos_flat = positions.reshape(-1) # flatten positions to (C * 2w)
 
     # flatten chunks in input
-    chunks_in = x.reshape(bsh, C*two_w, d) # (bsh, C*2w, d)
+    if slide_on_query:
+        chunks_in = x.reshape(bsh, C*two_w, Lk) # (bsh, C*2w, Lk)
+    else:
+        chunks_in = x.reshape(bsh, Lq, C*two_w) # (bsh, Lq, C*2w)
 
     # build output tensor
     if reduce == 'sum' or reduce == 'mean':
-        output = torch.zeros((bsh, Lq, d), device=x.device, dtype=x.dtype) # so that values do not reduce to -inf
+        output = torch.zeros((bsh, Lq, Lk), device=x.device, dtype=x.dtype) # so that values do not reduce to -inf
     elif reduce == 'amax':
-        output = torch.full((bsh, Lq, d), fill_value=float('-inf'), device=device, dtype=chunks_in.dtype) # (bsh, (C+1)*w, d)
-    indices = pos_flat[None, :, None].expand(bsh, -1, d) # (bsh, C*2w, d)
+        output = torch.full((bsh, Lq, Lk), fill_value=float('-inf'), device=device, dtype=chunks_in.dtype) # (bsh, (C+1)*w, d)
+    if slide_on_query:
+        indices = pos_flat[None, :, None].expand(bsh, -1, Lk) # (bsh, C*2w, Lk)
+    else: 
+        indices = pos_flat[None, None, :].expand(bsh, Lq, -1) # (bsh, Lq, C*2w)
 
     # take max between values that overlaps at the same position
-    chunk_out = output.scatter_reduce_(dim=1,
-                                       index=indices,
-                                       src=chunks_in,
-                                       reduce=reduce,
-                                       include_self=False)
-    chunk_out = chunk_out.view(B, H, Lq, d)
+    if slide_on_query:
+        chunk_out = output.scatter_reduce_(dim=1,
+                                            index=indices,
+                                            src=chunks_in,
+                                            reduce=reduce,
+                                            include_self=False)
+    else:
+        chunk_out = output.scatter_reduce_(dim=2,
+                                            index=indices,
+                                            src=chunks_in,
+                                            reduce=reduce,
+                                            include_self=False)
+    chunk_out = chunk_out.view(B, H, Lq, Lk)
     return chunk_out
 
-def _unchunk_lse_logits(logits_chunk, w, B, H, Lq, eps=1e-10):
+def _unchunk_lse_logits(logits_chunk, w, B, H, Lq, Lk, slide_on_query=True, eps=1e-10):
     """
     logits_chunk: (B*H, C, 2w, Lk)  -- per-chunk attention *logits* (NOT softmaxed)
     returns:      (B, H, Lq, Lk)    -- merged logits via log-sum-exp over overlaps
 
     If average=True, returns log-mean-exp (LSE - log(count)).
     """
-    bsh, C, two_w, Lk = logits_chunk.shape
-    assert Lq == (C + 1) * w, f"Lq={Lq}, expected {(C+1)*w}"
+    if slide_on_query:
+        bsh, C, two_w, Lk = logits_chunk.shape
+        assert Lq == (C + 1) * w, f"Lq={Lq}, expected {(C+1)*w}"
+    else:
+        bsh, Lq, C, two_w = logits_chunk.shape
+        assert Lk == (C + 1) * w, f"Lk={Lk}, expected {(C+1)*w}" 
 
     device = logits_chunk.device
     # Map chunk indices (c,u) -> global query index i = c*w + u
@@ -298,18 +319,29 @@ def _unchunk_lse_logits(logits_chunk, w, B, H, Lq, eps=1e-10):
     pos    = base[:, None] + offset[None, :]                    # (C, 2w)
     idx    = pos.reshape(-1)                                    # (C*2w,)
 
-    flat = logits_chunk.reshape(bsh, C*two_w, Lk)               # (bsh, C*2w, Lk)
+    if slide_on_query:
+        flat = logits_chunk.reshape(bsh, C*two_w, Lk)           # (bsh, C*2w, Lk)
+    else:
+        flat = logits_chunk.reshape(bsh, Lq, C*two_w)           # (bsh, Lq, C*2w)
 
     # 1) max per (bsh, i, k) for numerical stability
     m = torch.full((bsh, Lq, Lk), -float('inf'), device=device, dtype=flat.dtype)
-    m.scatter_reduce_(1, idx[None, :, None].expand(bsh, -1, Lk),
-                      flat, reduce='amax', include_self=True)
+    if slide_on_query:
+        m.scatter_reduce_(1, idx[None, :, None].expand(bsh, -1, Lk),
+                        flat, reduce='amax', include_self=True)
+    else:
+        m.scatter_reduce_(2, idx[None, None, :].expand(bsh, Lq, -1),
+                        flat, reduce='amax', include_self=True)
 
     # 2) sum exp(logit - m) across overlapping contributions
     exp_acc = torch.zeros_like(m)
     # gather m back to the flat layout to align
-    m_flat = m.gather(1, idx[None, :, None].expand(bsh, -1, Lk))
-    exp_acc.scatter_add_(1, idx[None, :, None].expand(bsh, -1, Lk), torch.exp(flat - m_flat))
+    if slide_on_query:
+        m_flat = m.gather(1, idx[None, :, None].expand(bsh, -1, Lk))
+        exp_acc.scatter_add_(1, idx[None, :, None].expand(bsh, -1, Lk), torch.exp(flat - m_flat))
+    else:
+        m_flat = m.gather(2, idx[None, None, :].expand(bsh, Lq, -1))
+        exp_acc.scatter_add_(2, idx[None, None, :].expand(bsh, Lq, -1), torch.exp(flat - m_flat))
 
     # 3) LSE = m + log(sum_exp)
     merged = m + torch.log(exp_acc + eps)
@@ -341,7 +373,14 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
     B, H, Lq, D = Q.shape
     _, _, Lk, _ = K.shape
 
-    assert Lq % (2*w) == 0, f"Lq ({Lq}) must be divisible by 2*w ({2*w})"
+    slide_on_query = True
+    if Lk > Lq:
+        slide_on_query = False
+
+    if slide_on_query:
+        assert Lq % (2*w) == 0, f"Lq ({Lq}) must be divisible by 2*w ({2*w})"
+    else:
+        assert Lk % (2*w) == 0, f"Lk ({Lk}) must be divisible by 2*w ({2*w})"
     assert D > 0, "Head dimension must be positive"
     
     # Check for NaN/Inf in inputs
@@ -356,19 +395,31 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
     Qr = Q.reshape(B*H, Lq, D)   # (B*H, Lq, D)
     Kr = K.reshape(B*H, Lk, D)   # (B*H, Lk, D)
 
-    # 2) Chunk only Q for sliding window
-    Qc = _chunk(Qr, w)  # (B*H, num_chunks, 2w, D)
-    num_chunks = Qc.shape[1]
-    
-    # 3) Expand K to match chunk structure
-    Kc = Kr.unsqueeze(1).expand(-1, num_chunks, -1, -1)  # (B*H, num_chunks, Lk, D)
+    if slide_on_query:
+        # 2) Chunk only Q for sliding window
+        Qc = _chunk(Qr, w)  # (B*H, num_chunks, 2w, D)
+        num_chunks = Qc.shape[1]
+        # 3) Expand K to match chunk structure
+        Kc = Kr.unsqueeze(1).expand(-1, num_chunks, -1, -1)  # (B*H, num_chunks, Lk, D)
+
+    else:
+        # 2) Chunk only K for sliding window
+        Kc = _chunk(Kr, w) # (B*H, num_chunks, 2w, D)
+        num_chunks = Kc.shape[1] 
+        # 3) Expand Q to match chunk structure
+        Qc = Qr.unsqueeze(1).expand(-1, num_chunks, -1, -1)  # (B*H, num_chunks, Lq, D)
 
     # 4) Compute attention scores with improved numerical stability
     # Use more stable scaling
     scale = 1.0 / math.sqrt(D)
     
-    # Compute attention scores
-    attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale # (B*H, num_chunks, 2w, Lk)
+    if slide_on_query:
+        # Compute attention scores
+        attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale # (B*H, num_chunks, 2w, Lk)
+    else:
+        # Compute attention scores
+        attn_chunk = torch.einsum('bcxd,bckd->bcxk', (Qc, Kc)) * scale # (B*H, num_chunks, Lq, 2w)
+        attn_chunk = attn_chunk.permute(0, 2, 1, 3).contiguous() # (B*H, Lq, num_chunks, 2w)
     
     # Clip attention scores to prevent overflow
     attn_chunk = torch.clamp(attn_chunk, min=-max_attn_value, max=max_attn_value)
@@ -382,18 +433,23 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
             mask = mask[:, None, :, :].expand(B, H, Lq, Lk)
         mask = mask.bool()
         mask_r = mask.reshape(B*H, Lq, Lk)
-        chunk_mask = _chunk(mask_r, w)  # (B*H, num_chunks, 2w, Lk)
+        if slide_on_query:
+            chunk_mask = _chunk(mask_r, w)  # (B*H, num_chunks, 2w, Lk)
+        else:
+            mask_r = mask_r.transpose(1, 2).contiguous() # (B*H, Lk, Lq)
+            chunk_mask = _chunk(mask_r, w) # (B*H, num_chunks, 2w, Lq)
+            chunk_mask = chunk_mask.permute(0, 3, 1, 2).contiguous() # (B*H, Lq, num_chunks, 2w)
         
         # Apply mask with large negative value (but not too large to prevent overflow)
-        mask_value = -10000.0  # More stable than -1e5
-        attn_chunk = attn_chunk.masked_fill(~chunk_mask, value=mask_value) # (B*H, num_chunks, 2w, Lk)
+        mask_value = -10000.0  
+        attn_chunk = attn_chunk.masked_fill(~chunk_mask, value=mask_value) # (B*H, num_chunks, 2w, Lk) if slide on query else (B*H, Lq, num_chunks, 2w)
 
     if use_lse:
         # unchunk by LSE
-        unchunk_attn = _unchunk_lse_logits(attn_chunk, w=w, B=B, H=H, Lq=Lq) # (B, H, Lq, Lk)
+        unchunk_attn = _unchunk_lse_logits(attn_chunk, w=w, B=B, H=H, Lq=Lq, Lk=Lk, slide_on_query=slide_on_query) # (B, H, Lq, Lk)
     else:
         # fallback to mean unchunk
-        unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq, reduce="mean")  # (B, H, Lq, Lk)
+        unchunk_attn = _unchunk(attn_chunk, w=w, B=B, H=H, Lq=Lq, Lk=Lk, reduce="mean", slide_on_query=slide_on_query)  # (B, H, Lq, Lk)
     
     # print("logits stats:", unchunk_attn.min().item(), unchunk_attn.max().item())
 

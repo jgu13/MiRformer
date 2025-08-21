@@ -7,8 +7,8 @@ import numpy as np
 from sklearn.model_selection import train_test_split
 import ast
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-# PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
+# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 def get_complementary_seq(seq, mRNA):
@@ -307,9 +307,10 @@ positive_human_samples = pd.read_csv(os.path.join(data_dir, f"human_positive_sam
 negative_human_samples = pd.read_csv(os.path.join(data_dir, f"human_negative_samples_{str(window_len)}.csv"), sep='\t')
 positive_mouse_samples = pd.read_csv(os.path.join(data_dir, f"mouse_positive_samples_{str(window_len)}_randomized_start.csv"), sep='\t')
 negative_mouse_samples = pd.read_csv(os.path.join(data_dir, f"mouse_negative_samples_{str(window_len)}.csv"), sep='\t')
-samples = pd.concat([positive_human_samples, positive_mouse_samples, negative_human_samples, negative_mouse_samples], axis=0)
+samples = pd.concat([positive_human_samples, positive_mouse_samples], axis=0)
+# samples = pd.concat([positive_human_samples, positive_mouse_samples, negative_human_samples, negative_mouse_samples], axis=0)
 ds_train, ds_rem = train_test_split(samples, test_size=0.1, random_state=42, shuffle=True)
 ds_val, ds_test = train_test_split(ds_rem, test_size=0.2, shuffle=False)
-ds_train.to_csv(os.path.join(data_dir, f"TargetScan_train_{str(window_len)}_multiseeds.csv"), sep=',', index=False)
-ds_val.to_csv(os.path.join(data_dir, f"TargetScan_validation_{str(window_len)}_multiseeds.csv"), sep=',', index=False)
-ds_test.to_csv(os.path.join(data_dir, f"TargetScan_test_{str(window_len)}_multiseeds.csv"), sep=',', index=False)
+ds_train.to_csv(os.path.join(data_dir, f"Positive_primates_train_{str(window_len)}_randomized_start.csv"), sep=',', index=False)
+ds_val.to_csv(os.path.join(data_dir, f"Positive_primates_validation_{str(window_len)}_randomized_start.csv"), sep=',', index=False)
+ds_test.to_csv(os.path.join(data_dir, f"Positive_primates_test_{str(window_len)}_randomized_start.csv"), sep=',', index=False)

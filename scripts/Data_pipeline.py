@@ -394,7 +394,7 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
         
         # Tokenize mirna
         mirna_seq = mirna_seq.replace("U", "T")
-        mirna_seq = mirna_seq[::-1]
+        # mirna_seq = mirna_seq[::-1]
         mirna_encoded = self.tokenizer(
             mirna_seq,
             add_special_tokens=False,
@@ -414,8 +414,6 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
             return_attention_mask=True,
         )
 
-        # add CNN-encoded k-mer tokenization
-        
 
         mirna_ids = torch.tensor(mirna_encoded["input_ids"], dtype=torch.long)
         mirna_attn_mask = torch.tensor(mirna_encoded["attention_mask"], dtype=torch.long)
@@ -435,12 +433,12 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
       
 class TokenClassificationDataset(torch.utils.data.Dataset):
     def __init__(self, 
-                 df, 
+                 data, 
                  tokenizer, 
                  mrna_max_len: int,
                  mirna_max_len: int):
         """
-        df: pandas.DataFrame, needs to include three columns:
+        data: pandas.DataFrame, needs to include three columns:
             - "mRNA sequence": sequence string
             - "miRNA sequence": sequence string
             - "seeds": List[Tuple[int,int]], (start, end) of each seed region
@@ -451,10 +449,10 @@ class TokenClassificationDataset(torch.utils.data.Dataset):
         self.tokenizer = tokenizer
         self.mrna_max_len = mrna_max_len
         self.mirna_max_len = mirna_max_len
-        self.mrna_seqs = df["mRNA sequence"].tolist()
-        self.mirna_seqs = df["miRNA sequence"].tolist()
-        self.seed_l = df["seeds"].tolist()
-        self.labels = df["label"].tolist()
+        self.mrna_seqs = data["mRNA sequence"].tolist()
+        self.mirna_seqs = data["miRNA sequence"].tolist()
+        self.seed_l = data["seeds"].tolist()
+        self.labels = data["label"].tolist()
 
     def __len__(self):
         return len(self.mrna_seqs)
@@ -497,17 +495,15 @@ class TokenClassificationDataset(torch.utils.data.Dataset):
 
     def _make_labels(self, seq: str, seeds: list[tuple[int,int]]):
         """
-        BIO tagging: O=0, B=1, I=2; padding part is ignored with -100
+        IO tagging: O=0, I=1; padding part is ignored with -100
         seq: original sequence
         seeds: [(start,end), ...], all are indices on the sequence
         Returns a List[int] of length exactly self.max_len
         """
         lab = [0] * len(seq)
         for (s, e) in seeds:
-            if 0 <= s < len(seq):
-                lab[s] = 1
-            for i in range(s+1, min(e+1, len(seq))):
-                lab[i] = 2
+            for i in range(s, min(e+1, len(seq))):
+                lab[i] = 1
         if len(lab) >= self.mrna_max_len:
             lab = lab[:self.mrna_max_len]
         else:
