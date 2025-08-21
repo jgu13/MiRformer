@@ -108,6 +108,7 @@ def pretrain_loop(
         scheduler.step()
         optimizer.zero_grad()
     avg_loss = total_loss / len(dataloader)
+    print(f"Epoch {epoch+1} training completed with avg loss: {avg_loss:.6f}")
     return avg_loss
 
 @torch.no_grad()
@@ -126,9 +127,9 @@ def evaluate_mlm(model,
     for batch in dataloader:
         batch = {k: v.to(device) for k, v in batch.items()}         
         
-        loss1, correct1, mr_y1, mi_y1 = loss_stage1_baseline(pretrain_wrapper, batch, pad_id, mask_id, evaluate=True)
-        loss2, correct2, mr_y2 = loss_stage2_seed_mrna(pretrain_wrapper, batch, mask_id, vocab_size, evaluate=True)
-        loss3, correct3, mr_y3, mi_y3 = loss_stage3_bispan(pretrain_wrapper, batch, pad_id, mask_id, vocab_size, evaluate=True)
+        loss1, correct1, mr_y1, mi_y1 = loss_stage1_baseline(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
+        loss2, correct2, mr_y2 = loss_stage2_seed_mrna(wrapper=pretrain_wrapper, batch=batch, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
+        loss3, correct3, mr_y3, mi_y3 = loss_stage3_bispan(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
         
         total_loss += (loss1 + loss2 + loss3).item()
         total_correct += correct1 + correct2 + correct3
@@ -231,11 +232,13 @@ def run(epochs,
         PROJ_HOME, 
         "checkpoints", 
         "TargetScan", 
-        "Pretrain", 
+        "TwoTowerTransformer",
+        "Longformer", 
         str(mrna_max_len),
+        "Pretrain",
     )
     os.makedirs(model_checkpoints_dir, exist_ok=True)
-    print(f"   Checkpoint directory: {model_checkpoints_dir}")
+    print(f"Checkpoint directory: {model_checkpoints_dir}")
     
     steps_per_epoch = len(train_loader)
     updates_per_epoch = math.ceil(steps_per_epoch / accumulation_step)
@@ -266,9 +269,8 @@ def run(epochs,
             accumulation_step=accumulation_step,
             sigma=1.0,  
             )
-        print(f"   Epoch {epoch+1} training completed, loss: {train_loss:.6f}")
         
-        print(f"   Starting evaluation for epoch {epoch+1}...")
+        print(f"Starting evaluation for epoch {epoch+1}...")
         eval_loss, acc = evaluate_mlm(
             model=model,
             pretrain_wrapper=pretrain_wrapper,
@@ -324,9 +326,9 @@ if __name__ == "__main__":
     else:
         device = "cpu"
         print("Using CPU")
-    run(epochs=1, 
+    run(epochs=100, 
         device=device, 
         embed_dim=1024,  
         ff_dim=2048,     
         batch_size=32, 
-        accumulation_step=16)  
+        accumulation_step=8)  
