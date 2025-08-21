@@ -159,12 +159,15 @@ def run(epochs,
     train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start_random_samples.csv")
     valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start_random_samples.csv")
 
+    print(f"   Loading training data from: {train_path}")
     ds_train = QuestionAnswerDataset(data=load_dataset(train_path, sep=','),
                                     mrna_max_len=mrna_max_len,
                                     mirna_max_len=mirna_max_len,
                                     tokenizer=tokenizer,
                                     seed_start_col="seed start",
                                     seed_end_col="seed end",)
+    
+    print(f"   Loading validation data from: {valid_path}")
     ds_val = QuestionAnswerDataset(data=load_dataset(valid_path, sep=','),
                                   mrna_max_len=mrna_max_len,
                                   mirna_max_len=mirna_max_len,
@@ -175,6 +178,7 @@ def run(epochs,
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(ds_val, batch_size=batch_size, shuffle=False)
     
+    print("4. Creating model...")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    epochs=epochs,
@@ -188,6 +192,8 @@ def run(epochs,
                                    predict_span=True,
                                    predict_binding=True,
                                    use_longformer=True)
+    
+    print("5. Creating pretrain wrapper...")
     pretrain_wrapper = PairedPretrainWrapper(
                         base_model = model, 
                         vocab_size = tokenizer.vocab_size, 
@@ -213,6 +219,7 @@ def run(epochs,
     model.to(device)
     pretrain_wrapper.to(device)
     
+    print("8. Setting up training...")
     start = time()
     patience = 10
     best_accuracy = 0
@@ -225,6 +232,7 @@ def run(epochs,
         str(mrna_max_len),
     )
     os.makedirs(model_checkpoints_dir, exist_ok=True)
+    print(f"   Checkpoint directory: {model_checkpoints_dir}")
     
     steps_per_epoch = len(train_loader)
     updates_per_epoch = math.ceil(steps_per_epoch / accumulation_step)
@@ -236,7 +244,9 @@ def run(epochs,
     cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
 
+    print("10. Starting training loop...")
     for epoch in range(epochs):
+        print(f"   Starting epoch {epoch+1}/{epochs}")
         train_loss = pretrain_loop(
             model=model,
             pretrain_wrapper=pretrain_wrapper,
@@ -253,6 +263,9 @@ def run(epochs,
             accumulation_step=accumulation_step,
             sigma=1.0,  
             )
+        print(f"   Epoch {epoch+1} training completed, loss: {train_loss:.6f}")
+        
+        print(f"   Starting evaluation for epoch {epoch+1}...")
         eval_loss, acc = evaluate_mlm(
             model=model,
             pretrain_wrapper=pretrain_wrapper,
