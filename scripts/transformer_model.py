@@ -766,6 +766,7 @@ class CrossAttentionPredictor(nn.Module):
         
         # MIL binding head on mRNA positions (including global token at position 0)
         binding_logit, binding_aux = self.binding_head(z_norm, mrna_mask)
+        self.binding_weights = binding_aux["pos_weights"] # (batch_size, mrna_len) for visualization
 
         if self.predict_span:
             # predict start and end

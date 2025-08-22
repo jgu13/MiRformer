@@ -43,9 +43,12 @@ def predict(model,
         attention_score = attention_score.detach().cpu()
         # binding probability
         if model.predict_binding:
+            # predicted binding weights
+            binding_weights = model.predictor.binding_weights # (B, L)
+            binding_weights = binding_weights.detach().cpu()
             binding_prob = torch.nn.functional.sigmoid(binding_logits)
             binding_prob = binding_prob.detach().cpu()
-    return attention_score, binding_prob
+    return attention_score, binding_prob, binding_weights
 
 def encode_seq(model, 
                tokenizer, 
@@ -112,7 +115,8 @@ def single_base_perturbation(seq, pos):
 def viz_sequence(seq, 
                  attn_changes,
                 #  emb_changes,
-                 prob_changes,
+                 prob_changes,  
+                 weights_changes,
                  base_ax=None,             
                  seed_start=None, 
                  seed_end=None,
@@ -147,9 +151,10 @@ def viz_sequence(seq,
     attn_logo_matrix = lm.alignment_to_matrix([seq]).astype(float)
     # emb_logo_matrix  = lm.alignment_to_matrix([seq]).astype(float)
     prob_logo_matrix = lm.alignment_to_matrix([seq]).astype(float) 
+    weights_logo_matrix = lm.alignment_to_matrix([seq]).astype(float)
     # Scale the matrix by the changes
-    all_matrices = [attn_logo_matrix, prob_logo_matrix]
-    all_changes  = [attn_changes, prob_changes]
+    all_matrices = [attn_logo_matrix, prob_logo_matrix, weights_logo_matrix]
+    all_changes  = [attn_changes, prob_changes, weights_changes]
     for i, changes in enumerate(all_changes):
         logo_matrix = all_matrices[i]
         for pos, base in enumerate(seq):
@@ -202,9 +207,9 @@ def viz_sequence(seq,
         logo_axes = [logo_ax1, logo_ax2]
 
     # fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(20,8))
-    ax_titles = ["Attention\nChanges", "Probability\nChanges"]
+    ax_titles = ["Attention\nChanges", "Probability\nChanges", "Binding\nWeights"]
     for logo_matrix, ax, ax_title in zip(
-        [attn_logo_matrix, prob_logo_matrix],
+        [attn_logo_matrix, prob_logo_matrix, weights_logo_matrix],
         logo_axes,
         ax_titles):
         # Create the sequence logo
@@ -312,7 +317,7 @@ def main():
     )
 
     model.to(args_dict["device"])
-    wt_attn_score, wt_binding_prob = predict(model, **encoded)
+    wt_attn_score, wt_binding_prob, wt_binding_weights = predict(model, **encoded)
     # print("Wild-type prediction = ", wt_prob)
     
     # convert mRNA seq tokens to mRNA ids
@@ -334,11 +339,13 @@ def main():
     attn_deltas = []
     emb_deltas  = []
     prob_deltas = []
+    weights_deltas = []
     print("Start perturbing mrna ...")
     for pos in range(len(mRNA_seq)):
         attn_score_delta_list = []
         # pooled_emb_delta_list = []
         binding_prob_delta_list = []
+        binding_weights_delta_list = []
         # perturb the base 3 times and average the delta
         for _ in range(1):
             perturbed_mRNA = single_base_perturbation(seq=mRNA_seq, pos=pos)
@@ -348,19 +355,23 @@ def main():
                 mRNA_seq=perturbed_mRNA,
                 miRNA_seq=miRNA_seq,
             )
-            attn_score,  binding_prob = predict(model, **encoded)
+            attn_score,  binding_prob, binding_weights = predict(model, **encoded)
             attn_score_delta = abs(wt_attn_score - attn_score) # (L,)
             binding_prob_delta = abs(wt_binding_prob - binding_prob) 
+            binding_weights_delta = abs(wt_binding_weights - binding_weights)
             attn_score_delta_list.append(attn_score_delta)
             binding_prob_delta_list.append(binding_prob_delta)
+            binding_weights_delta_list.append(binding_weights_delta)
         # only take the change at the current position
         all_attn_score_delta = torch.stack(attn_score_delta_list, dim=0)[:, pos] # (3, L) -> (3,)
         all_binding_prob_delta = torch.stack(binding_prob_delta_list) # (3, )
+        all_binding_weights_delta = torch.stack(binding_weights_delta_list) # (3, )
         attn_delta = (all_attn_score_delta.sum(dim=0) / len(all_attn_score_delta)).item()
         prob_delta = (all_binding_prob_delta.sum(dim=0) / len(all_binding_prob_delta)).item()
+        weights_delta = (all_binding_weights_delta.sum(dim=0) / len(all_binding_weights_delta)).item()
         attn_deltas.append(attn_delta) # (seed_len, )
         prob_deltas.append(prob_delta) # (seed_len, )
-
+        weights_deltas.append(weights_delta) # (seed_len, )
     print(len(prob_deltas))
     
     # print("Max in delta = ", max(deltas))
@@ -368,6 +379,7 @@ def main():
     file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_query.png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
+                 weights_changes=weights_deltas,
                 #  emb_changes=emb_deltas,
                  prob_changes=prob_deltas,
                  seed_start=seed_start,
