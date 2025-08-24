@@ -541,7 +541,7 @@ class TransformerEncoder(nn.Module):
         return x
 
 class BindingHead(nn.Module):
-    def __init__(self, d_model, tau=0.1):
+    def __init__(self, d_model, tau=1.0):
         super().__init__()
         self.seed_scorer = nn.Linear(d_model, 1)
         self.tau = tau
