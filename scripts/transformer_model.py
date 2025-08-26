@@ -187,11 +187,6 @@ class LongformerAttention(nn.Module):
             k = self.rotary(k)
             q /= math.sqrt(self.head_dim)
             if attention_mask is not None:
-                attention_mask = torch.where(
-                    attention_mask > 0,
-                    torch.zeros_like(attention_mask),
-                    torch.full_like(attention_mask, fill_value=-10000.0)
-                )
                 key_padding_mask = attention_mask < 0
                 extra_attention_mask = attention_mask > 0
                 remove_from_windowed_attention_mask = attention_mask != 0
@@ -245,6 +240,17 @@ class LongformerAttention(nn.Module):
             assert list(attn_weights.size())[:3] == [bsz, seq_len, self.num_heads]
             assert attn_weights.size(dim=3) in [self.attention_window * 2 + 1, self.attention_window * 3]
 
+            # the extra attention
+            if extra_attention_mask is not None:
+                selected_k = k.new_zeros(bsz, max_num_extra_indices_per_batch, self.num_heads, self.head_dim)
+                selected_k[selection_padding_mask_nonzeros] = k[extra_attention_mask_nonzeros]
+                # (bsz, seq_len, num_heads, max_num_extra_indices_per_batch)
+                selected_attn_weights = torch.einsum('blhd,bshd->blhs', (q, selected_k))
+                selected_attn_weights[selection_padding_mask_zeros[0], :, :, selection_padding_mask_zeros[1]] = -10000
+                # concat to attn_weights
+                # (bsz, seq_len, num_heads, extra attention count + 2*window+1)
+                attn_weights = torch.cat((selected_attn_weights, attn_weights), dim=-1)
+
             attn_weights_float = F.softmax(attn_weights, dim=-1, dtype=torch.float32)  # use fp32 for numerical stability
             if key_padding_mask is not None:
                 # softmax sometimes inserts NaN if all positions are masked, replace them with 0
@@ -252,6 +258,15 @@ class LongformerAttention(nn.Module):
             attn_weights = attn_weights_float.type_as(attn_weights)
             attn_probs = F.dropout(attn_weights_float.type_as(attn_weights), p=self.dropout, training=self.training)
             attn = 0
+
+            if extra_attention_mask is not None:
+                selected_attn_probs = attn_probs.narrow(-1, 0, max_num_extra_indices_per_batch)
+                selected_v = v.new_zeros(bsz, max_num_extra_indices_per_batch, self.num_heads, self.head_dim)
+                selected_v[selection_padding_mask_nonzeros] = v[extra_attention_mask_nonzeros]
+                # use `matmul` because `einsum` crashes sometimes with fp16
+                # attn = torch.einsum('blhs,bshd->blhd', (selected_attn_probs, selected_v))
+                attn = torch.matmul(selected_attn_probs.transpose(1, 2), selected_v.transpose(1, 2).type_as(selected_attn_probs)).transpose(1, 2)
+                attn_probs = attn_probs.narrow(-1, max_num_extra_indices_per_batch, attn_probs.size(-1) - max_num_extra_indices_per_batch).contiguous()
 
             if self.attention_mode == "sliding_chunks":
                 attn += sliding_chunks_matmul_pv(attn_probs, v, self.attention_window)
@@ -263,6 +278,40 @@ class LongformerAttention(nn.Module):
             attn = attn.type_as(hidden_states)
             assert list(attn.size()) == [bsz, seq_len, self.num_heads, self.head_dim]
             attn = attn.reshape(bsz, seq_len, self.embed_dim).contiguous()
+
+            # For this case, we'll just recompute the attention for these indices
+            # and overwrite the attn tensor. TODO: remove the redundant computation
+            if extra_attention_mask is not None:
+                selected_hidden_states = hidden_states.new_zeros(max_num_extra_indices_per_batch, bsz, self.embed_dim)
+                selected_hidden_states[selection_padding_mask_nonzeros[::-1]] = hidden_states[extra_attention_mask_nonzeros[::-1]]
+
+                q = self.query_global(selected_hidden_states)
+                k = self.key_global(hidden_states)
+                v = self.value_global(hidden_states)
+                q /= math.sqrt(self.head_dim)
+
+                q = q.contiguous().view(max_num_extra_indices_per_batch, bsz * self.num_heads, self.head_dim).transpose(0, 1)  # (bsz*self.num_heads, max_num_extra_indices_per_batch, head_dim)
+                k = k.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)  # bsz * self.num_heads, seq_len, head_dim)
+                v = v.contiguous().view(-1, bsz * self.num_heads, self.head_dim).transpose(0, 1)  # bsz * self.num_heads, seq_len, head_dim)
+                attn_weights = torch.bmm(q, k.transpose(1, 2))
+                assert list(attn_weights.size()) == [bsz * self.num_heads, max_num_extra_indices_per_batch, seq_len]
+
+                attn_weights = attn_weights.view(bsz, self.num_heads, max_num_extra_indices_per_batch, seq_len)
+                attn_weights[selection_padding_mask_zeros[0], :, selection_padding_mask_zeros[1], :] = -10000.0
+                if key_padding_mask is not None:
+                    attn_weights = attn_weights.masked_fill(
+                        key_padding_mask.unsqueeze(1).unsqueeze(2),
+                        -10000.0,
+                    )
+                attn_weights = attn_weights.view(bsz * self.num_heads, max_num_extra_indices_per_batch, seq_len)
+                attn_weights_float = F.softmax(attn_weights, dim=-1, dtype=torch.float32)  # use fp32 for numerical stability
+                attn_probs = F.dropout(attn_weights_float.type_as(attn_weights), p=self.dropout, training=self.training)
+                selected_attn = torch.bmm(attn_probs, v)
+                assert list(selected_attn.size()) == [bsz * self.num_heads, max_num_extra_indices_per_batch, self.head_dim]
+
+                selected_attn_4d = selected_attn.view(bsz, self.num_heads, max_num_extra_indices_per_batch, self.head_dim)
+                nonzero_selected_attn = selected_attn_4d[selection_padding_mask_nonzeros[0], :, selection_padding_mask_nonzeros[1]]
+                attn[extra_attention_mask_nonzeros[::-1]] = nonzero_selected_attn.view(len(selection_padding_mask_nonzeros[0]), -1).type_as(hidden_states)
 
             context_layer = attn
             if output_attentions:
@@ -495,6 +544,30 @@ class TransformerEncoder(nn.Module):
             x = layer(x, mask)
         return x
 
+class BindingHead(nn.Module):
+    def __init__(self, d_model, tau=1.0):
+        super().__init__()
+        self.seed_scorer = nn.Linear(d_model, 1)
+        self.tau = tau
+
+    def forward(self, z_mrna, mrna_mask):
+        """
+        z_mrna: (B, Lm, D)  -- encoder/cross-attn output over mRNA tokens
+        mrna_mask: (B, Lm)  -- 1 valid, 0 pad (CLS is valid=1)
+        returns: binding_logit (B,), aux dict
+        """
+        s = self.seed_scorer(z_mrna).squeeze(-1)                 # (B, Lm)
+        s = s.masked_fill(mrna_mask == 0, -1e4)                  # never use pads
+        # LSE pooling (smooth max)
+        x = s / self.tau
+        m = x.max(dim=-1, keepdim=True).values
+        lse = m + torch.log(torch.clamp(torch.exp(x - m).sum(dim=-1, keepdim=True), min=1e-20))
+        binding_logit = (lse * self.tau).squeeze(-1)             # (B,)
+        # Optional: return attention weights over positions for visualization
+        w = torch.softmax(s / self.tau, dim=-1) * (mrna_mask > 0)
+        w = w / (w.sum(dim=-1, keepdim=True) + 1e-9)
+        return binding_logit, {"pos_weights": w, "pos_logits": s}
+
 class LinearHead(nn.Module):
     def __init__(self,
                  input_size, 
@@ -518,10 +591,24 @@ class LinearHead(nn.Module):
         return self.transform(x)
 
 class CrossAttentionPredictor(nn.Module):
+    """
+    Cross-attention predictor with MIL binding pooling for binding prediction.
+    
+    Expected input shapes:
+    - mrna_ids: (B, Lm) with Lm including the new CLS position at index 0
+    - longformer_attn_mask: (B, Lm) with {0,1,2}, position 0 is 2 (global)
+    - z_mrna (MIL input): (B, Lm, D)
+    - mrna_mask: (B, Lm) with 1 for valid tokens (including CLS), 0 for pad
+    
+    Outputs:
+    - binding_logit: (B,) - MIL binding prediction (replaces old binding_logits)
+    - binding_aux: dict with pos_weights and pos_logits for visualization
+    - start_logits, end_logits: (B, Lm) or None
+    """
     def __init__(self,  
                  mirna_max_len:int,
                  mrna_max_len:int, 
-                 vocab_size:int=12, # 7 special tokens + 5 bases
+                 vocab_size:int=13, # Fallback if tokenizer not provided (7 special + 1 MRNA_CLS + 5 bases)
                  num_layers:int=2, 
                  embed_dim:int=256, 
                  num_heads:int=2, 
@@ -537,7 +624,9 @@ class CrossAttentionPredictor(nn.Module):
         super(CrossAttentionPredictor, self).__init__()
         self.embed_dim = embed_dim
         self.dropout_rate = dropout_rate
-        self.device = device
+        self.device = device        
+            
+        # Create embedding table with correct size
         self.sn_embedding = nn.Embedding(vocab_size, embed_dim)
         self.cnn_embedding = CNNTokenization(embed_dim)
         # self.ln_merge = nn.LayerNorm(embed_dim)
@@ -595,26 +684,56 @@ class CrossAttentionPredictor(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
         self.cross_norm = nn.LayerNorm(embed_dim) # normalize over embedding dimension
         self.qa_outputs = nn.Linear(embed_dim, 2) # Linear head instead of one Linear transformation
-        self.token_classification_head = LinearHead(
-            input_size=embed_dim,
-            hidden_sizes=hidden_sizes,
-            output_size=3,
-            dropout=0.0,
-        ) # BIO
-        self.binding_output = LinearHead(
-            input_size=embed_dim, 
-            hidden_sizes=hidden_sizes,
-            output_size=n_classes,
-            dropout=dropout_rate)
+        
+        # Add MIL binding head
+        self.binding_head = BindingHead(embed_dim, tau=0.1)
+        
         self.predict_span = predict_span
         self.predict_binding = predict_binding
         self.use_longformer = use_longformer
+        
+        # Initialize the new global token embedding
+        self._init_global_token_embedding()
+    
+    def get_binding_attention_weights(self, z_mrna, mrna_mask):
+        """Get MIL binding attention weights for visualization"""
+        with torch.no_grad():
+            binding_logit, binding_aux = self.binding_head(z_mrna, mrna_mask)
+            return binding_aux["pos_weights"], binding_aux["pos_logits"]
+    
+    def _init_global_token_embedding(self):
+        """Initialize the global token embedding row with Xavier initialization"""
+        with torch.no_grad():
+            # Get the original embedding weights (excluding the new row)
+            original_weights = self.sn_embedding.weight[:-1]  # All but the last row
+            # Initialize the new row with Xavier initialization
+            nn.init.xavier_uniform_(self.sn_embedding.weight[-1:])
+            # Alternative: initialize as average of base embeddings (A, T, C, G)
+            # base_indices = [7, 8, 9, 10]  # A, T, C, G in vocab
+            # base_embeddings = self.sn_embedding.weight[base_indices]
+            # self.sn_embedding.weight[-1] = base_embeddings.mean(dim=0)
     
     def forward(self, mirna, mrna, mrna_mask, mirna_mask):
         mirna_sn_embedding = self.sn_embedding(mirna)
         # mirna_embedding = self.mirna_positional_embedding(mirna_embedding) # (batch_size, mirna_len, embed_dim)
         mrna_sn_embedding = self.sn_embedding(mrna)
-        # mrna_embedding = self.mrna_positional_embedding(mrna_embedding) # (batch_size, mrna_len, embed_dim)
+        # mrna_embedding = self.mirna_positional_embedding(mirna_embedding) # (batch_size, mrna_len, embed_dim)
+        
+        # Note: mrna should already contain the global token at position 0
+        # The global token should be prepended in the dataset preprocessing
+        
+        # Create Longformer attention mask for mRNA (position 0 is global)
+        if self.use_longformer:
+            # Longformer convention: -1=pad, 0=local, 1=global
+            # Convert from mrna_mask (0=pad, 1=valid) to Longformer format
+            lf_mask = torch.where(
+                mrna_mask > 0,
+                torch.zeros_like(mrna_mask),  # Set all valid tokens to 0 (local attention)
+                torch.full_like(mrna_mask, fill_value=-1)  # Set original 0s (pads) to -1
+            )
+            lf_mask[:, 0] = 1  # Global token at index 0 (1 = global attention)
+            # Verify global token is set
+            assert (lf_mask[:, 0] == 1).all(), "Global token not properly set in Longformer mask"
         
         # add N-gram CNN-encoded embedding
         mirna_cnn_embedding = self.cnn_embedding(mirna_sn_embedding.transpose(-1, -2)) # (batch_size, embed_dim, mirna_len)
@@ -625,7 +744,10 @@ class CrossAttentionPredictor(nn.Module):
         # mrna_embedding      = self.ln_merge(mrna_embedding)
 
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
-        mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
+        if self.use_longformer:
+            mrna_embedding = self.mrna_encoder(mrna_embedding, mask=lf_mask) # (batch_size, mrna_len, embed_dim) with global attention
+        else:
+            mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
         
         if self.use_longformer:
             output = self.cross_attn_layer(
@@ -633,10 +755,8 @@ class CrossAttentionPredictor(nn.Module):
                 key=mirna_embedding,
                 value=mirna_embedding,
                 attention_mask=mirna_mask,
-                query_attention_mask=mrna_mask,
-            )
-            z = output[0]
-            attn_weights = output[1]
+                query_attention_mask=lf_mask,  # Use Longformer mask for query (mRNA with global attention)
+            )[0]
             self.cross_attn_output = z
         else: 
             z = self.cross_attn_layer(query=mrna_embedding, 
@@ -648,19 +768,20 @@ class CrossAttentionPredictor(nn.Module):
         z_norm = self.cross_norm(z_res)
         z_norm = z_norm.masked_fill(mrna_mask.unsqueeze(-1)==0, 0) # (batch_size, mrna_len, embed_dim)
         
-        if self.predict_binding:
-            valid_counts = mrna_mask.sum(dim=1, keepdim=True) # (batch_size)
-            # avg pooling over seq_len
-            z_norm_mean = z_norm.sum(dim=1) / (valid_counts + 1e-8) # (batch_size, embed_dim)
-            # predict binding
-            binding_logits = self.binding_output(z_norm_mean) # (batchsize, 1)
+        # MIL binding head on mRNA positions (including global token at position 0)
+        binding_logit, binding_aux = self.binding_head(z_norm, mrna_mask)
+        self.binding_weights = binding_aux["pos_weights"] # (batch_size, mrna_len) for visualization
+
+        if self.predict_span:
+            # predict start and end
+            span_logits = self.qa_outputs(z_norm) # (batchsize, mrna_len, 2)
+            start_logits, end_logits = span_logits[...,0], span_logits[...,1] # (batchsize, mrna_len)
         else:
-            binding_logits = None
+            start_logits, end_logits = None, None
+        
+        # Return MIL outputs along with existing outputs
+        return binding_logit, binding_aux, start_logits, end_logits
 
-        token_classification_logits = self.token_classification_head(z_norm) # (batchsize, mrna_len, 3)
-
-        return binding_logits, token_classification_logits, attn_weights
-    
 def create_dataset(train_path, valid_path, tokenizer, mRNA_max_len):
     D_train = load_dataset(train_path, sep=',', parse_seeds=True)
     D_val = load_dataset(valid_path, sep=',', parse_seeds=True)
@@ -682,7 +803,7 @@ def create_dataset(train_path, valid_path, tokenizer, mRNA_max_len):
         mirna_max_len=mirna_max_len
     )
     return ds_train, ds_val
-
+    
 class QuestionAnsweringModel(nn.Module):
     def __init__(self,
                 mrna_max_len,
@@ -818,7 +939,7 @@ class QuestionAnsweringModel(nn.Module):
                 mirna_mask=mirna_mask,
                 mrna_mask=mrna_mask,
             )
-            binding_logits, start_logits, end_logits = outputs  # [B, L]
+            binding_logit, binding_aux, start_logits, end_logits = outputs 
                
             if self.predict_span:
                 # mask padded output in start and end logits
@@ -830,19 +951,25 @@ class QuestionAnsweringModel(nn.Module):
             span_loss    = torch.tensor(0.0, device=device)
             binding_loss = torch.tensor(0.0, device=device)
 
-            if self.predict_binding and binding_logits is not None:
+            # MIL binding loss (binding prediction)
+            binding_targets = batch["target"] # (batchsize, )
+            binding_loss_fn = nn.BCEWithLogitsLoss()
+            binding_loss = binding_loss_fn(binding_logit, binding_targets.view(-1).float())
+            
+            if self.predict_binding:
                 binding_targets = batch["target"]
+                # Use MIL binding predictions instead 
                 binding_loss_fn = nn.BCEWithLogitsLoss()
-                binding_loss    = binding_loss_fn(binding_logits.squeeze(-1), binding_targets.view(-1).float())
+                binding_loss    = binding_loss_fn(binding_logit, binding_targets.view(-1).float())
                 pos_mask        = binding_targets.view(-1).bool()
                 if self.predict_span and pos_mask.any():
                     # only loss of positive pairs are counted
                     loss_start = loss_fn(start_logits[pos_mask,], start_positions[pos_mask]) # CrossEntropyLoss expects [B, L], labels as [B]
                     loss_end   = loss_fn(end_logits[pos_mask,], end_positions[pos_mask])
                     span_loss  = 0.5 * (loss_start + loss_end)
-                    loss       = alpha1 * binding_loss + alpha2 * span_loss
+                    loss       = alpha1 * binding_loss + alpha2 * span_loss  # binding_loss is now MIL binding loss
                 else:
-                    loss       = binding_loss
+                    loss       = binding_loss  # binding_loss is now MIL binding loss
             elif self.predict_span:
                 # assume all mirna-mrna pairs are positive
                 # CrossEntropyLoss expects [B, L], labels as [B]
@@ -920,7 +1047,7 @@ class QuestionAnsweringModel(nn.Module):
                     mrna_mask=mrna_mask,
                     mirna_mask=mirna_mask,
                 )
-                binding_logits, start_logits, end_logits = outputs
+                binding_logit, binding_aux, start_logits, end_logits = outputs
 
                 if self.predict_span:
                     # mask padded mrna tokens
@@ -932,16 +1059,16 @@ class QuestionAnsweringModel(nn.Module):
                 # Compute loss
                 loss_fn = nn.CrossEntropyLoss()
                 loss    = 0.0 
-                if self.predict_binding and binding_logits is not None:
-                    # Compute binding loss if binding label is predicted
+
+                if self.predict_binding:
+                    # Compute binding loss using MIL binding predictions
                     binding_targets = batch["target"] # (batchsize, )
                     binding_loss_fn = nn.BCEWithLogitsLoss()
-                    binding_loss    = binding_loss_fn(binding_logits.squeeze(-1), 
-                                                      binding_targets.view(-1).float())
-                    # binding metric
-                    binding_probs   = F.sigmoid(binding_logits)
-                    binding_preds   = (binding_probs > 0.5).to(torch.int)
-                    all_binding_probs.extend(binding_probs.cpu())
+                    binding_loss    = binding_loss_fn(binding_logit, binding_targets.view(-1).float())
+                    loss += binding_loss
+                    # binding metric using MIL binding predictions
+                    binding_probs = torch.sigmoid(binding_logit)
+                    binding_preds = (binding_probs > 0.5).to(torch.int)
                     all_binding_preds.extend(binding_preds.cpu())
                     all_binding_labels.extend(binding_targets.view(-1).cpu())
                 else:
@@ -1004,6 +1131,7 @@ class QuestionAnsweringModel(nn.Module):
             exact_match = 0.0
             f1          = 0.0
 
+        # MIL binding accuracy
         if self.predict_binding:
             all_binding_probs  = torch.tensor(all_binding_probs, dtype=torch.float)
             all_binding_labels = torch.tensor(all_binding_labels, dtype=torch.long)
@@ -1028,7 +1156,7 @@ class QuestionAnsweringModel(nn.Module):
                 self.all_start_preds = all_start_preds.numpy()
                 self.all_end_preds = all_end_preds.numpy()
 
-        return avg_loss, acc_binding, acc_start, acc_end, exact_match, f1      
+        return avg_loss, acc_binding, acc_start, acc_end, exact_match, f1     
 
     @staticmethod 
     def seed_everything(seed):
@@ -1350,67 +1478,67 @@ class QuestionAnsweringModel(nn.Module):
                     # 2. Left join (keep all rows of D_test_w_pred)
                     D_merged = D_test_w_pred.join(D_pred_se, how='left')
 
-                    # 3. Fill missing pred start/end with -1 and convert to integer
-                    D_merged[['pred start', 'pred end']] = (
-                        D_merged[['pred start', 'pred end']]
-                        .fillna(-1)
-                        .astype(int)
-                    )
-                    res_df = D_merged
-                pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(self.mrna_max_len))
-                os.makedirs(pred_df_path, exist_ok=True)
-                res_df.to_csv(os.path.join(pred_df_path, "seed_prediction.csv"), index=False)
-                print(f"Prediction saved to {pred_df_path}")
-            else:
-                # weights and bias initialization
-                wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-                run = wandb.init(
-                    project="mirna-Question-Answering",
-                    name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-MLP_hidden:{self.ff_dim}", 
-                    config={
-                        "batch_size": self.batch_size * accumulation_step,
-                        "epochs": self.epochs,
-                        "learning rate": self.lr,
-                    },
-                    tags=["binding-span", "primates", "CNN-5-7-kernel", "sliding-local-attention", "mean_unchunk"],
-                    save_code=True,
-                    job_type="train"
+                # fll missing start/end positions with -1
+                D_merged[['pred start', 'pred end']] = (
+                    D_merged[['pred start', 'pred end']]
+                    .fillna(-1)
+                    .astype(int)
                 )
-                self.seed_everything(seed=self.seed)
-                # load dataset
-                D_train  = load_dataset(train_path, sep=',')
-                D_val    = load_dataset(valid_path, sep=',')
-                ds_train = QuestionAnswerDataset(data=D_train,
-                                                mrna_max_len=self.mrna_max_len,
-                                                mirna_max_len=self.mirna_max_len,
-                                                tokenizer=tokenizer,
-                                                seed_start_col="seed start",
-                                                seed_end_col="seed end",)
-                ds_val = QuestionAnswerDataset(data=D_val,
+                res_df = D_merged
+            pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(self.mrna_max_len))
+            os.makedirs(pred_df_path, exist_ok=True)
+            res_df.to_csv(os.path.join(pred_df_path, "seed_prediction.csv"), index=False)
+            print(f"Prediction saved to {pred_df_path}")
+        else:
+            # weights and bias initialization
+            wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+            run = wandb.init(
+                project="mirna-Question-Answering",
+                name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-MLP_hidden:{self.ff_dim}", 
+                config={
+                    "batch_size": self.batch_size * accumulation_step,
+                    "epochs": self.epochs,
+                    "learning rate": self.lr,
+                },
+                tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key","LSE","MIL"],
+                save_code=True,
+                job_type="train"
+            )
+            self.seed_everything(seed=self.seed)
+            # load dataset
+            D_train  = load_dataset(train_path, sep=',')
+            D_val    = load_dataset(valid_path, sep=',')
+            ds_train = QuestionAnswerDataset(data=D_train,
                                             mrna_max_len=self.mrna_max_len,
                                             mirna_max_len=self.mirna_max_len,
                                             tokenizer=tokenizer,
                                             seed_start_col="seed start",
                                             seed_end_col="seed end",)
-                train_sampler = BatchStratifiedSampler(labels = [example["target"].item() for example in ds_train],
-                                                       batch_size = self.batch_size)
-                train_loader = DataLoader(ds_train, 
-                                    batch_sampler=train_sampler,
+            ds_val = QuestionAnswerDataset(data=D_val,
+                                        mrna_max_len=self.mrna_max_len,
+                                        mirna_max_len=self.mirna_max_len,
+                                        tokenizer=tokenizer,
+                                        seed_start_col="seed start",
+                                        seed_end_col="seed end",)
+            train_sampler = BatchStratifiedSampler(labels = [example["target"].item() for example in ds_train],
+                                            batch_size = self.batch_size)
+            train_loader = DataLoader(ds_train, 
+                                batch_sampler=train_sampler,
+                                shuffle=False)
+            val_loader   = DataLoader(ds_val, 
+                                    batch_size=self.batch_size,
                                     shuffle=False)
-                val_loader   = DataLoader(ds_val, 
-                                        batch_size=self.batch_size,
-                                        shuffle=False)
-                loss_fn      = nn.CrossEntropyLoss()
-                model.to(self.device)
-                
-                if self.predict_binding and not self.predict_span:
-                    # freeze update of params in the span prediction head
-                    for p in model.predictor.qa_outputs.parameters():
-                        p.requires_grad = False
-                elif self.predict_span and not self.predict_binding:
-                    # freeze update of params in the binding prediction head
-                    for p in model.predictor.binding_output.parameters():
-                        p.requires_grad = False
+            loss_fn   = nn.CrossEntropyLoss()
+            model.to(self.device)
+            
+            if self.predict_binding and not self.predict_span:
+                # freeze update of params in the span prediction head
+                for p in model.predictor.qa_outputs.parameters():
+                    p.requires_grad = False
+            elif self.predict_span and not self.predict_binding:
+                # freeze update of params in the binding prediction head
+                for p in model.predictor.binding_head.parameters():
+                    p.requires_grad = False
 
             decay, no_decay = [], []
             for n,p in model.named_parameters():
@@ -1449,6 +1577,7 @@ class QuestionAnsweringModel(nn.Module):
                 f"embed={self.embed_dim}d",
                 "norm_by_key",
                 "LSE",
+                "LSE+MIL",
             )
             os.makedirs(model_checkpoints_dir, exist_ok=True)
             for epoch in range(self.epochs):
@@ -1482,7 +1611,7 @@ class QuestionAnsweringModel(nn.Module):
                         "eval/start accuracy": acc_start,
                         "eval/end accuracy": acc_end,
                         "eval/exact match": exact_match,
-                        "eval/F1 score": f1
+                        "eval/F1 score": f1,
                     }, step=epoch)
                 except Exception as e:
                     print(f"[W&B] log failed at epoch {epoch}: {e}")
@@ -1560,7 +1689,8 @@ if __name__ == "__main__":
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   epochs=30,
+                                   device="cuda:1",
+                                   epochs=40,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
