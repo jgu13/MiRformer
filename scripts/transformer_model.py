@@ -82,20 +82,6 @@ class RotaryEmbedding(nn.Module):
         x2 = torch.stack([-x[..., 1::2], x[..., 0::2]], -1).reshape_as(x)
         return x * cos + x2 * sin
 
-class CrossAttnTempPerHead(nn.Module):
-    def __init__(self, num_heads, init_tau=0.5, tau_min=0.1, tau_max=2.0):
-        super().__init__()
-        self.tau_raw = nn.Parameter(torch.full((num_heads,), init_tau))
-        self.tau_min = tau_min
-        self.tau_max = tau_max
-
-    def tau(self):
-        # positive, differentiable, no in-place ops
-        tau = F.softplus(self.tau_raw) + self.tau_min   # shape [H]
-        if self.tau_max is not None:
-            tau = torch.minimum(tau, torch.tensor(self.tau_max, device=tau.device, dtype=tau.dtype))
-        return tau.view(1, -1, 1, 1)  # (1, H, 1, 1) for broadcasting
-
 class LongformerAttention(nn.Module):
     def __init__(self, 
                 embed_dim, 
@@ -139,8 +125,6 @@ class LongformerAttention(nn.Module):
         self.device = device
         self.cross_attn = cross_attn
 
-        self.temp_per_head = CrossAttnTempPerHead(num_heads=num_heads)
-
     def forward(self, 
                 x=None, # only used in self-attention 
                 query=None, # only used in cross attention when q != k
@@ -148,7 +132,8 @@ class LongformerAttention(nn.Module):
                 value=None, # only used in cross attention when v != k
                 attention_mask=None,
                 query_attention_mask=None, # only used in cross attention when q != k 
-                output_attentions=False):
+                output_attentions=False,
+                use_cls=False):
 
         bad_index = check_key_mask_rows(attention_mask)
         if self.cross_attn:
@@ -169,19 +154,18 @@ class LongformerAttention(nn.Module):
             if query_attention_mask is not None:
                 assert attention_mask.shape == (bsz, k_len)
                 assert query_attention_mask.shape == (bsz, q_len)
+                query_attention_mask[:, 0] = 0  # mask CLS in query attention mask
                 attention_mask = (attention_mask > 0) # bool
                 query_attention_mask = (query_attention_mask > 0) # bool
                 attention_mask = attention_mask[:, None, :] & query_attention_mask[:, :, None]
-                assert attention_mask.shape == (bsz, q_len, k_len) 
+                assert attention_mask.shape == (bsz, q_len, k_len)
 
-            tau = self.temp_per_head.tau()
             context_output, attn_weights = sliding_window_cross_attention(
                 Q=q, K=k, V=v, 
                 w=self.attention_window, 
                 mask=attention_mask, 
                 norm_by_query=False,
-                use_lse=True,
-                tau=tau)     # (1,H,1,1)) # (B, H, Lq, D)
+                use_lse=True,)    # (B, H, Lq, D)
             B, H, Lq, D = context_output.shape
             context_output = context_output.permute(0, 2, 1, 3).contiguous()         # (B, Lq, H, D)
             context_output = context_output.view(B, Lq, H*D)                         # (B, Lq, embed_dim)
