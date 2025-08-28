@@ -9,27 +9,11 @@ This is heavily inspired from CanineTokenizer in transformers package.
 
 import json
 import os
-from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Union
-import torch
-import math
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import Sampler
-
-
 import random
-import numpy as np
+import torch
 from pathlib import Path
-from functools import partial
-from einops import rearrange
-from typing import Optional
-from functools import partial
-from torch import Tensor
-from torchvision.ops import StochasticDepth
-from collections import namedtuple
-from sklearn.model_selection import train_test_split
+from typing import Dict, List, Optional, Sequence, Union, Tuple
+from torch.utils.data import Sampler
 
 from transformers.tokenization_utils import AddedToken, PreTrainedTokenizer
 
@@ -60,6 +44,21 @@ class CharacterTokenizer(PreTrainedTokenizer):
         """
         self.characters = characters
         self.model_max_length = model_max_length
+        
+        # Create vocabulary BEFORE calling super().__init__() to avoid get_vocab() issues
+        self._vocab_str_to_int = {
+            "[CLS]": 0,
+            "[SEP]": 1,
+            "[BOS]": 2,
+            "[MASK]": 3,
+            "[PAD]": 4,
+            "[RESERVED]": 5,
+            "[UNK]": 6,
+            "[MRNA_CLS]": 7,
+            **{ch: i + 8 for i, ch in enumerate(characters)},
+        }
+        self._vocab_int_to_str = {v: k for k, v in self._vocab_str_to_int.items()}
+        
         bos_token = AddedToken("[BOS]", lstrip=False, rstrip=False)
         eos_token = AddedToken("[SEP]", lstrip=False, rstrip=False)
         sep_token = AddedToken("[SEP]", lstrip=False, rstrip=False)
@@ -113,6 +112,10 @@ class CharacterTokenizer(PreTrainedTokenizer):
 
     def _convert_id_to_token(self, index: int) -> str:
         return self._vocab_int_to_str[index]
+
+    def get_vocab(self) -> Dict[str, int]:
+        """Return the vocabulary as a dictionary mapping token strings to token ids."""
+        return self._vocab_str_to_int.copy()
 
     def convert_tokens_to_string(self, tokens):
         return "".join(tokens)
