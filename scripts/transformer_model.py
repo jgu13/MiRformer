@@ -864,15 +864,18 @@ class QuestionAnsweringModel(nn.Module):
         super(QuestionAnsweringModel, self).__init__()
         self.mrna_max_len = mrna_max_len
         self.mirna_max_len = mirna_max_len
-        def pick_device():
-            if torch.cuda.is_available():
-                # With Slurm, CUDA_VISIBLE_DEVICES is already set, so "cuda" == the first allowed GPU
-                return torch.device("cuda")
-            if torch.backends.mps.is_available():
-                return torch.device("mps")
-            else:
-                return torch.device("cpu")
-        self.device = pick_device()
+        if device is not None:
+            self.device = torch.device(device) if isinstance(device, str) else device
+        else:
+            def pick_device():
+                if torch.cuda.is_available():
+                    # With Slurm, CUDA_VISIBLE_DEVICES is already set, so "cuda" == the first allowed GPU
+                    return torch.device("cuda")
+                if torch.backends.mps.is_available():
+                    return torch.device("mps")
+                else:
+                    return torch.device("cpu")
+            self.device = pick_device()
         self.epochs = epochs
         self.embed_dim = embed_dim
         self.ff_dim = ff_dim

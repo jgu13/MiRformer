@@ -104,18 +104,6 @@ def pretrain_loop(
                 if scheduler is not None: scheduler.step()
                 optimizer.zero_grad()
                 
-                # Log to wandb during training
-                wandb.log({
-                    "train/batch_loss1": loss1.item(),
-                    "train/batch_loss2": loss2.item(),
-                    "train/batch_loss3": loss3.item(),
-                    "train/batch_loss_reg": loss_reg.item(),
-                    "train/batch_total_loss": loss.item(),
-                    "train/learning_rate": optimizer.param_groups[0]['lr'],
-                    "train/epoch": epoch,
-                    "train/batch": batch_idx
-                })
-                
                 print(
                     f"Train Epoch: {epoch} "
                     f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
@@ -141,16 +129,6 @@ def pretrain_loop(
     avg_loss2 = total_loss2 / num_batches
     avg_loss3 = total_loss3 / num_batches
     avg_loss_reg = total_loss_reg / num_batches
-    
-    # Log epoch averages to wandb
-    wandb.log({
-        "train/epoch_loss1": avg_loss1,
-        "train/epoch_loss2": avg_loss2,
-        "train/epoch_loss3": avg_loss3,
-        "train/epoch_loss_reg": avg_loss_reg,
-        "train/epoch_total_loss": avg_loss,
-        "train/epoch": epoch
-    })
     
     print(f"Epoch {epoch+1} training completed with avg loss: {avg_loss:.6f}")
     return {"Avg Loss": avg_loss, 
@@ -302,7 +280,7 @@ def run(epochs,
             "epochs": epochs,
             "learning_rate": lr,
         },
-        tags=["Pre-train", "MLM", "Attn_reg"],
+        tags=["Pre-train", "MLM", "Attn_reg", "50k_samples"],
         save_code=True,
         job_type="train"
     )
@@ -416,12 +394,12 @@ if __name__ == "__main__":
         device = "mps"
         print("Using MPS (Apple Silicon GPU)")
     elif torch.cuda.is_available():
-        device = "cuda:1"
+        device = "cuda:3"
         print("Using CUDA GPU")
     else:
         device = "cpu"
         print("Using CPU")
-    run(epochs=1, 
+    run(epochs=15, 
         device=device, 
         embed_dim=1024,  
         ff_dim=2048,     
