@@ -24,11 +24,15 @@ PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 
 def cosine_decay(total, step, min_factor=0.1):
     """
-    returns lambda at the current step
+    Cosine decay from 1.0 at step 0 to min_factor at step total_updates-1.
     """
-    # cosine to min_factor
-    f = min_factor + 0.5 * (1 - min_factor) * (1 + math.cos(math.pi * step))
-    return f
+    if total < 1:
+        return 1.0
+    else:
+        # cosine to min_factor
+        progress = step / (total - 1)
+        f = min_factor + 0.5 * (1 - min_factor) * (1 + math.cos(math.pi * progress))
+        return f
 
 def pretrain_loop(
             model: torch.nn.Module, 
@@ -52,6 +56,10 @@ def pretrain_loop(
     total_loss3 = 0.0
     total_loss_reg = 0.0
     loss_list = []
+    loss1_list = []
+    loss2_list = []
+    loss3_list = []
+    loss_reg_list = []
     pretrain_wrapper.train()
     for batch_idx, batch in enumerate(dataloader):
         for k in batch: batch[k] = batch[k].to(device)
@@ -66,7 +74,7 @@ def pretrain_loop(
 
         # === MLM loss (both) ===
         loss1 = loss_stage1_baseline(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)  
-        loss2 = loss_stage2_seed_mrna(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)
+        loss2 = loss_stage2_seed_mrna(wrapper=pretrain_wrapper, batch=batch, mask_id=mask_id, vocab_size=vocab_size)
         loss3 = loss_stage3_bispan(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)
         loss_mlm = loss1 + loss2 + loss3
 
@@ -84,13 +92,14 @@ def pretrain_loop(
         update_in_epoch = batch_idx // accumulation_step
         global_update = epoch * updates_per_epoch + update_in_epoch
         lamb = cosine_decay(total_updates, global_update, min_factor=0.1)
-        loss = loss_mlm + 0.1 * lamb * loss_reg
+        loss = loss_mlm + lamb * loss_reg
 
         loss = loss / accumulation_step
         loss.backward()
         bs = batch['mrna_input_ids'].size(0)
         
         # Accumulate individual losses for logging
+        total_loss += loss.item() * accumulation_step
         total_loss1 += loss1.item()
         total_loss2 += loss2.item()
         total_loss3 += loss3.item()
@@ -98,6 +107,10 @@ def pretrain_loop(
         
         if accumulation_step != 1:
             loss_list.append(loss.item())
+            loss1_list.append(loss1.item() / accumulation_step)
+            loss2_list.append(loss2.item() / accumulation_step)
+            loss3_list.append(loss3.item() / accumulation_step)
+            loss_reg_list.append(loss_reg.item() / accumulation_step)
             if (batch_idx + 1) % accumulation_step == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 optimizer.step()
@@ -106,10 +119,10 @@ def pretrain_loop(
                 
                 # Log to wandb during training
                 wandb.log({
-                    "train/batch_loss1": loss1.item(),
-                    "train/batch_loss2": loss2.item(),
-                    "train/batch_loss3": loss3.item(),
-                    "train/batch_loss_reg": loss_reg.item(),
+                    "train/batch_loss1": loss1.item() / accumulation_step,
+                    "train/batch_loss2": loss2.item() / accumulation_step,
+                    "train/batch_loss3": loss3.item() / accumulation_step,
+                    "train/batch_loss_reg": loss_reg.item() / accumulation_step,
                     "train/batch_total_loss": loss.item(),
                     "train/learning_rate": optimizer.param_groups[0]['lr'],
                     "train/epoch": epoch,
@@ -120,13 +133,16 @@ def pretrain_loop(
                     f"Train Epoch: {epoch} "
                     f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
                     f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
-                    f"loss1={loss1.item():.3f} loss2={loss2.item():.3f} loss3={loss3.item():.3f} reg={loss_reg.item():.3f} "
-                    f"Avg loss: {sum(loss_list) / len(loss_list):.6f}\n",
+                    f"loss1={sum(loss1_list):.3f} loss2={sum(loss2_list):.3f} loss3={sum(loss3_list):.3f} reg={sum(loss_reg_list):.3f} "
+                    f"Avg loss: {sum(loss_list):.6f}\n",
                     flush=True
                 )
                 loss_list = []
-        total_loss += loss.item() * accumulation_step
-    
+                loss1_list = []
+                loss2_list = []
+                loss3_list = []
+                loss_reg_list = []
+
     # After the loop, if gradients remain (for non-divisible number of batches)
     if (batch_idx + 1) % accumulation_step != 0:
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -302,7 +318,7 @@ def run(epochs,
             "epochs": epochs,
             "learning_rate": lr,
         },
-        tags=["Pre-train", "MLM", "Attn_reg"],
+        tags=["Pre-train", "MLM", "Attn_reg", "50k_samples"],
         save_code=True,
         job_type="train"
     )
@@ -416,12 +432,12 @@ if __name__ == "__main__":
         device = "mps"
         print("Using MPS (Apple Silicon GPU)")
     elif torch.cuda.is_available():
-        device = "cuda:1"
+        device = "cuda:3"
         print("Using CUDA GPU")
     else:
         device = "cpu"
         print("Using CPU")
-    run(epochs=1, 
+    run(epochs=15, 
         device=device, 
         embed_dim=1024,  
         ff_dim=2048,     
