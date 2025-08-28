@@ -119,15 +119,9 @@ def pretrain_loop(
                 
                 # Log to wandb during training
                 wandb.log({
-                    "train/batch_loss1": loss1.item() / accumulation_step,
-                    "train/batch_loss2": loss2.item() / accumulation_step,
-                    "train/batch_loss3": loss3.item() / accumulation_step,
-                    "train/batch_loss_reg": loss_reg.item() / accumulation_step,
-                    "train/batch_total_loss": loss.item(),
-                    "train/learning_rate": optimizer.param_groups[0]['lr'],
-                    "train/epoch": epoch,
-                    "train/batch": batch_idx
-                })
+                    "batch/learning_rate": optimizer.param_groups[0]['lr'],
+                    "batch/lambda": lamb,
+                }, commit=True)
                 
                 print(
                     f"Train Epoch: {epoch} "
@@ -158,16 +152,6 @@ def pretrain_loop(
     avg_loss3 = total_loss3 / num_batches
     avg_loss_reg = total_loss_reg / num_batches
     
-    # Log epoch averages to wandb
-    wandb.log({
-        "train/epoch_loss1": avg_loss1,
-        "train/epoch_loss2": avg_loss2,
-        "train/epoch_loss3": avg_loss3,
-        "train/epoch_loss_reg": avg_loss_reg,
-        "train/epoch_total_loss": avg_loss,
-        "train/epoch": epoch
-    })
-    
     print(f"Epoch {epoch+1} training completed with avg loss: {avg_loss:.6f}")
     return {"Avg Loss": avg_loss, 
             "Loss1": avg_loss1, 
@@ -182,11 +166,15 @@ def evaluate_mlm(model,
                 device, 
                 vocab_size,
                 pad_id,
-                mask_id):
+                mask_id,
+                epoch):
     model.eval()
     pretrain_wrapper.eval()
     
     # Separate tracking for each stage
+    total_loss1 = 0
+    total_loss2 = 0
+    total_loss3 = 0
     total_correct1 = 0
     total_correct2 = 0
     total_correct3 = 0
@@ -382,21 +370,21 @@ def run(epochs,
             vocab_size=tokenizer.vocab_size,
             pad_id=tokenizer.pad_token_id,
             mask_id=tokenizer.mask_token_id,
+            epoch=epoch,
         )
 
         wandb.log({
-                    "epoch": epoch,
                     "train/loss": train_loss["Avg Loss"],
                     "train/Token Loss": train_loss["Loss1"],
                     "train/Seed Loss": train_loss["Loss2"],
                     "train/Bispan loss": train_loss["Loss3"],
                     "train/Attn reg loss": train_loss["Attn Loss"],
                     "eval/loss": eval_results['overall_loss'],
-                    "eval/token accuracy": eval_results['overall_acc'],
-                    "eval/Token_acc": eval_results['stage1_acc'],
-                    "eval/Seed_acc": eval_results['stage2_acc'],
-                    "eval/Bispan_acc": eval_results['stage3_acc'],
-                }, step=epoch)
+                    "eval/Token acc": eval_results['overall_acc'],
+                    "eval/Token acc": eval_results['stage1_acc'],
+                    "eval/Seed acc": eval_results['stage2_acc'],
+                    "eval/Bispan acc": eval_results['stage3_acc'],
+                }, commit=True)
         
         if eval_results['overall_acc'] > best_accuracy:
             best_accuracy = eval_results['overall_acc']
@@ -437,7 +425,7 @@ if __name__ == "__main__":
     else:
         device = "cpu"
         print("Using CPU")
-    run(epochs=15, 
+    run(epochs=20, 
         device=device, 
         embed_dim=1024,  
         ff_dim=2048,     
