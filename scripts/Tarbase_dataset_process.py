@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 # fetch_transcripts_e102.py
 import pandas as pd
 import argparse, json, time, requests, re
@@ -55,19 +54,22 @@ def utr3(transcript_id):
     return seq[cds_end:]  # (cds_end+1 .. end), 0-based slice
 
 # fetch unique transcript ids from microT txt
-def unique_transcripts_from_microt(path):
+def unique_transcripts_from_microt(df):
     """
     Get unique transcript ids and return a list of dictionary with item 
     {"transcript_id": transcript_id, "cds_utr": cds_utr}
     """
-    df = pd.read_csv(path, sep='\t')
     df = df[["ensembl_transcript_id", "cds_utr"]].drop_duplicates()  # remove duplicated transcripts
+    print(f"removed duplicated transcripts")
     tx = df.to_dict(orient="records")
     return tx
 
-def build_transcript_to_sequence_map(path):
-    transcripts_ids = unique_transcripts_from_microt(path)
+def build_transcript_to_sequence_map(df, save_dir):
+    transcripts_ids = unique_transcripts_from_microt(df)
+    print(f"Unique transcripts ids: {len(transcripts_ids)}")
     d = {}
+    print(f"Building transcripts to sequence map")
+    i = 0
     for item in transcripts_ids:
         transcript_id = item["ensembl_transcript_id"]
         cds_utr = item["cds_utr"].lower()
@@ -82,11 +84,20 @@ def build_transcript_to_sequence_map(path):
             elif cds_utr == "utr3":
                 sequence = utr3(transcript_id)
             else:
+                print(f"Unknown cds_utr: {cds_utr}")
                 sequence = ""
             d[transcript_id][cds_utr] = sequence
+            print(f"Fetched sequence for {transcript_id} ({cds_utr})")
         except Exception as e:
             print(f"Warning: Failed to fetch sequence for {transcript_id} ({cds_utr}): {e}", flush=True)
             d[transcript_id][cds_utr] = ""
+        i += 1
+        if i % 1000 == 0:
+            f_path = os.path.join(save_dir, f"transcripts_to_sequence_{i}.csv")
+            df = pd.DataFrame.from_dict(d, orient="index")
+            df.to_csv(f_path, sep='\t')
+            print(f"Saved transcripts to sequence map to {f_path}")
+            d = {}
     return d
 
 # load mature miRNA fasta file
@@ -120,8 +131,8 @@ def get_seed_length(mre_type):
 # load interaction file
 # get pairs of miRNA and mRNA that have interaction score > 0.85
 # seed end = transcript end, seed start = transcript end - seed length
-def load_interaction_file(path, mirna_fasta_path, threshold=0.85):
-    df = pd.read_csv(path, sep='\t')
+def load_interaction_file(path, mirna_fasta_path, threshold=0.85, save_dir=None):
+    df = pd.read_csv(path, sep='\t') # Time-limiting step
     
     # Validate required columns exist
     required_cols = ["interaction_score", "mirna", "mre_type", "cds_utr", "ensembl_transcript_id", "transcript_start", "transcript_end"]
@@ -129,11 +140,15 @@ def load_interaction_file(path, mirna_fasta_path, threshold=0.85):
     if missing_cols:
         raise ValueError(f"Missing required columns: {missing_cols}")
     
-    df = df[df["interaction_score"] >= threshold]
+    # df = df[df["interaction_score"] >= threshold]
     df = df[["mirna", "mre_type", "cds_utr", "ensembl_transcript_id", "transcript_start", "transcript_end"]]
     
-    transcripts_to_sequence = build_transcript_to_sequence_map(path)
+    # print(f"Filtered interactions by threshold >= {threshold}")
+    transcripts_to_sequence = build_transcript_to_sequence_map(df, save_dir)
+    print(f"Built transcripts to sequence map")
+
     mirna_fasta = load_mirna_fasta(mirna_fasta_path)
+    print(f"Loaded miRNA fasta")
     
     for index, row in df.iterrows():
         mirna_id, mre_type, cds_utr, ensembl_transcript_id, transcript_start, transcript_end = row
@@ -141,6 +156,8 @@ def load_interaction_file(path, mirna_fasta_path, threshold=0.85):
         seed_length = get_seed_length(mre_type)
         df.loc[index, "seed start"] = transcript_end - seed_length
         df.loc[index, "seed end"] = transcript_end
+        print(f"Transcript id: {ensembl_transcript_id}, seed length: {seed_length}")
+        print(f"Seed start: {transcript_end - seed_length}, seed end: {transcript_end}")
         
         # Safe access to sequences with error handling
         try:
@@ -158,12 +175,13 @@ def load_interaction_file(path, mirna_fasta_path, threshold=0.85):
             df.loc[index, "mirna_sequence"] = ""
         
         df.loc[index, "mirna_id"] = mirna_id
+    print(f"Processed {len(df)} interactions")
     return df
 
 # main function to put together miRNA id, mRNA id, miRNA sequence, mRNA sequence, and seed start and end
-def main(mirna_fasta_path, interaction_path, output_path):
+def main(mirna_fasta_path, interaction_path, output_path, save_dir):
     try:
-        interaction = load_interaction_file(interaction_path, mirna_fasta_path)
+        interaction = load_interaction_file(interaction_path, mirna_fasta_path, threshold=0.90, save_dir=save_dir)
         interaction.to_csv(output_path, sep=',', index=False)
         print(f"Data is saved to {output_path}")
         print(f"Processed {len(interaction)} interactions")
@@ -177,5 +195,6 @@ if __name__ == "__main__":
     parser.add_argument("--interaction_path", type=str, required=True)
     parser.add_argument("--output_path", type=str, required=True)
     args = parser.parse_args()
-    main(args.mirna_fasta_path, args.interaction_path, args.output_path)
+    save_dir = os.path.dirname(args.output_path)
+    main(args.mirna_fasta_path, args.interaction_path, args.output_path, save_dir=save_dir)
 
