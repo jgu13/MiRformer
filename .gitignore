@@ -4,6 +4,8 @@ checkpoints/
 # data
 data/
 TargetScan_dataset/
+Degradome_dataset/
+TarBase_dataset/
 
 # virtual env
 HyenaDNA/
@@ -32,3 +34,4 @@ build_dataset_output.txt
 dmiso_pairs.txt
 *.out
 unused_data.tar.gz
+
