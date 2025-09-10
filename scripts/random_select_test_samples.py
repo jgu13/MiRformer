@@ -2,8 +2,8 @@ import os
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
-# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
 
 data_path_train = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start.csv")
 df_train = pd.read_csv(data_path_train, sep=",")

@@ -1,3 +1,4 @@
+import token
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -18,7 +19,8 @@ from Attention_regularization import kl_diag_seed_loss
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset
 from utils import load_dataset
 
-PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
 
 def cosine_decay(total, step, min_factor=0.1):
     """
@@ -45,6 +47,10 @@ def pretrain_loop(
             sigma=1.0,):
     model.train()
     total_loss = 0.0
+    total_loss1 = 0.0
+    total_loss2 = 0.0
+    total_loss3 = 0.0
+    total_loss_reg = 0.0
     loss_list = []
     pretrain_wrapper.train()
     for batch_idx, batch in enumerate(dataloader):
@@ -59,9 +65,9 @@ def pretrain_loop(
         )
 
         # === MLM loss (both) ===
-        loss1 = loss_stage1_baseline(pretrain_wrapper, batch, pad_id, mask_id)  
-        loss2 = loss_stage2_seed_mrna(pretrain_wrapper, batch, mask_id, vocab_size)
-        loss3 = loss_stage3_bispan(pretrain_wrapper, batch, pad_id, mask_id, vocab_size)
+        loss1 = loss_stage1_baseline(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)  
+        loss2 = loss_stage2_seed_mrna(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)
+        loss3 = loss_stage3_bispan(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)
         loss_mlm = loss1 + loss2 + loss3
 
         # === KL regularization on seed rows (positives only) ===
@@ -78,35 +84,80 @@ def pretrain_loop(
         update_in_epoch = batch_idx // accumulation_step
         global_update = epoch * updates_per_epoch + update_in_epoch
         lamb = cosine_decay(total_updates, global_update, min_factor=0.1)
-        loss = loss_mlm + lamb * loss_reg
+        loss = loss_mlm + 0.1 * lamb * loss_reg
 
         loss = loss / accumulation_step
         loss.backward()
         bs = batch['mrna_input_ids'].size(0)
+        
+        # Accumulate individual losses for logging
+        total_loss1 += loss1.item()
+        total_loss2 += loss2.item()
+        total_loss3 += loss3.item()
+        total_loss_reg += loss_reg.item()
+        
         if accumulation_step != 1:
             loss_list.append(loss.item())
             if (batch_idx + 1) % accumulation_step == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 optimizer.step()
                 if scheduler is not None: scheduler.step()
                 optimizer.zero_grad()
+                
+                # Log to wandb during training
+                wandb.log({
+                    "train/batch_loss1": loss1.item(),
+                    "train/batch_loss2": loss2.item(),
+                    "train/batch_loss3": loss3.item(),
+                    "train/batch_loss_reg": loss_reg.item(),
+                    "train/batch_total_loss": loss.item(),
+                    "train/learning_rate": optimizer.param_groups[0]['lr'],
+                    "train/epoch": epoch,
+                    "train/batch": batch_idx
+                })
+                
                 print(
                     f"Train Epoch: {epoch} "
                     f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
                     f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
+                    f"loss1={loss1.item():.3f} loss2={loss2.item():.3f} loss3={loss3.item():.3f} reg={loss_reg.item():.3f} "
                     f"Avg loss: {sum(loss_list) / len(loss_list):.6f}\n",
                     flush=True
                 )
                 loss_list = []
         total_loss += loss.item() * accumulation_step
+    
     # After the loop, if gradients remain (for non-divisible number of batches)
     if (batch_idx + 1) % accumulation_step != 0:
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
         optimizer.step()
         scheduler.step()
         optimizer.zero_grad()
-    avg_loss = total_loss / len(dataloader)
-    return avg_loss
+    
+    # Calculate epoch averages
+    num_batches = len(dataloader)
+    avg_loss = total_loss / num_batches
+    avg_loss1 = total_loss1 / num_batches
+    avg_loss2 = total_loss2 / num_batches
+    avg_loss3 = total_loss3 / num_batches
+    avg_loss_reg = total_loss_reg / num_batches
+    
+    # Log epoch averages to wandb
+    wandb.log({
+        "train/epoch_loss1": avg_loss1,
+        "train/epoch_loss2": avg_loss2,
+        "train/epoch_loss3": avg_loss3,
+        "train/epoch_loss_reg": avg_loss_reg,
+        "train/epoch_total_loss": avg_loss,
+        "train/epoch": epoch
+    })
+    
+    print(f"Epoch {epoch+1} training completed with avg loss: {avg_loss:.6f}")
+    return {"Avg Loss": avg_loss, 
+            "Loss1": avg_loss1, 
+            "Loss2": avg_loss2, 
+            "Loss3": avg_loss3, 
+            "Attn Loss": avg_loss_reg}
 
 @torch.no_grad()
 def evaluate_mlm(model, 
@@ -118,27 +169,66 @@ def evaluate_mlm(model,
                 mask_id):
     model.eval()
     pretrain_wrapper.eval()
-    total_loss = 0.0
-    total_correct = 0
-    total_masked = 0
+    
+    # Separate tracking for each stage
+    total_correct1 = 0
+    total_correct2 = 0
+    total_correct3 = 0
+    total_masked1 = 0
+    total_masked2 = 0
+    total_masked3 = 0
+    
     for batch in dataloader:
         batch = {k: v.to(device) for k, v in batch.items()}         
         
-        loss1, correct1, mr_y1, mi_y1 = loss_stage1_baseline(pretrain_wrapper, batch, pad_id, mask_id, evaluate=True)
-        loss2, correct2, mr_y2 = loss_stage2_seed_mrna(pretrain_wrapper, batch, mask_id, vocab_size, evaluate=True)
-        loss3, correct3, mr_y3, mi_y3 = loss_stage3_bispan(pretrain_wrapper, batch, pad_id, mask_id, vocab_size, evaluate=True)
+        loss1, correct1, mr_y1, mi_y1 = loss_stage1_baseline(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
+        loss2, correct2, mr_y2 = loss_stage2_seed_mrna(wrapper=pretrain_wrapper, batch=batch, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
+        loss3, correct3, mr_y3, mi_y3 = loss_stage3_bispan(wrapper=pretrain_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
         
-        total_loss += (loss1 + loss2 + loss3).item()
-        total_correct += correct1 + correct2 + correct3
+        # Accumulate losses
+        total_loss1 += loss1.item()
+        total_loss2 += loss2.item()
+        total_loss3 += loss3.item()
         
-        total_masked += sum(
-            t.ne(-100).sum().item() for t in [mr_y1, mi_y1, mr_y2, mr_y3, mi_y3]
-        )
+        # Accumulate correct predictions
+        total_correct1 += correct1
+        total_correct2 += correct2
+        total_correct3 += correct3
+        
+        # Count masked tokens for each stage
+        total_masked1 += mr_y1.ne(-100).sum().item() + mi_y1.ne(-100).sum().item()
+        total_masked2 += mr_y2.ne(-100).sum().item()
+        total_masked3 += mr_y3.ne(-100).sum().item() + mi_y3.ne(-100).sum().item()
 
-    avg_loss = total_loss / len(dataloader)
-    acc = total_correct / total_masked
-    print(f"Evaluation MLM accuracy: {acc:.4f}")
-    return avg_loss, acc
+    # Calculate averages
+    avg_loss1 = total_loss1 / len(dataloader)
+    avg_loss2 = total_loss2 / len(dataloader)
+    avg_loss3 = total_loss3 / len(dataloader)
+    
+    # Calculate accuracies
+    acc1 = total_correct1 / max(total_masked1, 1)  # Avoid division by zero
+    acc2 = total_correct2 / max(total_masked2, 1)
+    acc3 = total_correct3 / max(total_masked3, 1)
+    
+    # Overall metrics
+    total_loss = avg_loss1 + avg_loss2 + avg_loss3
+    total_correct = total_correct1 + total_correct2 + total_correct3
+    total_masked = total_masked1 + total_masked2 + total_masked3
+    overall_acc = total_correct / max(total_masked, 1)
+    
+    print(f"Evaluation Results:")
+    print(f"  Stage 1 (Baseline): Accuracy={acc1:.4f}")
+    print(f"  Stage 2 (Seed mRNA): Accuracy={acc2:.4f}")
+    print(f"  Stage 3 (Bispan): Accuracy={acc3:.4f}")
+    print(f"  Overall: Loss={total_loss:.4f}, Accuracy={overall_acc:.4f}")
+    
+    return {
+        'overall_loss': total_loss,
+        'overall_acc': overall_acc,
+        'stage1_acc': acc1,
+        'stage2_acc': acc2,
+        'stage3_acc': acc3
+    }
 
 def run(epochs, 
         device, 
@@ -159,7 +249,7 @@ def run(epochs,
     train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start_random_samples.csv")
     valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start_random_samples.csv")
 
-    print(f"   Loading training data from: {train_path}")
+    print(f"Loading training data from: {train_path}")
     ds_train = QuestionAnswerDataset(data=load_dataset(train_path, sep=','),
                                     mrna_max_len=mrna_max_len,
                                     mirna_max_len=mirna_max_len,
@@ -167,7 +257,7 @@ def run(epochs,
                                     seed_start_col="seed start",
                                     seed_end_col="seed end",)
     
-    print(f"   Loading validation data from: {valid_path}")
+    print(f"Loading validation data from: {valid_path}")
     ds_val = QuestionAnswerDataset(data=load_dataset(valid_path, sep=','),
                                   mrna_max_len=mrna_max_len,
                                   mirna_max_len=mirna_max_len,
@@ -178,9 +268,10 @@ def run(epochs,
     train_loader = DataLoader(ds_train, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(ds_val, batch_size=batch_size, shuffle=False)
     
-    print("4. Creating model...")
+    print("Creating model...")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
+                                   device=device,
                                    epochs=epochs,
                                    embed_dim=embed_dim,
                                    num_heads=num_heads,
@@ -193,7 +284,7 @@ def run(epochs,
                                    predict_binding=True,
                                    use_longformer=True)
     
-    print("5. Creating pretrain wrapper...")
+    print("Creating pretrain wrapper...")
     pretrain_wrapper = PairedPretrainWrapper(
                         base_model = model, 
                         vocab_size = tokenizer.vocab_size, 
@@ -202,24 +293,24 @@ def run(epochs,
 
     optimizer = AdamW(pretrain_wrapper.parameters(), lr=lr)
 
-    # wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-    # run = wandb.init(
-    #     project="mirna-pretraining",
-    #     name=f"Pretrain:{mrna_max_len}-epoch:{epochs}", 
-    #     config={
-    #         "batch_size": 32 * accumulation_step,
-    #         "epochs": epochs,
-    #         "learning_rate": lr,
-    #     },
-    #     tags=["MLM", "Attn_reg"],
-    #     save_code=True,
-    #     job_type="train"
-    # )
+    wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+    run = wandb.init(
+        project="mirna-pretraining",
+        name=f"Pretrain:{mrna_max_len}-epoch:{epochs}", 
+        config={
+            "batch_size": batch_size * accumulation_step,
+            "epochs": epochs,
+            "learning_rate": lr,
+        },
+        tags=["Pre-train", "MLM", "Attn_reg"],
+        save_code=True,
+        job_type="train"
+    )
 
     model.to(device)
     pretrain_wrapper.to(device)
     
-    print("8. Setting up training...")
+    print("Setting up training...")
     start = time()
     patience = 10
     best_accuracy = 0
@@ -228,11 +319,13 @@ def run(epochs,
         PROJ_HOME, 
         "checkpoints", 
         "TargetScan", 
-        "Pretrain", 
+        "TwoTowerTransformer",
+        "Longformer", 
         str(mrna_max_len),
+        "Pretrain",
     )
     os.makedirs(model_checkpoints_dir, exist_ok=True)
-    print(f"   Checkpoint directory: {model_checkpoints_dir}")
+    print(f"Checkpoint directory: {model_checkpoints_dir}")
     
     steps_per_epoch = len(train_loader)
     updates_per_epoch = math.ceil(steps_per_epoch / accumulation_step)
@@ -244,7 +337,7 @@ def run(epochs,
     cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
 
-    print("10. Starting training loop...")
+    print("Starting training loop...")
     for epoch in range(epochs):
         print(f"   Starting epoch {epoch+1}/{epochs}")
         train_loss = pretrain_loop(
@@ -261,12 +354,11 @@ def run(epochs,
             pad_id=tokenizer.pad_token_id,
             vocab_size=tokenizer.vocab_size,
             accumulation_step=accumulation_step,
-            sigma=1.0,  
+            sigma=0.5,  
             )
-        print(f"   Epoch {epoch+1} training completed, loss: {train_loss:.6f}")
         
-        print(f"   Starting evaluation for epoch {epoch+1}...")
-        eval_loss, acc = evaluate_mlm(
+        print(f"Starting evaluation for epoch {epoch+1}...")
+        eval_results = evaluate_mlm(
             model=model,
             pretrain_wrapper=pretrain_wrapper,
             dataloader=val_loader,
@@ -275,32 +367,40 @@ def run(epochs,
             pad_id=tokenizer.pad_token_id,
             mask_id=tokenizer.mask_token_id,
         )
-        # wandb.log({
-        #             "epoch": epoch,
-        #             "train/loss": train_loss,
-        #             "eval/loss": eval_loss,
-        #             "eval/token accuracy": acc
-        #         }, step=epoch)
+
+        wandb.log({
+                    "epoch": epoch,
+                    "train/loss": train_loss["Avg Loss"],
+                    "train/Token Loss": train_loss["Loss1"],
+                    "train/Seed Loss": train_loss["Loss2"],
+                    "train/Bispan loss": train_loss["Loss3"],
+                    "train/Attn reg loss": train_loss["Attn Loss"],
+                    "eval/loss": eval_results['overall_loss'],
+                    "eval/token accuracy": eval_results['overall_acc'],
+                    "eval/Token_acc": eval_results['stage1_acc'],
+                    "eval/Seed_acc": eval_results['stage2_acc'],
+                    "eval/Bispan_acc": eval_results['stage3_acc'],
+                }, step=epoch)
         
-        if acc > best_accuracy:
-            best_accuracy = acc
+        if eval_results['overall_acc'] > best_accuracy:
+            best_accuracy = eval_results['overall_acc']
             ckpt_name = f"best_accuracy_{best_accuracy:.4f}_epoch{epoch}.pth"
             ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
             torch.save(model.state_dict(), ckpt_path)
 
-            # model_art = wandb.Artifact(
-            #     name="Pretrained-model",
-            #     type="model",
-            #     metadata={
-            #         "epoch": epoch,
-            #         "accuracy": best_accuracy
-            #     }
-            # )
-            # model_art.add_file(ckpt_path)
-            # try:
-            #     run.log_artifact(model_art, aliases=["best-pretrain"])
-            # except Exception as e:
-            #     print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+            model_art = wandb.Artifact(
+                name="Pretrained-model",
+                type="model",
+                metadata={
+                    "epoch": epoch,
+                    "accuracy": best_accuracy
+                }
+            )
+            model_art.add_file(ckpt_path)
+            try:
+                run.log_artifact(model_art, aliases=["best-pretrain"])
+            except Exception as e:
+                print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
         else:
             count += 1
             if count >= patience:
@@ -323,7 +423,7 @@ if __name__ == "__main__":
         print("Using CPU")
     run(epochs=1, 
         device=device, 
-        embed_dim=256,  
-        ff_dim=512,     
-        batch_size=16, 
-        accumulation_step=16)  
+        embed_dim=1024,  
+        ff_dim=2048,     
+        batch_size=32, 
+        accumulation_step=8)  

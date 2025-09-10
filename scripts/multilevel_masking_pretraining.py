@@ -3,6 +3,28 @@ from typing import Tuple
 import torch.nn as nn
 import torch.nn.functional as F
 
+def debug_label_range(logits, labels, *, name="labels", ignore_index=-100, max_print=10):
+    """
+    logits : (..., V)  float
+    labels : (...)     long
+    """
+    V = logits.size(-1)
+
+    # force CPU for safe printing
+    lab = labels.detach().to("cpu")
+    bad = (lab != ignore_index) & ((lab < 0) | (lab >= V))
+
+    if bad.any():
+        idxs = bad.nonzero(as_tuple=False)  # shape [N, labels.dim()]
+        vals = lab[bad]
+        n = min(max_print, idxs.size(0))
+        print(f"[{name}] BAD LABELS: count={idxs.size(0)}  V={V}  ignore_index={ignore_index}")
+        for i in range(n):
+            coord = tuple(idxs[i].tolist())
+            print(f"  at {coord} -> value={int(vals[i])}")
+        raise ValueError(f"{name}: found {idxs.size(0)} labels out of range [0,{V-1}] (or <0) "
+                         f"with ignore_index={ignore_index}")
+
 def mask_tokens(x: torch.Tensor,
                 pad_id: int,
                 mask_id: int,
@@ -70,20 +92,18 @@ def mask_seed_span_mRNA(mrna_ids: torch.Tensor,
                          seed_end: torch.Tensor,
                          mask_id: int,):
     """
-    Mask a 6–8nt subspan inside the provided seed span on mRNA.
-    If seed shorter than min_len, clamp to available.
+    Mask the provided seed span on mRNA.
     """
     B, Lk = mrna_ids.shape
     mrna_masked = mrna_ids.clone()
-    labels    = torch.full_like(mrna_ids, -100)
+    labels = torch.full_like(mrna_ids, -100)
 
     for b in range(B):
         # Convert tensor indices to integers for indexing
         start_idx = int(seed_start[b].item())
         end_idx = int(seed_end[b].item())
-        seed_len = (end_idx - start_idx) + 1
         mrna_masked[b, start_idx:end_idx+1] = mask_id
-        labels[b, start_idx:end_idx+1]      = mrna_ids[b, start_idx:end_idx+1]
+        labels[b, start_idx:end_idx+1] = mrna_ids[b, start_idx:end_idx+1]
     return mrna_masked, labels
 
 class TokenHead(torch.nn.Module):
@@ -160,10 +180,10 @@ class PairedPretrainWrapper(torch.nn.Module):
         ctx_mir_norm = ctx_mir_norm.masked_fill(mirna_mask.unsqueeze(-1)==0, 0) # (batch_size, mirna_len, embed_dim)
 
         logits_mr = self.mrna_head(ctx_mr_norm)  # (B,Lq,V)
-        logits_mi = self.mirna_head(ctx_mir_norm)          # (B,Lk,V)
+        logits_mi = self.mirna_head(ctx_mir_norm) # (B,Lk,V)
         return logits_mr, logits_mi, attn_weights
 
-def loss_stage1_baseline(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id, evaluate=False):
+def loss_stage1_baseline(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id, vocab_size, evaluate=False):
     mi_in, mi_mask = batch["mirna_input_ids"], batch["mirna_attention_mask"]
     mr_in, mr_mask = batch["mrna_input_ids"],  batch["mrna_attention_mask"]
 
@@ -171,10 +191,9 @@ def loss_stage1_baseline(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id,
     mr_x, mr_y = mask_tokens(mr_in, pad_id, mask_id, p=0.15)
 
     logits_mr, logits_mi, _ = wrapper.forward_pair(mr_x, mr_mask, mi_x, mi_mask) # (B, L, V)
-    logits_mr, logits_mi    = logits_mr[:,:,7:], logits_mi[:,:,7:] # base id starts from 7, (B, L, 5)
 
-    loss_mr = F.cross_entropy(logits_mr.view(-1, 5), mr_y.view(-1), ignore_index=-100) # 5 bases: A, T, C, G, N
-    loss_mi = F.cross_entropy(logits_mi.view(-1, 5), mi_y.view(-1), ignore_index=-100)
+    loss_mr = F.cross_entropy(logits_mr.view(-1, vocab_size), mr_y.view(-1), ignore_index=-100) 
+    loss_mi = F.cross_entropy(logits_mi.view(-1, vocab_size), mi_y.view(-1), ignore_index=-100)
     total_loss = loss_mr + loss_mi
 
     if evaluate:
@@ -203,7 +222,7 @@ def loss_stage2_seed_mrna(wrapper: PairedPretrainWrapper, batch, mask_id, vocab_
 
     # Only supervise the masked miRNA tokens
     loss_mr = F.cross_entropy(logits_mr.view(-1, vocab_size), mr_y.view(-1), ignore_index=-100)
-    
+
     if evaluate:
         probs_mr = F.softmax(logits_mr, dim=-1)
         preds_mr = torch.argmax(probs_mr, dim=-1)

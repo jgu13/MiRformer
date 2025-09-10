@@ -24,7 +24,7 @@ def predict(model,
         miRNA_seq = kwargs["miRNA_seq"]
         mRNA_seq_mask = kwargs["mRNA_seq_mask"]
         miRNA_seq_mask = kwargs["miRNA_seq_mask"] # (B, L)
-        binding_logits, token_logits = model(
+        binding_logit, binding_aux, start_logits, end_logits = model(
                                 mirna = miRNA_seq,
                                 mrna = mRNA_seq,
                                 mirna_mask = miRNA_seq_mask,
@@ -43,9 +43,12 @@ def predict(model,
         attention_score = attention_score.detach().cpu()
         # binding probability
         if model.predict_binding:
-            binding_prob = torch.nn.functional.sigmoid(binding_logits)
+            # predicted binding weights from binding_aux
+            binding_weights = binding_aux["pos_weights"] # (B, L)
+            binding_weights = binding_weights.detach().cpu()
+            binding_prob = torch.nn.functional.sigmoid(binding_logit)
             binding_prob = binding_prob.detach().cpu()
-    return attention_score, binding_prob
+    return attention_score, binding_prob, binding_weights
 
 def encode_seq(model, 
                tokenizer, 
@@ -95,10 +98,11 @@ def load_model(ckpt_name,
                             "TargetScan/TwoTowerTransformer",
                             # "TokenClassification",
                             "Longformer",
-                            str(model.mrna_max_len),
-                            f"embed={model.embed_dim}d",
-                            "norm_by_key", 
+                            str(args_dict["mrna_max_len"]),
+                            f"embed={args_dict['embed_dim']}d",
+                            "norm_by_key",
                             "LSE",
+                            "LSE+MIL", 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -115,7 +119,8 @@ def single_base_perturbation(seq, pos):
 def viz_sequence(seq, 
                  attn_changes,
                 #  emb_changes,
-                 prob_changes,
+                 prob_changes,  
+                 weights_changes,
                  base_ax=None,             
                  seed_start=None, 
                  seed_end=None,
@@ -150,9 +155,10 @@ def viz_sequence(seq,
     attn_logo_matrix = lm.alignment_to_matrix([seq]).astype(float)
     # emb_logo_matrix  = lm.alignment_to_matrix([seq]).astype(float)
     prob_logo_matrix = lm.alignment_to_matrix([seq]).astype(float) 
+    weights_logo_matrix = lm.alignment_to_matrix([seq]).astype(float)
     # Scale the matrix by the changes
-    all_matrices = [attn_logo_matrix, prob_logo_matrix]
-    all_changes  = [attn_changes, prob_changes]
+    all_matrices = [attn_logo_matrix, prob_logo_matrix, weights_logo_matrix]
+    all_changes  = [attn_changes, prob_changes, weights_changes]
     for i, changes in enumerate(all_changes):
         logo_matrix = all_matrices[i]
         for pos, base in enumerate(seq):
@@ -202,12 +208,18 @@ def viz_sequence(seq,
                                 w, 
                                 logo_height],
                               sharex=base_ax)
-        logo_axes = [logo_ax1, logo_ax2]
+        logo_ax3 = fig.add_axes(
+                                [x0, 
+                                y0 + h + pad + logo_height + pad + logo_height + pad,
+                                w, 
+                                logo_height],
+                              sharex=base_ax)
+        logo_axes = [logo_ax1, logo_ax2, logo_ax3]
 
     # fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(20,8))
-    ax_titles = ["Attention\nChanges", "Probability\nChanges"]
+    ax_titles = ["Attention\nChanges", "Probability\nChanges", "Binding\nWeights"]
     for logo_matrix, ax, ax_title in zip(
-        [attn_logo_matrix, prob_logo_matrix],
+        [attn_logo_matrix, prob_logo_matrix, weights_logo_matrix],
         logo_axes,
         ax_titles):
         # Create the sequence logo
@@ -217,6 +229,7 @@ def viz_sequence(seq,
 
         # Style the plot
         logo.style_spines(visible=False)
+        # ax.set_ylim(0.0, 1.0)
         # ax.set_ylim(0.0, 1.0)
         ax.set_xticks(range(len(seq)))
         ax.set_xticklabels(list(seq))
@@ -260,7 +273,7 @@ def main():
     predict_span    = True
     predict_binding = True
     if torch.cuda.is_available():
-        device = "cuda:2"
+        device = "cuda:1"
     elif torch.backends.mps.is_available():
         device = "mps"
     else:
@@ -269,18 +282,18 @@ def main():
                  "mrna_max_len": mrna_max_len,
                  "device": device,
                  "embed_dim": 1024,
+                 "ff_dim": 4096,
                  "num_heads": 8,
                  "num_layers": 4,
-                 "ff_dim": 4096,
                  "predict_span": predict_span,
                  "predict_binding": predict_binding,
                  "use_longformer":True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="tau_best_composite_0.7305_0.9115_epoch20.pth",
+    model = load_model(ckpt_name="50k_best_composite_0.8047_0.9343_epoch39.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
-                                 "TargetScan_train_30_randomized_start.csv")
+                                 "TargetScan_train_500_randomized_start.csv")
     test_data = pd.read_csv(test_data_path)
     mRNA_seqs = test_data[["mRNA sequence"]].values
     miRNA_seqs = test_data[["miRNA sequence"]].values
@@ -290,7 +303,7 @@ def main():
     os.makedirs(save_plot_dir, exist_ok=True)
 
     # Test sequence
-    i=17
+    i=8
     mRNA_seq = mRNA_seqs[i][0]
     miRNA_seq = miRNA_seqs[i][0]
     miRNA_id = test_data[["miRNA ID"]].iloc[i,0]
@@ -317,7 +330,7 @@ def main():
     )
 
     model.to(args_dict["device"])
-    wt_attn_score, wt_binding_prob = predict(model, **encoded)
+    wt_attn_score, wt_binding_prob, wt_binding_weights = predict(model, **encoded)
     # print("Wild-type prediction = ", wt_prob)
     
     # convert mRNA seq tokens to mRNA ids
@@ -335,15 +348,25 @@ def main():
                  seed_start = seed_start,
                  seed_end = seed_end,
                  plot_max_only=True) 
+                 seed_end = seed_end,
+                 plot_max_only=True) 
 
-    # perturb mRNA sequence
+    # perturb mRNA sequence for attention and probability changes
     attn_deltas = []
-    emb_deltas  = []
     prob_deltas = []
-    print("Start perturbing mrna ...")
+    print("Start perturbing mrna for attention and probability changes...")
+    
+    # Extract binding weights directly from model output (no perturbation needed)
+    actual_mrna_len = len(mRNA_seq)
+    # wt_binding_weights has shape (batch_size, mrna_len), so we need to squeeze and slice correctly
+    binding_weights_actual = wt_binding_weights.squeeze(0)[:actual_mrna_len]  # Extract weights for actual sequence
+    weights_deltas = binding_weights_actual.tolist()  # Convert to list for visualization
+    
+    print(f"Using binding weights directly - shape: {binding_weights_actual.shape}")
+    print(f"Original binding weights shape: {wt_binding_weights.shape}")
+    
     for pos in range(len(mRNA_seq)):
         attn_score_delta_list = []
-        # pooled_emb_delta_list = []
         binding_prob_delta_list = []
         # perturb the base 3 times and average the delta
         for _ in range(1):
@@ -354,9 +377,9 @@ def main():
                 mRNA_seq=perturbed_mRNA,
                 miRNA_seq=miRNA_seq,
             )
-            attn_score,  binding_prob = predict(model, **encoded)
+            attn_score, binding_prob, _ = predict(model, **encoded)  # Ignore binding_weights from perturbation
             attn_score_delta = abs(wt_attn_score - attn_score) # (L,)
-            binding_prob_delta = abs(wt_binding_prob - binding_prob) 
+            binding_prob_delta = abs(wt_binding_prob - binding_prob)  # Both are scalars
             attn_score_delta_list.append(attn_score_delta)
             binding_prob_delta_list.append(binding_prob_delta)
         # only take the change at the current position
@@ -366,14 +389,21 @@ def main():
         prob_delta = (all_binding_prob_delta.sum(dim=0) / len(all_binding_prob_delta)).item()
         attn_deltas.append(attn_delta) # (seed_len, )
         prob_deltas.append(prob_delta) # (seed_len, )
-
-    print(len(prob_deltas))
+    print(f"Perturbation complete - {len(prob_deltas)} positions analyzed")
+    
+    # Debug: print final data types and shapes for visualization
+    print(f"Final data for visualization:")
+    print(f"  attn_deltas: {len(attn_deltas)} elements, type: {type(attn_deltas)}")
+    print(f"  weights_deltas: {len(weights_deltas)} elements, type: {type(weights_deltas)}")
+    print(f"  prob_deltas: {len(prob_deltas)} elements, type: {type(prob_deltas)}")
+    print(f"  mRNA_seq length: {len(mRNA_seq)}")
     
     # print("Max in delta = ", max(deltas))
     print("plot changes on base logos ...", flush=True)
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_key_LSE_tau.png")
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_key_LSE+MIL.png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
+                 weights_changes=weights_deltas,
                 #  emb_changes=emb_deltas,
                  prob_changes=prob_deltas,
                  seed_start=seed_start,
