@@ -167,7 +167,7 @@ class CharacterTokenizer(PreTrainedTokenizer):
 
     @classmethod
     def from_config(cls, config: Dict) -> "CharacterTokenizer":
-        cfg = {}
+        cfg = {} 
         cfg["characters"] = [chr(i) for i in config["char_ords"]]
         cfg["model_max_length"] = config["model_max_length"]
         return cls(**cfg)

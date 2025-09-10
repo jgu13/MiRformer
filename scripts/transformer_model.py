@@ -1578,7 +1578,7 @@ class QuestionAnsweringModel(nn.Module):
                         "epochs": self.epochs,
                         "learning rate": self.lr,
                     },
-                    tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key","LSE","bag_pooling"],
+                    tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key","LSE","CLS_only"],
                     mode='offline',
                     save_code=False,
                     job_type="train",
@@ -1657,7 +1657,7 @@ class QuestionAnsweringModel(nn.Module):
                     f"embed={self.embed_dim}d",
                     "norm_by_key",
                     "LSE",
-                    "bag_pooling",
+                    "CLS_only",
                 )
                 os.makedirs(model_checkpoints_dir, exist_ok=True)
                 for epoch in range(self.epochs):
@@ -1777,7 +1777,7 @@ if __name__ == "__main__":
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    device="cuda:0",
-                                   epochs=25,
+                                   epochs=15,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
@@ -1797,4 +1797,4 @@ if __name__ == "__main__":
               valid_path=valid_datapath,
               accumulation_step=8,
               training_mode="QA",
-              use_cls_only=False)
+              use_cls_only=True)

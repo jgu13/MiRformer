@@ -14,6 +14,7 @@ evaluate_logs/
 Performance/
 optuna_logs/
 *.log
+*.err
 
 # database
 optuna_database/
