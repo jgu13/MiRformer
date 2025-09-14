@@ -425,18 +425,25 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
 
     # Apply attention mask if provided
     if mask is not None:
+        # assert mask is bool
+        assert mask.dtype == torch.bool, f"mask dtype is {mask.dtype}, expected bool"
         # Expand mask to match attention dimensions (B,H,Lq,Lk)
         if mask.dim() == 2:           # (B, Lk) key mask
+            assert mask.shape == (B, Lk), f"mask shape is {mask.shape}, expected (B, Lk)"
             mask = mask[:, None, None, :].expand(B, H, Lq, Lk)
         elif mask.dim() == 3:         # (B, Lq, Lk)
+            assert mask.shape == (B, Lq, Lk), f"mask shape is {mask.shape}, expected (B, Lq, Lk)"
             mask = mask[:, None, :, :].expand(B, H, Lq, Lk)
-        mask = mask.bool()
-        mask_r = mask.reshape(B*H, Lq, Lk)
-        if slide_on_query:
-            chunk_mask = _chunk(mask_r, w)  # (B*H, num_chunks, 2w, Lk)
+        elif mask.dim() == 4:         # (B, H, Lq, Lk)
+            assert mask.shape == (B, H, Lq, Lk), f"mask shape is {mask.shape}, expected (B, H, Lq, Lk)"
         else:
-            mask_r = mask_r.transpose(1, 2).contiguous() # (B*H, Lk, Lq)
-            chunk_mask = _chunk(mask_r, w) # (B*H, num_chunks, 2w, Lq)
+            raise ValueError(f"mask shape is {mask.shape}, expected (B, Lk), (B, Lq, Lk), or (B, H, Lq, Lk)")
+
+        if slide_on_query:
+            chunk_mask = _chunk(mask, w)  # (B*H, num_chunks, 2w, Lk)
+        else:
+            mask = mask.transpose(1, 2).contiguous() # (B*H, Lk, Lq)
+            chunk_mask = _chunk(mask, w) # (B*H, num_chunks, 2w, Lq)
             chunk_mask = chunk_mask.permute(0, 3, 1, 2).contiguous() # (B*H, Lq, num_chunks, 2w)
         
         # Apply mask with large negative value (but not too large to prevent overflow)
