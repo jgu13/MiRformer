@@ -4,6 +4,8 @@ checkpoints/
 # data
 data/
 TargetScan_dataset/
+Degradome_dataset/
+TarBase_dataset/
 
 # virtual env
 HyenaDNA/
@@ -14,6 +16,7 @@ evaluate_logs/
 Performance/
 optuna_logs/
 *.log
+*.err
 
 # database
 optuna_database/
@@ -32,3 +35,4 @@ build_dataset_output.txt
 dmiso_pairs.txt
 *.out
 unused_data.tar.gz
+

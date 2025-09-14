@@ -9,7 +9,8 @@ import matplotlib.patches as patches
 from matplotlib import colors
 from Data_pipeline import CharacterTokenizer
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
 
 def load_model(
         ckpt_name,
@@ -24,6 +25,7 @@ def load_model(
                             f"embed={model.embed_dim}d",
                             "norm_by_key", 
                             "LSE",
+                            "CLS_only",
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -71,6 +73,7 @@ def predict(model,
             miRNA_seq,
             mRNA_seq_mask,
             miRNA_seq_mask,
+            use_cls_only=False,
             seed_start=-1,
             seed_end=-1):
     model.eval()
@@ -80,9 +83,10 @@ def predict(model,
             mirna = miRNA_seq,
             mrna = mRNA_seq,
             mirna_mask = miRNA_seq_mask,
-            mrna_mask = mRNA_seq_mask
+            mrna_mask = mRNA_seq_mask,
+            use_cls_only=use_cls_only
         )
-        binding_logits, start_logits, end_logits = output
+        binding_logits, binding_weights, start_logits, end_logits = output
         if model.predict_binding:
             binding_prob = F.sigmoid(binding_logits)
             binding_prob = binding_prob.detach().cpu().item()
@@ -241,7 +245,7 @@ def plot_heatmap(model,
     if file_name is not None:
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
     else:
-        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_key_LSE_max.png")
+        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_key_LSE_CLS_only.png")
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
         print(f"Heatmap is saved to {file_name}")
     return fig, ax
@@ -251,7 +255,7 @@ def main():
     mrna_max_len    = 520
     predict_span    = True
     predict_binding = True
-    device          = "cuda:3" 
+    device          = "cuda" 
     args_dict = {"mirna_max_len": mirna_max_len,
                  "mrna_max_len": mrna_max_len,
                  "device": device,
@@ -275,7 +279,7 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    model = load_model(ckpt_name="tau_best_composite_0.7305_0.9115_epoch20.pth",
+    model = load_model(ckpt_name="best_composite_0.8891_0.6256_epoch7.pth",
                        **args_dict)
 
     # Testing the first sequence
@@ -294,7 +298,6 @@ def main():
     tokenizer = CharacterTokenizer(
         characters=["A", "T", "C", "G", "N"],  # add RNA characters, N is uncertain
         model_max_length=model.mrna_max_len,
-        add_special_tokens=False,  # we handle special tokens elsewhere
         padding_side="right",  # since HyenaDNA is causal, we pad on the left
     )
     encoded = encode_seq(
@@ -311,6 +314,9 @@ def main():
     miRNA_ids = [tokenizer._convert_id_to_token(d.item()) for d in miRNA_tokens_squeezed]
 
     model.to(args_dict["device"])
+    use_cls_only = True
+    print(f"Using CLS only: {use_cls_only}")
+    print("Model Prediction ...")
     binding_prob, exact_match, f1 = predict(
             model=model,
             mRNA_seq=encoded["mRNA_seq"],
@@ -319,6 +325,7 @@ def main():
             miRNA_seq_mask=encoded["miRNA_seq_mask"],
             seed_start=seed_start,
             seed_end=seed_end,
+            use_cls_only=use_cls_only,
     )
 
     save_plot_dir = os.path.join(PROJ_HOME, "Performance/TargetScan_test", "TwoTowerTransformer", str(mrna_max_len))
@@ -330,8 +337,8 @@ def main():
                  mRNA_id = mRNA_ID,
                  seed_start = seed_start,
                  seed_end = seed_end,
-                 figsize=(45, 7),
-                 plot_max_only=True,
+                 figsize=(45, 63),
+                 plot_max_only=False,
                  metrics = {"binding_prob": binding_prob, "f1": f1},
                  save_plot_dir=save_plot_dir)
     

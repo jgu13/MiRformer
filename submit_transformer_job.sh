@@ -1,9 +1,9 @@
 #!/bin/bash
-#SBATCH --job-name=bag_pooling
+#SBATCH --job-name=cls_only
 #SBATCH --account=def-liyue
-#SBATCH --time=75:00:00
+#SBATCH --time=28:00:00
 #SBATCH --mem=8G
-#SBATCH --cpus-per-task=5
+#SBATCH --cpus-per-task=4
 #SBATCH --gres=gpu:a100:1
 #SBATCH --output=transformer_500_randomized_start_random_samples_%j.out
 #SBATCH --error=transformer_500_randomized_start_random_samples_%j.err
@@ -53,7 +53,7 @@ cd /home/claris/projects/ctb-liyue/claris/projects/mirLM
 echo "PWD: $(pwd)"
 
 # -------- Logging setup --------
-LOG="train_TargetScan_500_randomized_start_random_samples_bag_pooling.log"
+LOG="train_TargetScan_500_randomized_start_random_samples_CLS_only.log"
 # Run training in the foreground and mirror output to the log file
 srun --unbuffered python -u scripts/transformer_model.py 2>&1 | tee "$LOG"
 

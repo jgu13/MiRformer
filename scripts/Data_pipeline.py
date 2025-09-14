@@ -54,8 +54,7 @@ class CharacterTokenizer(PreTrainedTokenizer):
             "[PAD]": 4,
             "[RESERVED]": 5,
             "[UNK]": 6,
-            "[MRNA_CLS]": 7,
-            **{ch: i + 8 for i, ch in enumerate(characters)},
+            **{ch: i + 7 for i, ch in enumerate(characters)},
         }
         self._vocab_int_to_str = {v: k for k, v in self._vocab_str_to_int.items()}
         
@@ -67,7 +66,6 @@ class CharacterTokenizer(PreTrainedTokenizer):
         unk_token = AddedToken("[UNK]", lstrip=False, rstrip=False)
 
         mask_token = AddedToken("[MASK]", lstrip=True, rstrip=False)
-        mrna_cls_token = AddedToken("[MRNA_CLS]", lstrip=False, rstrip=False)
 
         super().__init__(
             bos_token=bos_token,
@@ -91,8 +89,7 @@ class CharacterTokenizer(PreTrainedTokenizer):
             "[PAD]": 4,
             "[RESERVED]": 5,
             "[UNK]": 6,
-            "[MRNA_CLS]": 7,
-            **{ch: i + 8 for i, ch in enumerate(characters)},
+            **{ch: i + 7 for i, ch in enumerate(characters)},
         }
         self._vocab_int_to_str = {v: k for k, v in self._vocab_str_to_int.items()}
 
@@ -100,10 +97,6 @@ class CharacterTokenizer(PreTrainedTokenizer):
     def vocab_size(self) -> int:
         return len(self._vocab_str_to_int)
     
-    @property
-    def mrna_cls_token_id(self) -> int:
-        return self._vocab_str_to_int["[MRNA_CLS]"]
-
     def _tokenize(self, text: str) -> List[str]:
         return list(text)
 
@@ -167,7 +160,7 @@ class CharacterTokenizer(PreTrainedTokenizer):
 
     @classmethod
     def from_config(cls, config: Dict) -> "CharacterTokenizer":
-        cfg = {}
+        cfg = {} 
         cfg["characters"] = [chr(i) for i in config["char_ords"]]
         cfg["model_max_length"] = config["model_max_length"]
         return cls(**cfg)
@@ -423,24 +416,9 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
             return_attention_mask=True,
         )
         
-        # Prepend global token (MRNA_CLS) to mRNA
+        # Convert mRNA tokenization results to tensors
         mrna_ids = mrna_encoded["input_ids"]
         mrna_attn_mask = mrna_encoded["attention_mask"]
-        
-        # Shift by 1 to make room for global token
-        mrna_ids = mrna_ids[:-1]  # Remove last token to make room
-        mrna_attn_mask = mrna_attn_mask[:-1]  # Remove last attention mask
-        
-        # Prepend global token
-        mrna_ids.insert(0, self.tokenizer.mrna_cls_token_id)  # Use tokenizer's MRNA_CLS token ID
-        mrna_attn_mask.insert(0, 1)  # Global token is always valid
-        
-        # Adjust seed positions (shift by +1 due to prepended global token)
-        if seed_start != -1:
-            seed_start += 1
-        if seed_end != -1:
-            seed_end += 1
-
 
         mirna_ids = torch.tensor(mirna_encoded["input_ids"], dtype=torch.long)
         mirna_attn_mask = torch.tensor(mirna_encoded["attention_mask"], dtype=torch.long)

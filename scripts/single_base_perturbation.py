@@ -12,10 +12,12 @@ from Data_pipeline import CharacterTokenizer
 from plot_transformer_heatmap import plot_heatmap
 
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt"
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 def predict(model, 
+            use_cls_only=False,
             **kwargs
             ):
     model.eval()
@@ -24,11 +26,12 @@ def predict(model,
         miRNA_seq = kwargs["miRNA_seq"]
         mRNA_seq_mask = kwargs["mRNA_seq_mask"]
         miRNA_seq_mask = kwargs["miRNA_seq_mask"] # (B, L)
-        binding_logit, binding_aux, start_logits, end_logits = model(
+        binding_logit, binding_weights, start_logits, end_logits = model(
                                 mirna = miRNA_seq,
                                 mrna = mRNA_seq,
                                 mirna_mask = miRNA_seq_mask,
-                                mrna_mask = mRNA_seq_mask
+                                mrna_mask = mRNA_seq_mask,
+                                use_cls_only=use_cls_only
                             )
         # predicted embedding
         # layer norm
@@ -43,9 +46,9 @@ def predict(model,
         attention_score = attention_score.detach().cpu()
         # binding probability
         if model.predict_binding:
-            # predicted binding weights from binding_aux
-            binding_weights = binding_aux["pos_weights"] # (B, L)
-            binding_weights = binding_weights.detach().cpu()
+            # predicted binding weights from binding_weights
+            if binding_weights is not None:
+                binding_weights = binding_weights.detach().cpu()
             binding_prob = torch.nn.functional.sigmoid(binding_logit)
             binding_prob = binding_prob.detach().cpu()
     return attention_score, binding_prob, binding_weights
@@ -102,7 +105,7 @@ def load_model(ckpt_name,
                             f"embed={args_dict['embed_dim']}d",
                             "norm_by_key",
                             "LSE",
-                            "LSE+MIL", 
+                            "bag_pooling", 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
@@ -120,7 +123,7 @@ def viz_sequence(seq,
                  attn_changes,
                 #  emb_changes,
                  prob_changes,  
-                 weights_changes,
+                 weights_changes=None,
                  base_ax=None,             
                  seed_start=None, 
                  seed_end=None,
@@ -157,15 +160,20 @@ def viz_sequence(seq,
     prob_logo_matrix = lm.alignment_to_matrix([seq]).astype(float) 
     weights_logo_matrix = lm.alignment_to_matrix([seq]).astype(float)
     # Scale the matrix by the changes
-    all_matrices = [attn_logo_matrix, prob_logo_matrix, weights_logo_matrix]
-    all_changes  = [attn_changes, prob_changes, weights_changes]
+    all_matrices = [attn_logo_matrix, prob_logo_matrix]
+    if weights_changes is not None:
+        all_matrices.append(weights_logo_matrix)
+    all_changes  = [attn_changes, prob_changes]
+    if weights_changes is not None:
+        all_changes.append(weights_changes)
     for i, changes in enumerate(all_changes):
         logo_matrix = all_matrices[i]
         for pos, base in enumerate(seq):
             scale = changes[pos]
             logo_matrix.loc[pos, base] *= scale # scale only the original base
     if base_ax is None:
-        fig, logo_axes = plt.subplots(2, 1, figsize=figsize, sharex=True)
+        nrows = 3 if weights_changes is not None else 2
+        fig, logo_axes = plt.subplots(nrows, 1, figsize=figsize, sharex=True)
     else:
         fig = base_ax.figure
         fig.set_size_inches(*figsize, forward=True)
@@ -188,7 +196,7 @@ def viz_sequence(seq,
 
         # re-anchor the colorbar so its bar is the same height as the heatmap
         cax.set_position([
-            cpos.x0-0.05,         # keep the same left edge
+            cpos.x0-0.03,         # keep the same left edge
             heat_pos.y0,     # align bottom with heatmap
             cpos.width,      # keep the same width
             heat_pos.height  # match heatmap’s new height
@@ -208,18 +216,21 @@ def viz_sequence(seq,
                                 w, 
                                 logo_height],
                               sharex=base_ax)
-        logo_ax3 = fig.add_axes(
-                                [x0, 
-                                y0 + h + pad + logo_height + pad + logo_height + pad,
-                                w, 
-                                logo_height],
-                              sharex=base_ax)
-        logo_axes = [logo_ax1, logo_ax2, logo_ax3]
+        if weights_changes is not None:
+            logo_ax3 = fig.add_axes(
+                                    [x0, 
+                                    y0 + h + pad + logo_height + pad + logo_height + pad,
+                                    w, 
+                                    logo_height],
+                                sharex=base_ax)
+        logo_axes = [logo_ax1, logo_ax2] + ([logo_ax3] if weights_changes is not None else [])
 
     # fig, axs = plt.subplots(nrows=2, ncols=1, figsize=(20,8))
-    ax_titles = ["Attention\nChanges", "Probability\nChanges", "Binding\nWeights"]
+    ax_titles = ["Attention\nChanges", "Probability\nChanges"]
+    if weights_changes is not None:
+        ax_titles.append("Binding\nWeights")
     for logo_matrix, ax, ax_title in zip(
-        [attn_logo_matrix, prob_logo_matrix, weights_logo_matrix],
+        [attn_logo_matrix, prob_logo_matrix] + ([weights_logo_matrix] if weights_changes is not None else []),
         logo_axes,
         ax_titles):
         # Create the sequence logo
@@ -273,7 +284,7 @@ def main():
     predict_span    = True
     predict_binding = True
     if torch.cuda.is_available():
-        device = "cuda:1"
+        device = "cuda"
     elif torch.backends.mps.is_available():
         device = "mps"
     else:
@@ -289,7 +300,7 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer":True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="50k_best_composite_0.8047_0.9343_epoch39.pth",
+    model = load_model(ckpt_name="best_composite_0.8925_0.6329_epoch9.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
@@ -319,7 +330,6 @@ def main():
     tokenizer = CharacterTokenizer(
         characters=["A", "T", "C", "G", "N"],  # add RNA characters, N is uncertain
         model_max_length=model.mrna_max_len,
-        add_special_tokens=False,  # we handle special tokens elsewhere
         padding_side="right",  # since HyenaDNA is causal, we pad on the left
     )
     encoded = encode_seq(
@@ -329,8 +339,10 @@ def main():
         miRNA_seq=miRNA_seq,
     )
 
+    print("WT prediction ...", flush=True)
     model.to(args_dict["device"])
-    wt_attn_score, wt_binding_prob, wt_binding_weights = predict(model, **encoded)
+    use_cls_only = False
+    wt_attn_score, wt_binding_prob, wt_binding_weights = predict(model, use_cls_only=use_cls_only, **encoded)
     # print("Wild-type prediction = ", wt_prob)
     
     # convert mRNA seq tokens to mRNA ids
@@ -348,8 +360,6 @@ def main():
                  seed_start = seed_start,
                  seed_end = seed_end,
                  plot_max_only=True) 
-                 seed_end = seed_end,
-                 plot_max_only=True) 
 
     # perturb mRNA sequence for attention and probability changes
     attn_deltas = []
@@ -358,12 +368,13 @@ def main():
     
     # Extract binding weights directly from model output (no perturbation needed)
     actual_mrna_len = len(mRNA_seq)
-    # wt_binding_weights has shape (batch_size, mrna_len), so we need to squeeze and slice correctly
-    binding_weights_actual = wt_binding_weights.squeeze(0)[:actual_mrna_len]  # Extract weights for actual sequence
-    weights_deltas = binding_weights_actual.tolist()  # Convert to list for visualization
-    
-    print(f"Using binding weights directly - shape: {binding_weights_actual.shape}")
-    print(f"Original binding weights shape: {wt_binding_weights.shape}")
+    if wt_binding_weights is not None:
+        # wt_binding_weights has shape (batch_size, mrna_len), so we need to squeeze and slice correctly
+        binding_weights_actual = wt_binding_weights.squeeze(0)[:actual_mrna_len]  # Extract weights for actual sequence
+        weights_deltas = binding_weights_actual.tolist()  # Convert to list for visualization
+        print(f"  weights_deltas: {len(weights_deltas)} elements, type: {type(weights_deltas)}")
+    else:
+        weights_deltas = None
     
     for pos in range(len(mRNA_seq)):
         attn_score_delta_list = []
@@ -377,7 +388,7 @@ def main():
                 mRNA_seq=perturbed_mRNA,
                 miRNA_seq=miRNA_seq,
             )
-            attn_score, binding_prob, _ = predict(model, **encoded)  # Ignore binding_weights from perturbation
+            attn_score, binding_prob, _ = predict(model, use_cls_only=use_cls_only, **encoded)  # Ignore binding_weights from perturbation
             attn_score_delta = abs(wt_attn_score - attn_score) # (L,)
             binding_prob_delta = abs(wt_binding_prob - binding_prob)  # Both are scalars
             attn_score_delta_list.append(attn_score_delta)
@@ -394,13 +405,12 @@ def main():
     # Debug: print final data types and shapes for visualization
     print(f"Final data for visualization:")
     print(f"  attn_deltas: {len(attn_deltas)} elements, type: {type(attn_deltas)}")
-    print(f"  weights_deltas: {len(weights_deltas)} elements, type: {type(weights_deltas)}")
     print(f"  prob_deltas: {len(prob_deltas)} elements, type: {type(prob_deltas)}")
     print(f"  mRNA_seq length: {len(mRNA_seq)}")
     
     # print("Max in delta = ", max(deltas))
     print("plot changes on base logos ...", flush=True)
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_key_LSE+MIL.png")
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_key_LSE_bag_pooling.png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
                  weights_changes=weights_deltas,
@@ -409,7 +419,7 @@ def main():
                  seed_start=seed_start,
                  seed_end=seed_end,
                  base_ax=ax_attn,
-                 figsize=(45, 12),
+                 figsize=(45, 9),
                  file_name=file_path)
 
 if __name__ == '__main__':

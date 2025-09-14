@@ -138,23 +138,16 @@ class LongformerAttention(nn.Module):
                 output_attentions=False,):
 
         bad_index = check_key_mask_rows(attention_mask)
+        print(f"bad index in {attention_mask.shape} attention mask: {bad_index}")
 
         if self.cross_attn:
             bsz, q_len, _ = query.shape
             _, k_len, _   = key.shape
             _, v_len, _   = value.shape
             
-            # 1) Separate CLS token from the rest of the query
-            cls_q = query[:, :1, :]  # (B, 1, D) - CLS token
-            q_no_cls = query[:, 1:, :]  # (B, L_q-1, D) - rest of query tokens
-            
-            # Process CLS token with full cross attention
-            cls_q_proj = self.query(cls_q)  # (B, 1, D)
-            cls_q_proj = cls_q_proj.view(bsz, 1, self.num_heads, self.head_dim).transpose(2, 1).contiguous()  # (B, H, 1, D)
-            
             # Process rest of query with sliding window cross attention
-            q_no_cls_proj = self.query(q_no_cls)  # (B, L_q-1, D)
-            q_no_cls_proj = q_no_cls_proj.view(bsz, q_len-1, self.num_heads, self.head_dim).transpose(2, 1).contiguous()  # (B, H, L_q-1, D)
+            q = self.query(query)  # (B, L_q, D)
+            q = q.view(bsz, q_len, self.num_heads, self.head_dim).transpose(2, 1).contiguous()  # (B, H, L_q, D)
             
             # Process key and value
             k = self.key(key)  # (B, L_k, D)
@@ -163,8 +156,7 @@ class LongformerAttention(nn.Module):
             v = v.view(bsz, v_len, self.num_heads, self.head_dim).transpose(2, 1).contiguous()  # (B, H, L_v, D)
 
             # Apply rotary embeddings
-            cls_q_proj = self.rotary(cls_q_proj)
-            q_no_cls_proj = self.rotary(q_no_cls_proj)
+            q = self.rotary(q)
             k = self.rotary(k)
             
             # Handle attention masks
@@ -173,45 +165,29 @@ class LongformerAttention(nn.Module):
                 assert query_attention_mask.shape == (bsz, q_len)
                 attention_mask = (attention_mask > 0)  # bool
                 query_attention_mask = (query_attention_mask > 0)  # bool
-                # Create mask for CLS cross attention (B, 1, L_k)
-                cls_mask = attention_mask[:, None, :] & query_attention_mask[:, :1, None]
-                # Create mask for sliding window cross attention (B, L_q-1, L_k)
-                no_cls_mask = attention_mask[:, None, :] & query_attention_mask[:, 1:, None]
+                # Create mask for cross attention (B, L_q, L_k)
+                mask = attention_mask[:, None, :] & query_attention_mask[:, :, None]
+                mask = mask[:, None, :, :].expand(bsz, self.num_heads, q_len, k_len) # (B, H, L_q, L_k)
 
-            # 2) Full cross attention for CLS token
-            # CLS attends to all key positions
-            cls_attn_scores = torch.einsum('bhqd,bhkd->bhqk', cls_q_proj, k) / math.sqrt(self.head_dim) # (B, H, 1, L_k)
-            cls_mask_expanded = cls_mask.unsqueeze(1).expand(bsz, self.num_heads, 1, k_len)  # (B, H, 1, L_k)
-            cls_attn_scores = cls_attn_scores.masked_fill(~cls_mask_expanded, -10000.0)
-            cls_attn_probs = F.softmax(cls_attn_scores, dim=-1)  # (B, H, 1, L_k)
-            z_cls = torch.einsum('bhqk,bhkd->bhqd', cls_attn_probs, v)  # (B, H, 1, D)
-
-            # pad q_no_cls to multiple of 2 times window size
-            pad_q = torch.full((bsz, self.num_heads, 1, self.head_dim), 0.0, device=q_no_cls_proj.device)
-            q_no_cls_proj = torch.cat([q_no_cls_proj, pad_q], dim=2)
-            pad_m = torch.full((bsz, 1, k_len), False, device=no_cls_mask.device)
-            no_cls_mask = torch.cat([no_cls_mask, pad_m], dim=1)
+            # check if the attention mask is all False
+            if mask.all() == False:
+                raise ValueError("Attention mask is all False")
 
             # 3) Sliding window cross attention for rest of query
-            z_no_cls, sliding_attn_weights = sliding_window_cross_attention(
-                Q=q_no_cls_proj, K=k, V=v, 
+            z, sliding_attn_weights = sliding_window_cross_attention(
+                Q=q, K=k, V=v, 
                 w=self.attention_window, 
-                mask=no_cls_mask, 
+                mask=mask, 
                 norm_by_query=False,
                 use_lse=True,)    # (B, H, L_q, D)
-
-            # drop the padded tokens from z_no_cls
-            z_no_cls = z_no_cls[:, :, :-1, :]
-            # 4) Concatenate CLS and non-CLS outputs
-            context_output = torch.cat([z_cls, z_no_cls], dim=2)  # (B, H, L_q, D)
             
             # Reshape to final output format
-            B, H, Lq, D = context_output.shape
-            context_output = context_output.permute(0, 2, 1, 3).contiguous()  # (B, L_q, H, D)
-            context_output = context_output.view(B, Lq, H*D)  # (B, L_q, embed_dim)
-            context_output = self.out(context_output)  # (B, L_q, embed_dim)
+            B, H, Lq, D = z.shape
+            z = z.permute(0, 2, 1, 3).contiguous()  # (B, L_q, H, D)
+            z = z.view(B, Lq, H*D)  # (B, L_q, embed_dim)
+            z = self.out(z)  # (B, L_q, embed_dim)
             self.last_attention = sliding_attn_weights.detach().cpu()
-            return (context_output, sliding_attn_weights)
+            return (z, sliding_attn_weights)
         else:
             hidden_states = x
             bsz, seq_len, _ = x.shape
@@ -587,35 +563,27 @@ class TransformerEncoder(nn.Module):
 class BindingHead(nn.Module):
     """
     Binding head for MIL binding prediction.
-    If use_cls_only=True, only use the CLS token for binding prediction.
-    Otherwise, use the LSE pooling over all mRNA tokens.
     """
     def __init__(self, d_model, output_size, hidden_sizes=[1024, 1024, 1], tau=1.0):
         super().__init__()
         self.seed_scorer = LinearHead(input_size=d_model, hidden_sizes=hidden_sizes, output_size=output_size, dropout=0.2)
         self.tau = tau
 
-    def forward(self, z_mrna, mrna_mask, use_cls_only=False):
+    def forward(self, z_mrna, mrna_mask):
         """
         z_mrna: (B, Lm, D)  -- encoder/cross-attn output over mRNA tokens
         mrna_mask: (B, Lm)  -- 1 valid, 0 pad (CLS is valid=1)
-        returns: binding_logit (B,), weights (None if use_cls_only=True)
+        returns: binding_logit (B,), weights (B, Lm)
         """
-        if use_cls_only:
-            z_mrna = z_mrna[:, 0, :]    # (B, D)
-            binding_logit = self.seed_scorer(z_mrna).squeeze(-1) # (B,)
-            return binding_logit, None
-        else:
-            mrna_mask[:, 0] = 0                       # remove CLS token
-            s = self.seed_scorer(z_mrna).squeeze(-1)  # (B, Lm)                                      
-            s = s.masked_fill(mrna_mask == 0, -1e4)   # never use pads
-            # LSE pooling (smooth max)
-            x = s / self.tau
-            m = x.max(dim=-1, keepdim=True).values
-            lse = m + torch.log(torch.clamp(torch.exp(x - m).sum(dim=-1, keepdim=True), min=1e-20))
-            binding_logit = (lse * self.tau).squeeze(-1)             # (B,)
-            w = torch.softmax(s / self.tau, dim=-1) * (mrna_mask > 0)
-            w = w / (w.sum(dim=-1, keepdim=True) + 1e-9)
+        s = self.seed_scorer(z_mrna).squeeze(-1)  # (B, Lm)                                      
+        s = s.masked_fill(mrna_mask == 0, -1e4)   # never use pads
+        # LSE pooling (smooth max)
+        x = s / self.tau
+        m = x.max(dim=-1, keepdim=True).values
+        lse = m + torch.log(torch.clamp(torch.exp(x - m).sum(dim=-1, keepdim=True), min=1e-20))
+        binding_logit = (lse * self.tau).squeeze(-1)             # (B,)
+        w = torch.softmax(s / self.tau, dim=-1) * (mrna_mask > 0)
+        w = w / (w.sum(dim=-1, keepdim=True) + 1e-9)
         return binding_logit, w
 
 class LinearHead(nn.Module):
@@ -756,14 +724,11 @@ class CrossAttentionPredictor(nn.Module):
             # Initialize the new row with Xavier initialization
             nn.init.xavier_uniform_(self.sn_embedding.weight[-1:])
     
-    def forward(self, mirna, mrna, mrna_mask, mirna_mask, use_cls_only=False):
+    def forward(self, mirna, mrna, mrna_mask, mirna_mask):
         mirna_sn_embedding = self.sn_embedding(mirna)
         mrna_sn_embedding = self.sn_embedding(mrna)
         
-        # Note: mrna should already contain the global token at position 0
-        # The global token should be prepended in the dataset preprocessing
-        
-        # Create Longformer attention mask for mRNA (position 0 is global)
+        # Create Longformer attention mask for mRNA
         if self.use_longformer:
             # Longformer convention: -1=pad, 0=local, 1=global
             # Convert from mrna_mask (0=pad, 1=valid) to Longformer format
@@ -772,9 +737,6 @@ class CrossAttentionPredictor(nn.Module):
                 torch.zeros_like(mrna_mask),  # Set all valid tokens to 0 (local attention)
                 torch.full_like(mrna_mask, fill_value=-1)  # Set original 0s (pads) to -1
             )
-            lf_mask[:, 0] = 1  # Global token at index 0 (1 = global attention)
-            # Verify global token is set
-            assert (lf_mask[:, 0] == 1).all(), "Global token not properly set in Longformer mask"
         
         # add N-gram CNN-encoded embedding
         mirna_cnn_embedding = self.cnn_embedding(mirna_sn_embedding.transpose(-1, -2)) # (batch_size, embed_dim, mirna_len)
@@ -809,7 +771,7 @@ class CrossAttentionPredictor(nn.Module):
         z_norm = z_norm.masked_fill(mrna_mask.unsqueeze(-1)==0, 0) # (batch_size, mrna_len, embed_dim)
         
         # MIL binding head on mRNA positions (including global token at position 0)
-        binding_logit, binding_weights = self.binding_head(z_norm, mrna_mask, use_cls_only=use_cls_only)
+        binding_logit, binding_weights = self.binding_head(z_norm, mrna_mask)
         self.binding_weights = binding_weights # (batch_size, mrna_len) for visualization
 
         if self.predict_span:
@@ -902,13 +864,11 @@ class QuestionAnsweringModel(nn.Module):
                 mirna, 
                 mrna, 
                 mrna_mask, 
-                mirna_mask,
-                use_cls_only=False):
+                mirna_mask):
         return self.predictor(mirna=mirna, 
                               mrna=mrna, 
                               mrna_mask=mrna_mask,
-                              mirna_mask=mirna_mask,
-                              use_cls_only=use_cls_only)
+                              mirna_mask=mirna_mask)
     
     @staticmethod
     def compute_span_metrics(start_preds, end_preds, start_labels, end_labels):
@@ -959,7 +919,6 @@ class QuestionAnsweringModel(nn.Module):
               optimizer, 
               device,
               epoch,
-              use_cls_only=False,
               scheduler=None,
               accumulation_step=1,
               alpha1=1,
@@ -984,7 +943,6 @@ class QuestionAnsweringModel(nn.Module):
                 mrna=batch["mrna_input_ids"],
                 mirna_mask=mirna_mask,
                 mrna_mask=mrna_mask,
-                use_cls_only=use_cls_only,
             )
             binding_logit, binding_weights, start_logits, end_logits = outputs 
                
@@ -1074,8 +1032,7 @@ class QuestionAnsweringModel(nn.Module):
                   device,
                   alpha1=1,
                   alpha2=0.75,
-                  evaluation=False,
-                  use_cls_only=False):
+                  evaluation=False):
         model.eval()
         total_loss = 0.0 
         all_start_preds, all_end_preds        = [], []
@@ -1094,7 +1051,6 @@ class QuestionAnsweringModel(nn.Module):
                     mrna=batch["mrna_input_ids"],
                     mrna_mask=mrna_mask,
                     mirna_mask=mirna_mask,
-                    use_cls_only=use_cls_only,
                 )
                 binding_logit, binding_weights, start_logits, end_logits = outputs
 
@@ -1341,8 +1297,7 @@ class QuestionAnsweringModel(nn.Module):
             evaluation=False,
             accumulation_step=1,
             ckpt_name="",
-            training_mode="QA",
-            use_cls_only=False):
+            training_mode="QA"):
         """
         model: nn.Module
             The model to train or evaluate.
@@ -1361,9 +1316,6 @@ class QuestionAnsweringModel(nn.Module):
         training_mode: str
             "BIO": BIO tagging
             "QA": Question Answering
-        use_cls_only: bool
-            If True, only use the CLS token for prediction.
-            If False, use the CLS token for prediction and the rest of the tokens for attention.
         """
         tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
                                        model_max_length=self.mrna_max_len,
@@ -1581,7 +1533,7 @@ class QuestionAnsweringModel(nn.Module):
                         "epochs": self.epochs,
                         "learning rate": self.lr,
                     },
-                    tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key","LSE","bag_pooling"],
+                    tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key","LSE"],
                     mode='offline',
                     save_code=False,
                     job_type="train",
@@ -1660,7 +1612,6 @@ class QuestionAnsweringModel(nn.Module):
                     f"embed={self.embed_dim}d",
                     "norm_by_key",
                     "LSE",
-                    "bag_pooling",
                 )
                 os.makedirs(model_checkpoints_dir, exist_ok=True)
                 for epoch in range(self.epochs):
@@ -1675,7 +1626,6 @@ class QuestionAnsweringModel(nn.Module):
                         epoch=epoch,
                         accumulation_step=accumulation_step,
                         trainable_params=trainable_params,
-                        use_cls_only=use_cls_only,
                     )
 
                     # EVALUATION
@@ -1683,7 +1633,6 @@ class QuestionAnsweringModel(nn.Module):
                         model=model,
                         dataloader=val_loader,
                         device=self.device,
-                        use_cls_only=use_cls_only,
                     )
 
                     # SAFE METRIC LOGGING
@@ -1780,7 +1729,7 @@ if __name__ == "__main__":
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    device="cuda:0",
-                                   epochs=25,
+                                   epochs=15,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
@@ -1800,4 +1749,4 @@ if __name__ == "__main__":
               valid_path=valid_datapath,
               accumulation_step=8,
               training_mode="QA",
-              use_cls_only=False)
+)
