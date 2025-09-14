@@ -153,70 +153,64 @@ start_time = time.time()
 positive_samples = []
 max_len = 0
 
-# done = set()
-# with open(os.path.join(data_dir, f"positive_samples_{str(window_len)}_randomized_start.csv")) as f:
-#     next(f)  # 跳过 header
-#     for line in f:
-#         ll = line.strip().split("\t")
-#         miRNA = ll[1]
-#         trans = ll[0]
-#         done.add((miRNA, trans))
-# with open(os.path.join(data_dir, f"mouse_positive_samples_{str(window_len)}_randomized_start.csv"), "w", newline="") as f:
-#     writer = csv.DictWriter(f, fieldnames=["Transcript ID", 
-#                                            "miRNA ID", 
-#                                            "miRNA sequence", 
-#                                            "mRNA sequence", 
-#                                            "seeds",
-#                                            "label"], delimiter="\t")
-#     writer.writeheader()
-#     for positive_pair in positive_pairs:
-#         miRNA_ID       = positive_pair.get("miRNA", "")
-#         tran_id        = positive_pair.get("Transcript_ID", "")
-#         # if (miRNA_ID, tran_id) in done:
-#         #     continue
-#         if miRNA_ID: 
-#             miRNA_seq = miRNA_df.loc[miRNA_df["MiRBase ID"] == miRNA_ID, "Mature sequence"]
-#             miRNA_seq = miRNA_seq.values[0]
-#         if tran_id:
-#             mRNA_seq   = mRNA_df.loc[(mRNA_df["Transcript ID"] == tran_id), "mRNA sequence"]
-#             orig_seeds = positive_pair["UTR_coords"]
-#             orig_seeds = sorted(orig_seeds)
-#             orig_seed_start = orig_seeds[0][0] # first seed start
-#             orig_seed_end   = orig_seeds[-1][1] # last seed end
-#             if (len(mRNA_seq) > 0) and (len(mRNA_seq.values[0]) > orig_seed_start) and (len(mRNA_seq.values[0]) > orig_seed_end):    
-#                 mRNA_seq = mRNA_seq.values[0]
-#                 # return a list of mRNA seq segments containing shifted seeds
-#                 res_list = get_window_len_multi_seeds(mRNA_seq=mRNA_seq,
-#                                                 window_len=window_len,
-#                                                 seeds = orig_seeds,)
-#                 for res in res_list:
-#                     valid_seeds = []
-#                     for seed_start, seed_end in res["seeds"]:
-#                         seed = res["mRNA sequence"][seed_start:seed_end+1]
-#                         if check_complementarity(miRNA=miRNA_seq, mRNA=seed): # check seed complementarilty in mRNA segments
-#                             max_len = max(max_len, len(res["mRNA sequence"]))
-#                             valid_seeds.append((seed_start, seed_end))
-#                     if len(valid_seeds) > 0:
-#                         writer.writerow({
-#                                         "Transcript ID":  tran_id,
-#                                         "miRNA ID":       miRNA_ID,
-#                                         "miRNA sequence": miRNA_seq,
-#                                         "mRNA sequence":  res["mRNA sequence"],
-#                                         "seeds":          valid_seeds,
-#                                         "label":          1
-#                                         })
-#                     else:
-#                         raise RuntimeError(f"No complementary seed found in miRNA:{miRNA_ID}: {miRNA_seq} and mRNA id:{tran_id}: {mRNA_seq}\noriginal seed start:{orig_seed_start}, original seed end:{orig_seed_end}\nmRNA segment: {res['mRNA sequence']}\n.")    
-#             else:
-#                 print(f"One of the following happened to transcript [{tran_id}]:"
-#                     f"1. No such gene is found OR "
-#                     f"2. mRNA length <= seed start OR "
-#                     f"3. mRNA length <= seed end", flush=True)       
-#         else:
-#             print(f"Cannot find mRNA seq: [{tran_id}].", flush=True)
+with open(os.path.join(data_dir, f"mouse_positive_samples_{str(window_len)}_randomized_start.csv"), "w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=["Transcript ID", 
+                                           "miRNA ID", 
+                                           "miRNA sequence", 
+                                           "mRNA sequence", 
+                                           "seeds",
+                                           "label"], delimiter="\t")
+    writer.writeheader()
+    for positive_pair in positive_pairs:
+        miRNA_ID       = positive_pair.get("miRNA", "")
+        tran_id        = positive_pair.get("Transcript_ID", "")
+        # if (miRNA_ID, tran_id) in done:
+        #     continue
+        if miRNA_ID: 
+            miRNA_seq = miRNA_df.loc[miRNA_df["MiRBase ID"] == miRNA_ID, "Mature sequence"]
+            miRNA_seq = miRNA_seq.values[0]
+        if tran_id:
+            mRNA_seq   = mRNA_df.loc[(mRNA_df["Transcript ID"] == tran_id), "mRNA sequence"]
+            orig_seeds = positive_pair["UTR_coords"]
+            orig_seeds = sorted(orig_seeds)
+            orig_seed_start = orig_seeds[0][0] # first seed start
+            orig_seed_end   = orig_seeds[-1][1] # last seed end
+            if (len(mRNA_seq) > 0) and (len(mRNA_seq.values[0]) > orig_seed_start) and (len(mRNA_seq.values[0]) > orig_seed_end):    
+                mRNA_seq = mRNA_seq.values[0]
+                # return a list of mRNA seq segments containing shifted seeds
+                res_list = get_window_len_multi_seeds(mRNA_seq=mRNA_seq,
+                                                window_len=window_len,
+                                                seeds = orig_seeds,)
+                for res in res_list:
+                    valid_seeds = []
+                    for seed_start, seed_end in res["seeds"]:
+                        seed = res["mRNA sequence"][seed_start:seed_end+1]
+                        if check_complementarity(miRNA=miRNA_seq, mRNA=seed): # check seed complementarilty in mRNA segments
+                            max_len = max(max_len, len(res["mRNA sequence"]))
+                            valid_seeds.append((seed_start, seed_end))
+                    if len(valid_seeds) > 0:
+                        writer.writerow({
+                                        "Transcript ID":  tran_id,
+                                        "miRNA ID":       miRNA_ID,
+                                        "miRNA sequence": miRNA_seq,
+                                        "mRNA sequence":  res["mRNA sequence"],
+                                        "seeds":          valid_seeds,
+                                        "label":          1
+                                        })
+                    else:
+                        raise RuntimeError(f"No complementary seed found in miRNA:{miRNA_ID}: {miRNA_seq} \
+                            and mRNA id:{tran_id}: {mRNA_seq}\noriginal seed start:{orig_seed_start}, \
+                            original seed end:{orig_seed_end}\nmRNA segment: {res['mRNA sequence']}\n.")
+            else:
+                print(f"One of the following happened to transcript [{tran_id}]:"
+                    f"1. No such gene is found OR "
+                    f"2. mRNA length <= seed start OR "
+                    f"3. mRNA length <= seed end", flush=True)       
+        else:
+            print(f"Cannot find mRNA seq: [{tran_id}].", flush=True)
 
-# print("Time taken to put together positive samples = ", (time.time() - start_time) / 60)
-# print(f"Maximum mRNA length = {max_len}.")
+print("Time taken to put together positive samples = ", (time.time() - start_time) / 60)
+print(f"Maximum mRNA length = {max_len}.")
 
 
 # assemble negative pairs

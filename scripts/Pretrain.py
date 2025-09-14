@@ -5,6 +5,10 @@ import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
+import torch.multiprocessing as mp
 
 import os
 import math
@@ -21,6 +25,19 @@ from utils import load_dataset
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
+
+def setup(rank, world_size):
+    """Initialize the process group for distributed training."""
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    
+    # Initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+def cleanup():
+    """Clean up the process group."""
+    dist.destroy_process_group()
 
 def cosine_decay(total, step, min_factor=0.1):
     """
@@ -44,7 +61,8 @@ def pretrain_loop(
             pad_id: int, 
             vocab_size: int,
             accumulation_step=1, 
-            sigma=1.0,):
+            sigma=1.0,
+            rank=0):
     model.train()
     total_loss = 0.0
     total_loss1 = 0.0
@@ -104,26 +122,28 @@ def pretrain_loop(
                 if scheduler is not None: scheduler.step()
                 optimizer.zero_grad()
                 
-                # Log to wandb during training
-                wandb.log({
-                    "train/batch_loss1": loss1.item(),
-                    "train/batch_loss2": loss2.item(),
-                    "train/batch_loss3": loss3.item(),
-                    "train/batch_loss_reg": loss_reg.item(),
-                    "train/batch_total_loss": loss.item(),
-                    "train/learning_rate": optimizer.param_groups[0]['lr'],
-                    "train/epoch": epoch,
-                    "train/batch": batch_idx
-                })
+                # Log to wandb during training (only on rank 0)
+                if rank == 0:
+                    wandb.log({
+                        "train/batch_loss1": loss1.item(),
+                        "train/batch_loss2": loss2.item(),
+                        "train/batch_loss3": loss3.item(),
+                        "train/batch_loss_reg": loss_reg.item(),
+                        "train/batch_total_loss": loss.item(),
+                        "train/learning_rate": optimizer.param_groups[0]['lr'],
+                        "train/epoch": epoch,
+                        "train/batch": batch_idx
+                    })
                 
-                print(
-                    f"Train Epoch: {epoch} "
-                    f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
-                    f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
-                    f"loss1={loss1.item():.3f} loss2={loss2.item():.3f} loss3={loss3.item():.3f} reg={loss_reg.item():.3f} "
-                    f"Avg loss: {sum(loss_list) / len(loss_list):.6f}\n",
-                    flush=True
-                )
+                if rank == 0:
+                    print(
+                        f"Train Epoch: {epoch} "
+                        f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
+                        f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
+                        f"loss1={loss1.item():.3f} loss2={loss2.item():.3f} loss3={loss3.item():.3f} reg={loss_reg.item():.3f} "
+                        f"Avg loss: {sum(loss_list) / len(loss_list):.6f}\n",
+                        flush=True
+                    )
                 loss_list = []
         total_loss += loss.item() * accumulation_step
     
@@ -142,17 +162,20 @@ def pretrain_loop(
     avg_loss3 = total_loss3 / num_batches
     avg_loss_reg = total_loss_reg / num_batches
     
-    # Log epoch averages to wandb
-    wandb.log({
-        "train/epoch_loss1": avg_loss1,
-        "train/epoch_loss2": avg_loss2,
-        "train/epoch_loss3": avg_loss3,
-        "train/epoch_loss_reg": avg_loss_reg,
-        "train/epoch_total_loss": avg_loss,
-        "train/epoch": epoch
-    })
+    # Log epoch averages to wandb (only on rank 0)
+    if rank == 0:
+        wandb.log({
+            "train/epoch_loss1": avg_loss1,
+            "train/epoch_loss2": avg_loss2,
+            "train/epoch_loss3": avg_loss3,
+            "train/epoch_loss_reg": avg_loss_reg,
+            "train/epoch_total_loss": avg_loss,
+            "train/epoch": epoch
+        })
     
-    print(f"Epoch {epoch+1} training completed with avg loss: {avg_loss:.6f}")
+    if rank == 0:
+        print(f"Epoch {epoch+1} training completed with avg loss: {avg_loss:.6f}")
+        
     return {"Avg Loss": avg_loss, 
             "Loss1": avg_loss1, 
             "Loss2": avg_loss2, 
@@ -166,7 +189,8 @@ def evaluate_mlm(model,
                 device, 
                 vocab_size,
                 pad_id,
-                mask_id):
+                mask_id,
+                rank=0):
     model.eval()
     pretrain_wrapper.eval()
     
@@ -216,11 +240,12 @@ def evaluate_mlm(model,
     total_masked = total_masked1 + total_masked2 + total_masked3
     overall_acc = total_correct / max(total_masked, 1)
     
-    print(f"Evaluation Results:")
-    print(f"  Stage 1 (Baseline): Accuracy={acc1:.4f}")
-    print(f"  Stage 2 (Seed mRNA): Accuracy={acc2:.4f}")
-    print(f"  Stage 3 (Bispan): Accuracy={acc3:.4f}")
-    print(f"  Overall: Loss={total_loss:.4f}, Accuracy={overall_acc:.4f}")
+    if rank == 0:
+        print(f"Evaluation Results:")
+        print(f"  Stage 1 (Baseline): Accuracy={acc1:.4f}")
+        print(f"  Stage 2 (Seed mRNA): Accuracy={acc2:.4f}")
+        print(f"  Stage 3 (Bispan): Accuracy={acc3:.4f}")
+        print(f"  Overall: Loss={total_loss:.4f}, Accuracy={overall_acc:.4f}")
     
     return {
         'overall_loss': total_loss,
@@ -230,24 +255,254 @@ def evaluate_mlm(model,
         'stage3_acc': acc3
     }
 
-def run(epochs, 
-        device, 
-        accumulation_step=1, 
-        mrna_max_len=520, 
-        mirna_max_len=24, 
-        embed_dim=256, 
-        num_heads=8, 
-        num_layers=4, 
-        ff_dim=1024, 
-        dropout_rate=0.1, 
-        batch_size=32,
-        lr=1e-4):
+def run_ddp(rank, world_size, epochs, 
+            accumulation_step=1, 
+            mrna_max_len=520, 
+            mirna_max_len=24, 
+            embed_dim=256, 
+            num_heads=8, 
+            num_layers=4, 
+            ff_dim=1024, 
+            dropout_rate=0.1, 
+            batch_size=32,
+            lr=1e-4):
+    """Run distributed training on a single process."""
+    
+    # Setup distributed training
+    setup(rank, world_size)
+    
+    # Set device for this process
+    device = f'cuda:{rank}'
     tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
                                 model_max_length=mrna_max_len,
                                 padding_side="right")
     
-    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start_random_samples.csv")
-    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start_random_samples.csv")
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start_random_samples.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start_random_samples.csv")
+
+    if rank == 0:
+        print(f"Loading training data from: {train_path}")
+        print(f"Loading validation data from: {valid_path}")
+    
+    ds_train = QuestionAnswerDataset(data=load_dataset(train_path, sep=','),
+                                    mrna_max_len=mrna_max_len,
+                                    mirna_max_len=mirna_max_len,
+                                    tokenizer=tokenizer,
+                                    seed_start_col="seed start",
+                                    seed_end_col="seed end",)
+    
+    ds_val = QuestionAnswerDataset(data=load_dataset(valid_path, sep=','),
+                                  mrna_max_len=mrna_max_len,
+                                  mirna_max_len=mirna_max_len,
+                                  tokenizer=tokenizer,
+                                  seed_start_col="seed start",
+                                  seed_end_col="seed end",)
+    
+    # Create distributed samplers
+    train_sampler = DistributedSampler(ds_train, num_replicas=world_size, rank=rank, shuffle=True)
+    val_sampler = DistributedSampler(ds_val, num_replicas=world_size, rank=rank, shuffle=False)
+    
+    train_loader = DataLoader(ds_train, batch_size=batch_size, sampler=train_sampler, num_workers=4, pin_memory=True)
+    val_loader = DataLoader(ds_val, batch_size=batch_size, sampler=val_sampler, num_workers=4, pin_memory=True)
+    
+    if rank == 0:
+        print("Creating model...")
+    
+    model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
+                                   mirna_max_len=mirna_max_len,
+                                   device=device,
+                                   epochs=epochs,
+                                   embed_dim=embed_dim,
+                                   num_heads=num_heads,
+                                   num_layers=num_layers,
+                                   ff_dim=ff_dim,
+                                   batch_size=batch_size,
+                                   lr=3e-5,
+                                   seed=10020,
+                                   predict_span=True,
+                                   predict_binding=True,
+                                   use_longformer=True)
+    
+    if rank == 0:
+        print("Creating pretrain wrapper...")
+    
+    pretrain_wrapper = PairedPretrainWrapper(
+                        base_model = model, 
+                        vocab_size = tokenizer.vocab_size, 
+                        d_model    = embed_dim,
+                        embed_weight = model.predictor.sn_embedding.weight)
+
+    # Move models to device
+    model.to(device)
+    pretrain_wrapper.to(device)
+    
+    # Wrap models with DDP
+    model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    pretrain_wrapper = DDP(pretrain_wrapper, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+
+    optimizer = AdamW(pretrain_wrapper.parameters(), lr=lr)
+
+    # Initialize wandb only on rank 0
+    if rank == 0:
+        wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+        run = wandb.init(
+            project="mirna-pretraining-ddp",
+            name=f"Pretrain_DDP:{mrna_max_len}-epoch:{epochs}-gpus:{world_size}", 
+            config={
+                "batch_size": batch_size * accumulation_step * world_size,
+                "epochs": epochs,
+                "learning_rate": lr,
+                "world_size": world_size,
+            },
+            tags=["Pre-train", "MLM", "Attn_reg", "TarBase+TargetScan", "DDP"],
+            save_code=False,
+            job_type="train"
+        )
+    
+    if rank == 0:
+        print("Setting up training...")
+    
+    start = time()
+    patience = 10
+    best_accuracy = 0
+    count = 0  # Initialize count variable for early stopping
+    model_checkpoints_dir = os.path.join(
+        PROJ_HOME, 
+        "checkpoints", 
+        "TargetScan+TarBase", 
+        "TwoTowerTransformer",
+        "Longformer", 
+        str(mrna_max_len),
+        "Pretrain_DDP",
+    )
+    
+    if rank == 0:
+        os.makedirs(model_checkpoints_dir, exist_ok=True)
+        print(f"Checkpoint directory: {model_checkpoints_dir}")
+    
+    steps_per_epoch = len(train_loader)
+    updates_per_epoch = math.ceil(steps_per_epoch / accumulation_step)
+    total_updates = epochs * updates_per_epoch
+    warmup_updates = int(0.05 * total_updates)
+    eta_min = 3e-5
+
+    warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_updates)
+    cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
+
+    if rank == 0:
+        print("Starting training loop...")
+    
+    for epoch in range(epochs):
+        # Set epoch for distributed sampler
+        train_sampler.set_epoch(epoch)
+        
+        if rank == 0:
+            print(f"   Starting epoch {epoch+1}/{epochs}")
+        
+        train_loss = pretrain_loop(
+            model=model,
+            pretrain_wrapper=pretrain_wrapper,
+            dataloader=train_loader,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+            epoch=epoch,
+            total_updates=total_updates, 
+            updates_per_epoch=updates_per_epoch,
+            mask_id=tokenizer.mask_token_id,
+            pad_id=tokenizer.pad_token_id,
+            vocab_size=tokenizer.vocab_size,
+            accumulation_step=accumulation_step,
+            sigma=0.5,
+            rank=rank
+        )
+        
+        if rank == 0:
+            print(f"Starting evaluation for epoch {epoch+1}...")
+        
+        eval_results = evaluate_mlm(
+            model=model,
+            pretrain_wrapper=pretrain_wrapper,
+            dataloader=val_loader,
+            device=device,
+            vocab_size=tokenizer.vocab_size,
+            pad_id=tokenizer.pad_token_id,
+            mask_id=tokenizer.mask_token_id,
+            rank=rank
+        )
+
+        # Log to wandb only on rank 0
+        if rank == 0:
+            wandb.log({
+                        "epoch": epoch,
+                        "train/loss": train_loss["Avg Loss"],
+                        "train/Token Loss": train_loss["Loss1"],
+                        "train/Seed Loss": train_loss["Loss2"],
+                        "train/Bispan loss": train_loss["Loss3"],
+                        "train/Attn reg loss": train_loss["Attn Loss"],
+                        "eval/loss": eval_results['overall_loss'],
+                        "eval/token accuracy": eval_results['overall_acc'],
+                        "eval/Token_acc": eval_results['stage1_acc'],
+                        "eval/Seed_acc": eval_results['stage2_acc'],
+                        "eval/Bispan_acc": eval_results['stage3_acc'],
+                    }, step=epoch)
+        
+        # Save checkpoint only on rank 0
+        if rank == 0:
+            if eval_results['overall_acc'] > best_accuracy:
+                best_accuracy = eval_results['overall_acc']
+                ckpt_name = f"best_accuracy_{best_accuracy:.4f}_epoch{epoch}.pth"
+                ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                torch.save(model.module.state_dict(), ckpt_path)
+
+                model_art = wandb.Artifact(
+                    name="Pretrained-model-ddp",
+                    type="model",
+                    metadata={
+                        "epoch": epoch,
+                        "accuracy": best_accuracy,
+                        "world_size": world_size
+                    }
+                )
+                model_art.add_file(ckpt_path)
+                try:
+                    run.log_artifact(model_art, aliases=["best-pretrain-ddp"])
+                except Exception as e:
+                    print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+            else:
+                count += 1
+                if count >= patience:
+                    print("Max patience reached with no improvement. Early stopping.")
+                    break
+        
+        elapsed = time() - start
+        remaining = elapsed / (epoch + 1) * (epochs - epoch - 1) / 3600
+        if rank == 0:
+            print(f"Still remain: {remaining:.2f} hrs.")
+    
+    # Cleanup distributed training
+    cleanup()
+
+def run_single_gpu(epochs, 
+                   device, 
+                   accumulation_step=1, 
+                   mrna_max_len=520, 
+                   mirna_max_len=24, 
+                   embed_dim=256, 
+                   num_heads=8, 
+                   num_layers=4, 
+                   ff_dim=1024, 
+                   dropout_rate=0.1, 
+                   batch_size=32,
+                   lr=1e-4):
+    """Original single GPU training function."""
+    tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
+                                model_max_length=mrna_max_len,
+                                padding_side="right")
+    
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start_random_samples.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start_random_samples.csv")
 
     print(f"Loading training data from: {train_path}")
     ds_train = QuestionAnswerDataset(data=load_dataset(train_path, sep=','),
@@ -302,8 +557,8 @@ def run(epochs,
             "epochs": epochs,
             "learning_rate": lr,
         },
-        tags=["Pre-train", "MLM", "Attn_reg"],
-        save_code=True,
+        tags=["Pre-train", "MLM", "Attn_reg", "TarBase+TargetScan"],
+        save_code=False,
         job_type="train"
     )
 
@@ -318,7 +573,7 @@ def run(epochs,
     model_checkpoints_dir = os.path.join(
         PROJ_HOME, 
         "checkpoints", 
-        "TargetScan", 
+        "TargetScan+TarBase", 
         "TwoTowerTransformer",
         "Longformer", 
         str(mrna_max_len),
@@ -411,19 +666,55 @@ def run(epochs,
         remaining = elapsed / (epoch + 1) * (epochs - epoch - 1) / 3600
         print(f"Still remain: {remaining:.2f} hrs.")
 
-if __name__ == "__main__":
-    if torch.backends.mps.is_available():
-        device = "mps"
-        print("Using MPS (Apple Silicon GPU)")
-    elif torch.cuda.is_available():
-        device = "cuda:1"
-        print("Using CUDA GPU")
+def main():
+    """Main function to launch training (single GPU or DDP)."""
+    
+    # Training parameters - modify these as needed
+    use_ddp = True  # Set to True for DDP training, False for single GPU
+    epochs = 1
+    batch_size = 32
+    accumulation_step = 8
+    embed_dim = 1024
+    ff_dim = 4096
+    lr = 1e-4
+    mrna_max_len = 520
+    mirna_max_len = 24
+    world_size = torch.cuda.device_count()  # Use all available GPUs
+    
+    if use_ddp:
+        if not torch.cuda.is_available():
+            print("CUDA is not available. DDP requires CUDA.")
+            return
+        
+        world_size = min(world_size, torch.cuda.device_count())
+        print(f"Using DDP training with {world_size} GPUs")
+        
+        # Launch distributed training
+        mp.spawn(run_ddp, 
+                 args=(world_size, epochs, accumulation_step, mrna_max_len, 
+                       mirna_max_len, embed_dim, 8, 4, ff_dim, 0.1, 
+                       batch_size, lr),
+                 nprocs=world_size,
+                 join=True)
     else:
-        device = "cpu"
-        print("Using CPU")
-    run(epochs=1, 
-        device=device, 
-        embed_dim=1024,  
-        ff_dim=2048,     
-        batch_size=32, 
-        accumulation_step=8)  
+        # Single GPU training
+        if torch.backends.mps.is_available():
+            device = "mps"
+            print("Using MPS (Apple Silicon GPU)")
+        elif torch.cuda.is_available():
+            device = "cuda:0"
+            print("Using CUDA GPU")
+        else:
+            device = "cpu"
+            print("Using CPU")
+        
+        run_single_gpu(epochs=epochs, 
+                      device=device, 
+                      embed_dim=embed_dim,  
+                      ff_dim=ff_dim,     
+                      batch_size=batch_size, 
+                      accumulation_step=accumulation_step,
+                      lr=lr)
+
+if __name__ == "__main__":
+    main()  

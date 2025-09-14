@@ -201,7 +201,7 @@ class LongformerAttention(nn.Module):
                 use_lse=True,)    # (B, H, L_q, D)
 
             # drop the padded tokens from z_no_cls
-            z_no_cls = z_no_cls[:, :, :-1, :]
+            z_no_cls = z_no_cls[:, :, :-1, :] # (B, H, L_q-1, D)
             # 4) Concatenate CLS and non-CLS outputs
             context_output = torch.cat([z_cls, z_no_cls], dim=2)  # (B, H, L_q, D)
             
