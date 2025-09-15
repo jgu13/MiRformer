@@ -439,11 +439,12 @@ def sliding_window_cross_attention(Q, K, V, w, mask=None, norm_by_query=False,
         else:
             raise ValueError(f"mask shape is {mask.shape}, expected (B, Lk), (B, Lq, Lk), or (B, H, Lq, Lk)")
 
+        mask_r = mask.reshape(B*H, Lq, Lk) # (B*H, Lq, Lk)
         if slide_on_query:
-            chunk_mask = _chunk(mask, w)  # (B*H, num_chunks, 2w, Lk)
+            chunk_mask = _chunk(mask_r, w)  # (B*H, num_chunks, 2w, Lk)
         else:
-            mask = mask.transpose(1, 2).contiguous() # (B*H, Lk, Lq)
-            chunk_mask = _chunk(mask, w) # (B*H, num_chunks, 2w, Lq)
+            mask_r = mask_r.transpose(1, 2).contiguous() # (B*H, Lk, Lq)
+            chunk_mask = _chunk(mask_r, w) # (B*H, num_chunks, 2w, Lq)
             chunk_mask = chunk_mask.permute(0, 3, 1, 2).contiguous() # (B*H, Lq, num_chunks, 2w)
         
         # Apply mask with large negative value (but not too large to prevent overflow)

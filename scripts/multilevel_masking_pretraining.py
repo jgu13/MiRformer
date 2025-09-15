@@ -122,7 +122,8 @@ class TokenHead(torch.nn.Module):
         x = self.dense(hidden_states)                # (B, L, D)
         x = self.act(x)
         x = self.layer_norm(x)
-        logits = self.decoder(x) + self.bias         # (B, L, V)
+        x = self.decoder(x)
+        logits = x + self.bias         # (B, L, V)
         return logits
 
 class PairedPretrainWrapper(torch.nn.Module):
@@ -141,6 +142,15 @@ class PairedPretrainWrapper(torch.nn.Module):
         self.mirna_head = TokenHead(d_model, vocab_size, embed_weight=embed_weight)
 
     def forward_pair(self, mrna_ids, mrna_mask, mirna_ids, mirna_mask, attn_mask=None):
+        if self.base.predictor.use_longformer:
+            lf_mask = torch.where(
+                mrna_mask > 0,
+                torch.zeros_like(mrna_mask),  # Set all valid tokens to 0 (local attention)
+                torch.full_like(mrna_mask, fill_value=-1)  # Set original 0s (pads) to -1
+            )
+            # check lf_mask has all values smaller or equal to 0
+            assert (lf_mask <= 0).all(), "lf_mask has values greater than 0"
+
         # 1) encode separately
         mirna_sn_embedding = self.base.predictor.sn_embedding(mirna_ids)
         mrna_sn_embedding = self.base.predictor.sn_embedding(mrna_ids)
@@ -152,7 +162,7 @@ class PairedPretrainWrapper(torch.nn.Module):
         mrna_embedding      = mrna_sn_embedding + mrna_cnn_embedding # (batch_size, mrna_len, embed_dim)
 
         mirna_embedding = self.base.predictor.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
-        mrna_embedding = self.base.predictor.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
+        mrna_embedding = self.base.predictor.mrna_encoder(mrna_embedding, mask=lf_mask) # (batch_size, mrna_len, embed_dim) use lf_mask for mrna_encoder
 
         # 2) cross-attn (sliding window) to enrich mRNA from miRNA
         ctx_mr, attn_weights = self.base.predictor.cross_attn_layer(
@@ -160,7 +170,7 @@ class PairedPretrainWrapper(torch.nn.Module):
                 key=mirna_embedding,
                 value=mirna_embedding,
                 attention_mask=mirna_mask,
-                query_attention_mask=mrna_mask,
+                query_attention_mask=mrna_mask, # use mask: 1=unmasked, 0=masked for cross attention
             )
         self.cross_attn_output = ctx_mr
         ctx_mr_res = self.base.predictor.dropout(ctx_mr) + mrna_embedding # residual connection
@@ -211,7 +221,7 @@ def loss_stage1_baseline(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id,
     else:
         return total_loss
 
-def loss_stage2_seed_mrna(wrapper: PairedPretrainWrapper, batch, mask_id, vocab_size, evaluate=False):
+def loss_stage2_seed_mrna(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id, vocab_size, evaluate=False):
     mi_in, mi_mask = batch["mirna_input_ids"], batch["mirna_attention_mask"]
     mr_in, mr_mask = batch["mrna_input_ids"],  batch["mrna_attention_mask"]
     seed_s, seed_e = batch["start_positions"], batch["end_positions"]  # (B,)
@@ -274,7 +284,7 @@ def run_pretrain_epoch(stage, wrapper, dataloader, optimizer, device,
     for batch in dataloader:
         for k in batch: batch[k] = batch[k].to(device)
         loss1 = loss_stage1_baseline(wrapper, batch, pad_id, mask_id)
-        loss2 = loss_stage2_seed_mrna(wrapper, batch, mask_id, vocab_size)
+        loss2 = loss_stage2_seed_mrna(wrapper, batch, pad_id, mask_id, vocab_size)
         loss3 = loss_stage3_bispan(wrapper, batch, pad_id, mask_id, vocab_size)
 
         loss = loss1 + loss2 + loss3

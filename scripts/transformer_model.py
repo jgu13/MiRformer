@@ -136,11 +136,15 @@ class LongformerAttention(nn.Module):
                 attention_mask=None,
                 query_attention_mask=None, # only used in cross attention when q != k 
                 output_attentions=False,):
-
-        bad_index = check_key_mask_rows(attention_mask)
-        print(f"bad index in {attention_mask.shape} attention mask: {bad_index}")
-
         if self.cross_attn:
+            if attention_mask is not None:
+                assert (attention_mask >= 0).all(), "attention_mask has values less than 0"
+                assert (attention_mask > 0).any(), "attention_mask has no values greater than 0"
+            if query_attention_mask is not None:
+                assert (query_attention_mask >= 0).all(), "query_attention_mask has values less than 0"
+                assert (query_attention_mask > 0).any(), "query_attention_mask has no values greater than 0"
+            check_key_mask_rows(attention_mask)
+
             bsz, q_len, _ = query.shape
             _, k_len, _   = key.shape
             _, v_len, _   = value.shape
@@ -163,14 +167,18 @@ class LongformerAttention(nn.Module):
             if query_attention_mask is not None:
                 assert attention_mask.shape == (bsz, k_len)
                 assert query_attention_mask.shape == (bsz, q_len)
+                
                 attention_mask = (attention_mask > 0)  # bool
                 query_attention_mask = (query_attention_mask > 0)  # bool
                 # Create mask for cross attention (B, L_q, L_k)
                 mask = attention_mask[:, None, :] & query_attention_mask[:, :, None]
                 mask = mask[:, None, :, :].expand(bsz, self.num_heads, q_len, k_len) # (B, H, L_q, L_k)
+            else:
+                # If no query attention mask, create a default mask that allows all attention
+                mask = torch.ones(bsz, self.num_heads, q_len, k_len, device=q.device, dtype=torch.bool)
 
             # check if the attention mask is all False
-            if mask.all() == False:
+            if not mask.any():
                 raise ValueError("Attention mask is all False")
 
             # 3) Sliding window cross attention for rest of query
@@ -203,6 +211,7 @@ class LongformerAttention(nn.Module):
             k = self.rotary(k)
             q /= math.sqrt(self.head_dim)
             if attention_mask is not None:
+                assert (attention_mask <= 0).all(), "attention_mask has values greater than 0"
                 key_padding_mask = attention_mask < 0
                 extra_attention_mask = attention_mask > 0
                 remove_from_windowed_attention_mask = attention_mask != 0
@@ -225,6 +234,7 @@ class LongformerAttention(nn.Module):
                     selection_padding_mask_nonzeros = selection_padding_mask.nonzero(as_tuple=True)
                     # 3) location of the padding values in the selected global attention
                     selection_padding_mask_zeros = (selection_padding_mask == 0).nonzero(as_tuple=True)
+                assert extra_attention_mask is None, "extra_attention_mask is not None"
             else:
                 remove_from_windowed_attention_mask = None
                 extra_attention_mask = None
@@ -626,7 +636,7 @@ class CrossAttentionPredictor(nn.Module):
     def __init__(self,  
                  mirna_max_len:int,
                  mrna_max_len:int, 
-                 vocab_size:int=13, # Fallback if tokenizer not provided (7 special + 1 MRNA_CLS + 5 bases)
+                 vocab_size:int=12, # Fallback if tokenizer not provided (7 special + 5 bases)
                  num_layers:int=2, 
                  embed_dim:int=256, 
                  num_heads:int=2, 
@@ -737,6 +747,8 @@ class CrossAttentionPredictor(nn.Module):
                 torch.zeros_like(mrna_mask),  # Set all valid tokens to 0 (local attention)
                 torch.full_like(mrna_mask, fill_value=-1)  # Set original 0s (pads) to -1
             )
+            # check lf_mask has all values smaller or equal to 0
+            assert (lf_mask <= 0).all(), "lf_mask has values greater than 0"
         
         # add N-gram CNN-encoded embedding
         mirna_cnn_embedding = self.cnn_embedding(mirna_sn_embedding.transpose(-1, -2)) # (batch_size, embed_dim, mirna_len)
@@ -746,6 +758,7 @@ class CrossAttentionPredictor(nn.Module):
         mirna_embedding = self.mirna_encoder(mirna_embedding, mask=mirna_mask)  # (batch_size, mirna_len, embed_dim)
 
         if self.use_longformer:
+            # use lf_mask for mrna_encoder
             mrna_embedding = self.mrna_encoder(mrna_embedding, mask=lf_mask) # (batch_size, mrna_len, embed_dim) with global attention
         else:
             mrna_embedding = self.mrna_encoder(mrna_embedding, mask=mrna_mask) # (batch_size, mrna_len, embed_dim)
@@ -756,7 +769,7 @@ class CrossAttentionPredictor(nn.Module):
                 key=mirna_embedding,
                 value=mirna_embedding,
                 attention_mask=mirna_mask,
-                query_attention_mask=lf_mask,  # Use Longformer mask for query (mRNA with global attention)
+                query_attention_mask=mrna_mask,  # Use mask: 1=unmasked, 0=masked for cross attention
             )[0]
             self.cross_attn_output = output
             z = output

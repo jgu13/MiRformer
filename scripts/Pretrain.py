@@ -23,8 +23,8 @@ from Attention_regularization import kl_diag_seed_loss
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset
 from utils import load_dataset
 
-PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
-# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = os.path.expanduser("/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/")
 
 def setup(rank, world_size):
@@ -703,7 +703,7 @@ def main():
             device = "mps"
             print("Using MPS (Apple Silicon GPU)")
         elif torch.cuda.is_available():
-            device = "cuda:0"
+            device = "cuda:1"
             print("Using CUDA GPU")
         else:
             device = "cpu"

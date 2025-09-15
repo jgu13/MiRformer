@@ -44,20 +44,6 @@ class CharacterTokenizer(PreTrainedTokenizer):
         """
         self.characters = characters
         self.model_max_length = model_max_length
-        
-        # Create vocabulary BEFORE calling super().__init__() to avoid get_vocab() issues
-        self._vocab_str_to_int = {
-            "[CLS]": 0,
-            "[SEP]": 1,
-            "[BOS]": 2,
-            "[MASK]": 3,
-            "[PAD]": 4,
-            "[RESERVED]": 5,
-            "[UNK]": 6,
-            **{ch: i + 7 for i, ch in enumerate(characters)},
-        }
-        self._vocab_int_to_str = {v: k for k, v in self._vocab_str_to_int.items()}
-        
         bos_token = AddedToken("[BOS]", lstrip=False, rstrip=False)
         eos_token = AddedToken("[SEP]", lstrip=False, rstrip=False)
         sep_token = AddedToken("[SEP]", lstrip=False, rstrip=False)
