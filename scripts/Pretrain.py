@@ -136,7 +136,6 @@ def pretrain_loop(
         global_update = epoch * updates_per_epoch + update_in_epoch
         lamb = cosine_decay(total_updates, global_update, min_factor=0.1)
         loss = loss_mlm + lamb * loss_reg
-        loss = loss_mlm + lamb * loss_reg
 
         # --- DDP-friendly backward with no_sync() for microbatches ---
         ddp_wrapper = pretrain_wrapper
@@ -171,12 +170,6 @@ def pretrain_loop(
                 # Log to wandb during training (only on rank 0)
                 if rank == 0:
                     wandb.log({
-                        "train/batch_loss1": loss1.item(),
-                        "train/batch_loss2": loss2.item(),
-                        "train/batch_loss2_2": loss2_2.item(),
-                        "train/batch_loss3": loss3.item(),
-                        "train/batch_loss_reg": loss_reg.item(),
-                        "train/batch_total_loss": loss.item(),
                         "train/learning_rate": optimizer.param_groups[0]['lr'],
                         "train/lambda": lamb,
                     })
@@ -331,8 +324,8 @@ def run_ddp(rank, world_size, epochs,
                                 model_max_length=mrna_max_len,
                                 padding_side="right")
     
-    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start_random_samples.csv")
-    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start_random_samples.csv")
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start.csv")
 
     if rank == 0:
         print(f"Loading training data from: {train_path}")
@@ -563,8 +556,8 @@ def run_single_gpu(epochs,
                                 model_max_length=mrna_max_len,
                                 padding_side="right")
     
-    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start_random_samples.csv")
-    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start_random_samples.csv")
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start.csv")
 
     print(f"Loading training data from: {train_path}")
     ds_train = QuestionAnswerDataset(data=load_dataset(train_path, sep=','),
@@ -639,7 +632,7 @@ def run_single_gpu(epochs,
         "TwoTowerTransformer",
         "Longformer", 
         str(mrna_max_len),
-        "Pretrain",
+        "Pretrain_DDP",
     )
     os.makedirs(model_checkpoints_dir, exist_ok=True)
     print(f"Checkpoint directory: {model_checkpoints_dir}")
@@ -735,7 +728,7 @@ def main():
     
     # Training parameters - modify these as needed
     use_ddp = True  # Set to True for DDP training, False for single GPU
-    epochs = 1
+    epochs = 25
     batch_size = 32
     accumulation_step = 8
     embed_dim = 1024

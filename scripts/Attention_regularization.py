@@ -5,7 +5,7 @@ import torch.nn.functional as F
 def _row_normalize(x, mask=None, eps=1e-8):
     # x: (..., K); mask: (..., K) with 1 for valid keys
     if mask is not None:
-        x = x * mask
+        x = x * mask.float()
     z = x.sum(dim=-1, keepdim=True)
     return x / (z + eps)
 
@@ -14,7 +14,7 @@ def check_row_normalize(x, seed_q_start, seed_q_end, mask=None, eps=1e-8):
     # check row normalization in rows from seed_q_start to seed_q_end
     B, H, Lq, Lk = x.shape
     if mask is not None:
-        x = x * mask
+        x = x * mask.float()
     for b in range(B):
         for h in range(H):
             seed_start = int(seed_q_start[b])
@@ -98,10 +98,17 @@ def kl_diag_seed_loss(
     eps: float = 1e-8,
 ):
     B, H, Lq, Lk = attn.shape
+    # combine q_mask and k_mask
+    q_mask = q_mask.bool()
+    k_mask = k_mask.bool()
+    mask = k_mask[:, None, None, :] & q_mask[:, None, :, None] # (B,1,Lq,Lk)
+    mask = mask.expand(B, H, Lq, Lk) # (B,H,Lq,Lk)
+    
     # Ensure attention is row-normalized across K
-    if not check_row_normalize(attn, seed_q_start, seed_q_end, k_mask[:, None, None, :].expand(B, H, Lq, Lk) if k_mask is not None else None, eps):
-        print("Row normalization failed")
-        return None
+    if not check_row_normalize(attn, seed_q_start, seed_q_end, mask=mask, eps=eps):
+        print("Row normalization failed, renormalizing over keys")
+        # row normalize attn
+        attn = _row_normalize(attn, mask=mask)
 
     # Build prior (B,1,Lq,Lk), then broadcast to H
     P = build_seed_diag_prior(
