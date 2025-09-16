@@ -54,7 +54,15 @@ def cleanup():
 def cosine_decay(total, step, min_factor=0.1):
     """
     Cosine decay from 1.0 at step 0 to min_factor at step total_updates-1.
+    Cosine decay from 1.0 at step 0 to min_factor at step total_updates-1.
     """
+    if total < 1:
+        return 1.0
+    else:
+        # cosine to min_factor
+        progress = step / (total - 1)
+        f = min_factor + 0.5 * (1 - min_factor) * (1 + math.cos(math.pi * progress))
+        return f
     if total < 1:
         return 1.0
     else:
@@ -128,6 +136,7 @@ def pretrain_loop(
         global_update = epoch * updates_per_epoch + update_in_epoch
         lamb = cosine_decay(total_updates, global_update, min_factor=0.1)
         loss = loss_mlm + lamb * loss_reg
+        loss = loss_mlm + lamb * loss_reg
 
         # --- DDP-friendly backward with no_sync() for microbatches ---
         ddp_wrapper = pretrain_wrapper
@@ -138,6 +147,7 @@ def pretrain_loop(
         bs = batch['mrna_input_ids'].size(0)
         
         # Accumulate individual losses for logging
+        total_loss += loss.item() * accumulation_step
         total_loss += loss.item() * accumulation_step
         total_loss1 += loss1.item()
         total_loss2 += loss2.item()
@@ -673,10 +683,10 @@ def run_single_gpu(epochs,
             vocab_size=tokenizer.vocab_size,
             pad_id=tokenizer.pad_token_id,
             mask_id=tokenizer.mask_token_id,
+            epoch=epoch,
         )
 
         wandb.log({
-                    "epoch": epoch,
                     "train/loss": train_loss["Avg Loss"],
                     "train/Token Loss": train_loss["Loss1"],
                     "train/Seed Loss": train_loss["Loss2"],
