@@ -78,7 +78,7 @@ def mask_random_span(x: torch.Tensor,
         if Lb <= 0:
             continue
         max_start = max(1, Lb - int(span_len[b].item()))  # avoid negative
-        s = torch.randint(0, max_start, (1,), device=x.device).item()
+        s = torch.randint(0, max_start + 1, (1,), device=x.device).item()
         e = s + int(span_len[b].item())
         starts[b] = s
         ends[b]   = e
@@ -105,6 +105,26 @@ def mask_seed_span_mRNA(mrna_ids: torch.Tensor,
         mrna_masked[b, start_idx:end_idx+1] = mask_id
         labels[b, start_idx:end_idx+1] = mrna_ids[b, start_idx:end_idx+1]
     return mrna_masked, labels
+
+def mask_seed_span_miRNA(mirna_ids: torch.Tensor,
+                        mirna_mask: torch.Tensor,
+                         seed_start: torch.Tensor,
+                         seed_end: torch.Tensor,
+                         mask_id: int,):
+    """
+    Mask the provided seed span on miRNA.
+    """
+    B, Lk = mirna_ids.shape
+    mirna_masked = mirna_ids.clone()
+    labels = torch.full_like(mirna_ids, -100)
+
+    for b in range(B):
+        # Convert tensor indices to integers for indexing
+        start_idx = int(seed_start[b].item())
+        end_idx = int(seed_end[b].item())
+        mirna_masked[b, start_idx:end_idx+1] = mask_id
+        labels[b, start_idx:end_idx+1] = mirna_ids[b, start_idx:end_idx+1]
+    return mirna_masked, labels
 
 class TokenHead(torch.nn.Module):
     def __init__(self, embed_dim: int, vocab_size: int, embed_weight: torch.nn.Parameter):
@@ -141,7 +161,7 @@ class PairedPretrainWrapper(torch.nn.Module):
         self.mrna_head = TokenHead(d_model, vocab_size, embed_weight=embed_weight)
         self.mirna_head = TokenHead(d_model, vocab_size, embed_weight=embed_weight)
 
-    def forward_pair(self, mrna_ids, mrna_mask, mirna_ids, mirna_mask, attn_mask=None):
+    def forward_pair(self, mrna_ids, mrna_mask, mirna_ids, mirna_mask):
         if self.base.predictor.use_longformer:
             lf_mask = torch.where(
                 mrna_mask > 0,
@@ -193,6 +213,14 @@ class PairedPretrainWrapper(torch.nn.Module):
         logits_mi = self.mirna_head(ctx_mir_norm) # (B,Lk,V)
         return logits_mr, logits_mi, attn_weights
 
+    def forward(self, mrna_ids, mrna_mask, mirna_ids, mirna_mask, attn_mask=None):
+        return self.forward_pair(
+            mrna_ids=mrna_ids,
+            mrna_mask=mrna_mask,
+            mirna_ids=mirna_ids,
+            mirna_mask=mirna_mask,
+        )
+
 def loss_stage1_baseline(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id, vocab_size, evaluate=False):
     mi_in, mi_mask = batch["mirna_input_ids"], batch["mirna_attention_mask"]
     mr_in, mr_mask = batch["mrna_input_ids"],  batch["mrna_attention_mask"]
@@ -200,7 +228,7 @@ def loss_stage1_baseline(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id,
     mi_x, mi_y = mask_tokens(mi_in, pad_id, mask_id, p=0.15) # (B, L)
     mr_x, mr_y = mask_tokens(mr_in, pad_id, mask_id, p=0.15)
 
-    logits_mr, logits_mi, _ = wrapper.forward_pair(mr_x, mr_mask, mi_x, mi_mask) # (B, L, V)
+    logits_mr, logits_mi, _ = wrapper(mr_x, mr_mask, mi_x, mi_mask) # (B, L, V)
 
     loss_mr = F.cross_entropy(logits_mr.view(-1, vocab_size), mr_y.view(-1), ignore_index=-100) 
     loss_mi = F.cross_entropy(logits_mi.view(-1, vocab_size), mi_y.view(-1), ignore_index=-100)
@@ -222,13 +250,12 @@ def loss_stage1_baseline(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id,
         return total_loss
 
 def loss_stage2_seed_mrna(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id, vocab_size, evaluate=False):
-    mi_in, mi_mask = batch["mirna_input_ids"], batch["mirna_attention_mask"]
     mr_in, mr_mask = batch["mrna_input_ids"],  batch["mrna_attention_mask"]
+    mi_in, mi_mask = batch["mirna_input_ids"], batch["mirna_attention_mask"]
     seed_s, seed_e = batch["start_positions"], batch["end_positions"]  # (B,)
 
-    mr_x, mr_y = mask_seed_span_mRNA(mr_in, mr_mask, seed_s, seed_e, mask_id)
-    # (Optionally mask a small window on mRNA too, but spec asked to mask seeds from miRNA)
-    logits_mr, _, _ = wrapper.forward_pair(mr_x, mr_mask, mi_in, mi_mask)
+    mr_x, mr_y = mask_seed_span_mRNA(mrna_ids=mr_in, mrna_mask=mr_mask, seed_start=seed_s, seed_end=seed_e, mask_id=mask_id)
+    logits_mr, _, _ = wrapper(mrna_ids=mr_x, mrna_mask=mr_mask, mirna_ids=mi_in, mirna_mask=mi_mask)
 
     # Only supervise the masked miRNA tokens
     loss_mr = F.cross_entropy(logits_mr.view(-1, vocab_size), mr_y.view(-1), ignore_index=-100)
@@ -236,14 +263,36 @@ def loss_stage2_seed_mrna(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id
     if evaluate:
         probs_mr = F.softmax(logits_mr, dim=-1)
         preds_mr = torch.argmax(probs_mr, dim=-1)
-        masked = mr_y.ne(-100)
-        if masked.any():
-            correct_mr = (preds_mr[masked] == mr_y[masked]).sum().item()
-            return loss_mr, correct_mr, mr_y
-        else:
-            return loss_mr, 0, mr_y
+        masked_mr = mr_y.ne(-100)
+        correct_mr = 0
+        if masked_mr.any():
+            correct_mr = (preds_mr[masked_mr] == mr_y[masked_mr]).sum().item()
+        return loss_mr, correct_mr, mr_y
     else:
         return loss_mr
+
+def loss_stage2_seed_mirna(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id, vocab_size, evaluate=False):
+    mi_in, mi_mask = batch["mirna_input_ids"], batch["mirna_attention_mask"]
+    mr_in, mr_mask = batch["mrna_input_ids"],  batch["mrna_attention_mask"]
+    mr_ss, mr_se = batch["start_positions"], batch["end_positions"]  # (B,)
+    seed_len = mr_se - mr_ss + 1
+    seed_start = torch.ones_like(seed_len, dtype=torch.long, device=mi_in.device)
+    seed_end = seed_start + seed_len
+
+    mi_x, mi_y = mask_seed_span_miRNA(mirna_ids=mi_in, mirna_mask=mi_mask, seed_start=seed_start, seed_end=seed_end, mask_id=mask_id)
+    _, logits_mi, _ = wrapper(mrna_ids=mr_in, mrna_mask=mr_mask, mirna_ids=mi_x, mirna_mask=mi_mask)
+    
+    loss_mi = F.cross_entropy(logits_mi.view(-1, vocab_size), mi_y.view(-1), ignore_index=-100)
+    if evaluate:
+        probs_mi = F.softmax(logits_mi, dim=-1)
+        preds_mi = torch.argmax(probs_mi, dim=-1)
+        masked_mi = mi_y.ne(-100)
+        correct_mi = 0
+        if masked_mi.any():
+            correct_mi = (preds_mi[masked_mi] == mi_y[masked_mi]).sum().item()
+        return loss_mi, correct_mi, mi_y
+    else:
+        return loss_mi
 
 def loss_stage3_bispan(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id, vocab_size, evaluate=False):
     mi_in, mi_mask = batch["mirna_input_ids"], batch["mirna_attention_mask"]
@@ -252,7 +301,7 @@ def loss_stage3_bispan(wrapper: PairedPretrainWrapper, batch, pad_id, mask_id, v
     mi_x, mi_y, _, _ = mask_random_span(mi_in, mi_mask, 6, 8, mask_id)
     mr_x, mr_y, _, _ = mask_random_span(mr_in, mr_mask, 6, 20, mask_id)
 
-    logits_mr, logits_mi, _ = wrapper.forward_pair(mr_x, mr_mask, mi_x, mi_mask)
+    logits_mr, logits_mi, _ = wrapper(mr_x, mr_mask, mi_x, mi_mask)
 
     loss_mr = F.cross_entropy(logits_mr.view(-1, vocab_size), mr_y.view(-1), ignore_index=-100)
     loss_mi = F.cross_entropy(logits_mi.view(-1, vocab_size), mi_y.view(-1), ignore_index=-100)
@@ -285,9 +334,10 @@ def run_pretrain_epoch(stage, wrapper, dataloader, optimizer, device,
         for k in batch: batch[k] = batch[k].to(device)
         loss1 = loss_stage1_baseline(wrapper, batch, pad_id, mask_id)
         loss2 = loss_stage2_seed_mrna(wrapper, batch, pad_id, mask_id, vocab_size)
+        loss2_2 = loss_stage2_seed_mirna(wrapper, batch, pad_id, mask_id, vocab_size)
         loss3 = loss_stage3_bispan(wrapper, batch, pad_id, mask_id, vocab_size)
 
-        loss = loss1 + loss2 + loss3
+        loss = loss1 + loss2 + loss2_2 + loss3
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(wrapper.parameters(), 1.0)
