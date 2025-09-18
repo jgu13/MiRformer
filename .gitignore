@@ -6,6 +6,7 @@ data/
 TargetScan_dataset/
 Degradome_dataset/
 TarBase_dataset/
+miR_degradome_ago_clip_pairing_data/
 
 # virtual env
 HyenaDNA/
