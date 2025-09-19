@@ -27,7 +27,8 @@ from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_n
 from sliding_chunks import sliding_window_cross_attention, check_key_mask_rows
 from Attention_regularization import kl_diag_seed_loss
 
-PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
 
 
@@ -648,6 +649,7 @@ class CrossAttentionPredictor(nn.Module):
                  device:str='cuda',
                  predict_span=True,
                  predict_binding=False,
+                 predict_cleavage=False,
                  use_longformer=False):
         super(CrossAttentionPredictor, self).__init__()
         self.embed_dim = embed_dim
@@ -709,12 +711,14 @@ class CrossAttentionPredictor(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
         self.cross_norm = nn.LayerNorm(embed_dim) # normalize over embedding dimension
         self.qa_outputs = nn.Linear(embed_dim, 2) # Linear head instead of one Linear transformation
+        self.cleavage_head = nn.Linear(embed_dim, 1) # Linear head instead of one Linear transformation
         
         # Add MIL binding head
         self.binding_head = BindingHead(embed_dim, output_size=n_classes, hidden_sizes=hidden_sizes, tau=0.1)
         
         self.predict_span = predict_span
         self.predict_binding = predict_binding
+        self.predict_cleavage = predict_cleavage
         self.use_longformer = use_longformer
         
         # Initialize the new global token embedding
@@ -784,8 +788,11 @@ class CrossAttentionPredictor(nn.Module):
         z_norm = z_norm.masked_fill(mrna_mask.unsqueeze(-1)==0, 0) # (batch_size, mrna_len, embed_dim)
         
         # MIL binding head on mRNA positions (including global token at position 0)
-        binding_logit, binding_weights = self.binding_head(z_norm, mrna_mask)
-        self.binding_weights = binding_weights # (batch_size, mrna_len) for visualization
+        if self.predict_binding:
+            binding_logit, binding_weights = self.binding_head(z_norm, mrna_mask)
+            self.binding_weights = binding_weights # (batch_size, mrna_len) for visualization
+        else:
+            binding_logit, binding_weights = None, None
 
         if self.predict_span:
             # predict start and end
@@ -794,8 +801,11 @@ class CrossAttentionPredictor(nn.Module):
         else:
             start_logits, end_logits = None, None
         
+        # Predict cleavage site using cross-attention hidden states
+        cleavage_logits = self.cleavage_head(z_norm).squeeze(-1) # (batchsize, mrna_len)
+        
         # Return MIL outputs along with existing outputs
-        return binding_logit, binding_weights, start_logits, end_logits
+        return binding_logit, binding_weights, start_logits, end_logits, cleavage_logits
 
 def create_dataset(train_path, valid_path, tokenizer, mRNA_max_len):
     D_train = load_dataset(train_path, sep=',', parse_seeds=True)
@@ -834,6 +844,7 @@ class QuestionAnsweringModel(nn.Module):
                 seed=42,
                 predict_span=True,
                 predict_binding=False,
+                predict_cleavage=False,
                 use_cross_attn=True,
                 use_longformer=False):
         super(QuestionAnsweringModel, self).__init__()
@@ -859,6 +870,7 @@ class QuestionAnsweringModel(nn.Module):
         self.seed = seed
         self.predict_binding = predict_binding
         self.predict_span = predict_span
+        self.predict_cleavage = predict_cleavage
         self.attn_cache = []
         if use_cross_attn:
             self.predictor = CrossAttentionPredictor(mrna_max_len=mrna_max_len,
@@ -871,6 +883,7 @@ class QuestionAnsweringModel(nn.Module):
                                                     device=self.device,
                                                     predict_span=predict_span,
                                                     predict_binding=predict_binding,
+                                                    predict_cleavage=predict_cleavage,
                                                     use_longformer=use_longformer)
     
     def forward(self, 
@@ -957,7 +970,7 @@ class QuestionAnsweringModel(nn.Module):
                 mirna_mask=mirna_mask,
                 mrna_mask=mrna_mask,
             )
-            binding_logit, binding_weights, start_logits, end_logits = outputs 
+            binding_logit, binding_weights, start_logits, end_logits, cleavage_logits = outputs 
                
             if self.predict_span:
                 # mask padded output in start and end logits
@@ -966,14 +979,18 @@ class QuestionAnsweringModel(nn.Module):
                 start_positions = batch["start_positions"]
                 end_positions   = batch["end_positions"]
 
-            span_loss    = torch.tensor(0.0, device=device)
-            binding_loss = torch.tensor(0.0, device=device)
-
-            # MIL binding loss (binding prediction)
-            binding_targets = batch["target"] # (batchsize, )
-            binding_loss_fn = nn.BCEWithLogitsLoss()
-            binding_loss = binding_loss_fn(binding_logit, binding_targets.view(-1).float())
+            span_loss      = torch.tensor(0.0, device=device)
+            binding_loss   = torch.tensor(0.0, device=device)
+            cleavage_loss  = torch.tensor(0.0, device=device)
+            loss           = torch.tensor(0.0, device=device)
             
+            # Cleavage site prediction loss (if cleavage positions are provided)
+            if self.predict_cleavage:
+                cleavage_targets = batch["cleavage_sites"]  # (batchsize,)
+                cleavage_loss_fn = nn.CrossEntropyLoss()
+                cleavage_loss = cleavage_loss_fn(cleavage_logits, cleavage_targets)
+                loss          += cleavage_loss
+                
             if self.predict_binding:
                 binding_targets = batch["target"]
                 # Use MIL binding predictions instead 
@@ -985,16 +1002,21 @@ class QuestionAnsweringModel(nn.Module):
                     loss_start = loss_fn(start_logits[pos_mask,], start_positions[pos_mask]) # CrossEntropyLoss expects [B, L], labels as [B]
                     loss_end   = loss_fn(end_logits[pos_mask,], end_positions[pos_mask])
                     span_loss  = 0.5 * (loss_start + loss_end)
-                    loss       = alpha1 * binding_loss + alpha2 * span_loss  # binding_loss is now MIL binding loss
+                    loss       += alpha1 * binding_loss + alpha2 * span_loss  # binding_loss is now MIL binding loss
                 else:
-                    loss       = binding_loss  # binding_loss is now MIL binding loss
+                    loss       += binding_loss  # binding_loss is now MIL binding loss
             elif self.predict_span:
                 # assume all mirna-mrna pairs are positive
                 # CrossEntropyLoss expects [B, L], labels as [B]
                 loss_start = loss_fn(start_logits, start_positions)
                 loss_end   = loss_fn(end_logits, end_positions)
                 span_loss  = 0.5 * (loss_start + loss_end)
-                loss       = span_loss 
+                loss       += span_loss
+            
+            # If no other losses are computed, ensure we have a valid loss
+            if loss.item() == 0.0 and not (self.predict_binding or self.predict_span):
+                # Only cleavage prediction enabled, loss is already computed above
+                pass 
 
             loss = loss / accumulation_step
             loss.backward()
@@ -1005,7 +1027,7 @@ class QuestionAnsweringModel(nn.Module):
                 if (batch_idx + 1) % accumulation_step == 0:
                     clip_grad_norm_(trainable_params, max_norm=1.0)
                     optimizer.step()
-                    scheduler.step()
+                    scheduler.step() if scheduler is not None else None
                     optimizer.zero_grad()
                     print(
                         f"Train Epoch: {epoch} "
@@ -1018,7 +1040,7 @@ class QuestionAnsweringModel(nn.Module):
             else:
                 clip_grad_norm_(trainable_params, max_norm=1.0)
                 optimizer.step()
-                scheduler.step()
+                scheduler.step() if scheduler is not None else None
                 optimizer.zero_grad()
                 print(
                     f"Train Epoch: {epoch} "
@@ -1034,7 +1056,7 @@ class QuestionAnsweringModel(nn.Module):
         if (batch_idx + 1) % accumulation_step != 0:
             clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            scheduler.step()
+            scheduler.step() if scheduler is not None else None
             optimizer.zero_grad()
         avg_loss = total_loss / len(dataloader)
         return avg_loss
@@ -1052,6 +1074,7 @@ class QuestionAnsweringModel(nn.Module):
         all_binding_preds, all_binding_labels = [], []
         all_binding_probs                     = []
         all_start_labels, all_end_labels      = [], []
+        all_cleavage_preds, all_cleavage_labels = [], []
 
         with torch.no_grad():
             for batch in dataloader:
@@ -1065,7 +1088,7 @@ class QuestionAnsweringModel(nn.Module):
                     mrna_mask=mrna_mask,
                     mirna_mask=mirna_mask,
                 )
-                binding_logit, binding_weights, start_logits, end_logits = outputs
+                binding_logit, binding_weights, start_logits, end_logits, cleavage_logits = outputs
 
                 if self.predict_span:
                     # mask padded mrna tokens
@@ -1078,7 +1101,7 @@ class QuestionAnsweringModel(nn.Module):
                 loss_fn = nn.CrossEntropyLoss()
                 loss    = 0.0 
 
-                if self.predict_binding:
+                if self.predict_binding: 
                     # Compute binding loss using MIL binding predictions
                     binding_targets = batch["target"] # (batchsize, )
                     binding_loss_fn = nn.BCEWithLogitsLoss()
@@ -1091,6 +1114,19 @@ class QuestionAnsweringModel(nn.Module):
                     all_binding_labels.extend(binding_targets.view(-1).cpu())
                 else:
                     binding_loss = None
+
+                # Cleavage site prediction loss and metrics
+                cleavage_loss = torch.tensor(0.0, device=device)
+                if self.predict_cleavage: 
+                    cleavage_targets = batch["cleavage_sites"]  # (batchsize,)
+                    cleavage_loss_fn = nn.CrossEntropyLoss()
+                    cleavage_loss = cleavage_loss_fn(cleavage_logits, cleavage_targets)
+                    loss += cleavage_loss
+                    
+                    # Cleavage predictions
+                    cleavage_preds = torch.argmax(cleavage_logits, dim=-1)
+                    all_cleavage_preds.extend(cleavage_preds.cpu())
+                    all_cleavage_labels.extend(cleavage_targets.cpu())
 
                 # span loss and predictions
                 if self.predict_span and start_logits is not None and end_logits is not None:
@@ -1128,6 +1164,11 @@ class QuestionAnsweringModel(nn.Module):
                 if span_loss is not None:
                     loss += alpha2 * span_loss
                 
+                # If no other losses are computed, ensure we have a valid loss
+                if loss == 0.0 and not (self.predict_binding or self.predict_span):
+                    # Only cleavage prediction enabled, loss is already computed above
+                    pass
+                
                 total_loss += loss.item()
 
         # if there are positive examples
@@ -1158,13 +1199,22 @@ class QuestionAnsweringModel(nn.Module):
         else:
             acc_binding        = 0.0
 
+        # Cleavage site accuracy
+        if len(all_cleavage_preds) > 0:
+            all_cleavage_preds  = torch.tensor(all_cleavage_preds, dtype=torch.long)
+            all_cleavage_labels = torch.tensor(all_cleavage_labels, dtype=torch.long)
+            acc_cleavage        = (all_cleavage_preds == all_cleavage_labels).float().mean().item()
+        else:
+            acc_cleavage        = 0.0
+
         avg_loss = total_loss / len(dataloader)
         
         print(f"Start Acc:   {acc_start*100}%\n"
               f"End Acc:     {acc_end*100}%\n"
               f"Span Exact Match: {exact_match*100}%\n"
               f"F1 Score:    {f1}\n"
-              f"Binding Acc: {acc_binding*100}")
+              f"Binding Acc: {acc_binding*100}\n"
+              f"Cleavage Acc: {acc_cleavage*100}")
         
         if evaluation:
             if self.predict_binding:
@@ -1173,8 +1223,10 @@ class QuestionAnsweringModel(nn.Module):
             if self.predict_span:
                 self.all_start_preds = all_start_preds.numpy()
                 self.all_end_preds = all_end_preds.numpy()
+            if len(all_cleavage_preds) > 0:
+                self.all_cleavage_preds = all_cleavage_preds.numpy()
 
-        return avg_loss, acc_binding, acc_start, acc_end, exact_match, f1     
+        return avg_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage     
 
     @staticmethod 
     def seed_everything(seed):
@@ -1204,15 +1256,16 @@ class QuestionAnsweringModel(nn.Module):
 
             binding_loss = binding_loss_fn(binding_logits.squeeze(-1), batch["binding_labels"].view(-1).float())
             token_loss = token_loss_fn(token_logits.view(-1, 3), batch["labels"].view(-1)) # num_labels = 3 (B, I, O)
-            reg_loss = kl_diag_seed_loss(
-                        attn=a,
-                        seed_q_start=batch["seed_start"],
-                        seed_q_end=batch["seed_end"],
-                        q_mask=batch["mrna_attention_mask"],
-                        k_mask=batch["mirna_attention_mask"],
-                        y_pos=batch["target"],
-                        sigma=sigma,
-                        k_seed_start=1)
+            # reg_loss = kl_diag_seed_loss(
+            #             attn=attn_weights,  # Use actual attention weights
+            #             seed_q_start=batch["seed_start"],
+            #             seed_q_end=batch["seed_end"],
+            #             q_mask=batch["mrna_attention_mask"],
+            #             k_mask=batch["mirna_attention_mask"],
+            #             y_pos=batch["target"],
+            #             sigma=1.0,  # Set sigma value
+            #             k_seed_start=1)
+            reg_loss = torch.tensor(0.0, device=binding_loss.device)  # Disable regularization for now
 
             loss = binding_loss + token_loss + reg_loss
             loss = loss / accumulation_step
@@ -1332,61 +1385,7 @@ class QuestionAnsweringModel(nn.Module):
         """
         tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
                                        model_max_length=self.mrna_max_len,
-                                       padding_side="right")
-        # TODO: modify to test BIO tagging
-        # if evaluation:
-        #     D_test = load_dataset(test_path, sep=',')
-        #     ds_test = QuestionAnswerDataset(data=D_test,
-        #                         mrna_max_len=self.mrna_max_len,
-        #                         mirna_max_len=self.mirna_max_len,
-        #                         tokenizer=tokenizer,
-        #                         seed_start_col="seed start",
-        #                         seed_end_col="seed end",)
-        #     test_loader = DataLoader(ds_test,
-        #                             batch_size=self.batch_size, 
-        #                             shuffle=False)
-        #     ckpt_path = os.path.join(PROJ_HOME, 
-        #                     "checkpoints", 
-        #                     "TargetScan/TwoTowerTransformer",
-        #                     "longformer",
-        #                     str(model.mrna_max_len), 
-        #                     ckpt_name)
-        #     loaded_data = torch.load(ckpt_path, map_location=model.device)
-        #     model.load_state_dict(loaded_data)
-        #     print(f"Loaded checkpoint from {ckpt_path}")
-        #     model.to(self.device)
-        #     self.eval_loop(model=model, 
-        #                    dataloader=test_loader,
-        #                    device=self.device,
-        #                    evaluation=evaluation)
-        #     D_test_w_pred = D_test.copy()
-        #     if self.predict_binding:
-        #         D_test_w_pred["pred label"] = self.all_binding_preds
-        #         D_test_w_pred["pred prob"]  = self.all_binding_probs
-        #         res_df = D_test_w_pred
-        #     if self.predict_span:
-        #         D_test_positive = D_test_w_pred.loc[D_test_w_pred["label"] == 1].copy()
-        #         D_test_positive["pred start"] = self.all_start_preds
-        #         D_test_positive["pred end"]   = self.all_end_preds
-        #         # merge D_test_w_pred with D_test_positive
-        #         cols = ['pred start', 'pred end']
-        #         D_pred_se = D_test_positive[cols]
-
-        #         # 2. 左连接（保留 D_test_w_pred 的所有行）
-        #         D_merged = D_test_w_pred.join(D_pred_se, how='left')
-
-        #         # 3. 将缺失的 pred start/end 填成 -1，并转成整数
-        #         D_merged[['pred start', 'pred end']] = (
-        #             D_merged[['pred start', 'pred end']]
-        #             .fillna(-1)
-        #             .astype(int)
-        #         )
-        #         res_df = D_merged
-        #     pred_df_path = os.path.join(os.path.join(PROJ_HOME, "Performance/TargetScan_test/TwoTowerTransformer"), str(self.mrna_max_len))
-        #     os.makedirs(pred_df_path, exist_ok=True)
-        #     res_df.to_csv(os.path.join(pred_df_path, "seed_prediction.csv"), index=False)
-        #     print(f"Prediction saved to {pred_df_path}")
-        #     return        
+                                       padding_side="right")      
         if training_mode == "BIO":
             ds_train, ds_val = create_dataset(train_path, valid_path, tokenizer, mRNA_max_len=self.mrna_max_len)
             train_loader = DataLoader(ds_train, batch_size=self.batch_size, shuffle=True)
@@ -1484,8 +1483,9 @@ class QuestionAnsweringModel(nn.Module):
                                     mrna_max_len=self.mrna_max_len,
                                     mirna_max_len=self.mirna_max_len,
                                     tokenizer=tokenizer,
-                                    seed_start_col="seed start",
-                                    seed_end_col="seed end",)
+                                    seed_start_col="seed start" if "seed start" in D_test.columns else None,
+                                    seed_end_col="seed end" if "seed end" in D_test.columns else None,
+                                    cleavage_site_col="cleave_site" if "cleave_site" in D_test.columns else None)
                 test_loader = DataLoader(ds_test,
                                         batch_size=self.batch_size, 
                                         shuffle=False)
@@ -1539,39 +1539,46 @@ class QuestionAnsweringModel(nn.Module):
                     init_timeout=180,        # give it more time
                 )
                 run = wandb.init(
-                    project="mirna-Question-Answering",
+                    project="mirna-cleavage-prediction",
                     name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-MLP_hidden:{self.ff_dim}", 
                     config={
                         "batch_size": self.batch_size * accumulation_step,
                         "epochs": self.epochs,
                         "learning rate": self.lr,
                     },
-                    tags=["binding-span", "longformer", "50k-data-500nt", "8-heads-4-layer","norm_by_key","LSE"],
-                    mode='offline',
+                    tags=["cleavage-prediction", "longformer"],
                     save_code=False,
                     job_type="train",
                     settings=settings
                 )
                 self.seed_everything(seed=self.seed)
                 # load dataset
-                D_train  = load_dataset(train_path, sep=',')
-                D_val    = load_dataset(valid_path, sep=',')
+                D_train  = load_dataset(train_path, sep='\t' if train_path.endswith('.tsv') else ',')
+                D_val    = load_dataset(valid_path, sep='\t' if valid_path.endswith('.tsv') else ',')
+                
+                # Add default label column if it doesn't exist (for degradome data)
+                if "label" not in D_train.columns:
+                    D_train["label"] = 1  # All degradome data is positive
+                    
                 ds_train = QuestionAnswerDataset(data=D_train,
                                                 mrna_max_len=self.mrna_max_len,
                                                 mirna_max_len=self.mirna_max_len,
                                                 tokenizer=tokenizer,
-                                                seed_start_col="seed start",
-                                                seed_end_col="seed end",)
+                                                seed_start_col="seed start" if "seed start" in D_train.columns else None,
+                                                seed_end_col="seed end" if "seed end" in D_train.columns else None,
+                                                cleavage_site_col="cleave_site" if "cleave_site" in D_train.columns else None)
                 ds_val = QuestionAnswerDataset(data=D_val,
                                             mrna_max_len=self.mrna_max_len,
                                             mirna_max_len=self.mirna_max_len,
                                             tokenizer=tokenizer, 
-                                            seed_start_col="seed start",
-                                            seed_end_col="seed end",)
-                train_sampler = BatchStratifiedSampler(labels = [example["target"].item() for example in ds_train],
-                                                batch_size = self.batch_size)
+                                            seed_start_col="seed start" if "seed start" in D_val.columns else None,
+                                            seed_end_col="seed end" if "seed end" in D_val.columns else None,
+                                            cleavage_site_col="cleave_site" if "cleave_site" in D_val.columns else None)
+                # train_sampler = BatchStratifiedSampler(labels = [example["target"].item() for example in ds_train],
+                                                # batch_size = self.batch_size)
                 train_loader = DataLoader(ds_train, 
-                                    batch_sampler=train_sampler,
+                                    batch_size=self.batch_size,
+                                    # batch_sampler=train_sampler,
                                     shuffle=False)
                 val_loader   = DataLoader(ds_val, 
                                         batch_size=self.batch_size,
@@ -1622,9 +1629,7 @@ class QuestionAnsweringModel(nn.Module):
                     "TwoTowerTransformer", 
                     "Longformer",
                     str(self.mrna_max_len),
-                    f"embed={self.embed_dim}d",
-                    "norm_by_key",
-                    "LSE",
+                    "predict_cleavage",
                 )
                 os.makedirs(model_checkpoints_dir, exist_ok=True)
                 for epoch in range(self.epochs):
@@ -1642,7 +1647,7 @@ class QuestionAnsweringModel(nn.Module):
                     )
 
                     # EVALUATION
-                    eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = self.eval_loop(
+                    eval_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage = self.eval_loop(
                         model=model,
                         dataloader=val_loader,
                         device=self.device,
@@ -1659,6 +1664,7 @@ class QuestionAnsweringModel(nn.Module):
                             "eval/end accuracy": acc_end,
                             "eval/exact match": exact_match,
                             "eval/F1 score": f1,
+                            "eval/cleavage accuracy": acc_cleavage,
                         }, step=epoch)
                     except Exception as e:
                         print(f"[W&B] log failed at epoch {epoch}: {e}")
@@ -1735,14 +1741,14 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_train_500_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_randomized_start.csv")
-    test_datapath  = os.path.join(PROJ_HOME, "TargetScan_dataset/negative_samples_500_with_seed.csv")
+    train_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_train.tsv")
+    valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_validation.tsv")
+    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_test.tsv")
 
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device="cuda:0",
-                                   epochs=15,
+                                   device="cuda:2",
+                                   epochs=1,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
@@ -1750,8 +1756,9 @@ if __name__ == "__main__":
                                    batch_size=32,
                                    lr=3e-5,
                                    seed=10020,
-                                   predict_span=True,
-                                   predict_binding=True,
+                                   predict_span=False,
+                                   predict_binding=False,
+                                   predict_cleavage=True,
                                    use_longformer=True)
     # total_params = sum(param.numel() for param in model.parameters())
     # print(f"Total Parameters: {total_params}")
@@ -1762,4 +1769,4 @@ if __name__ == "__main__":
               valid_path=valid_datapath,
               accumulation_step=8,
               training_mode="QA",
-)
+            )

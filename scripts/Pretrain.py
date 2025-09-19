@@ -300,6 +300,113 @@ def evaluate_mlm(model,
         'stage3_acc': acc3
     }
 
+@torch.no_grad()
+def evaluate_mlm_ddp(model, 
+                pretrain_wrapper,
+                dataloader, 
+                device, 
+                vocab_size,
+                pad_id,
+                mask_id,
+                rank=0):
+    model.eval()
+    pretrain_wrapper.eval()
+    
+    # Separate tracking for each stage - use tensors for all_reduce
+    local_loss1 = torch.tensor(0.0, device=device)
+    local_loss2 = torch.tensor(0.0, device=device)
+    local_loss2_2 = torch.tensor(0.0, device=device)
+    local_loss3 = torch.tensor(0.0, device=device)
+    local_correct1 = torch.tensor(0, dtype=torch.long, device=device)
+    local_correct2 = torch.tensor(0, device=device)
+    local_correct2_2 = torch.tensor(0, dtype=torch.long, device=device)
+    local_correct3 = torch.tensor(0, dtype=torch.long, device=device)
+    local_masked1 = torch.tensor(0, dtype=torch.long, device=device)
+    local_masked2 = torch.tensor(0, dtype=torch.long, device=device)
+    local_masked2_2 = torch.tensor(0, dtype=torch.long, device=device)
+    local_masked3 = torch.tensor(0, dtype=torch.long, device=device)
+    
+    for batch in dataloader:
+        batch = {k: v.to(device) for k, v in batch.items()}         
+        
+        real_wrapper = getattr(pretrain_wrapper, "module", pretrain_wrapper)
+        loss1, correct1, mr_y1, mi_y1 = loss_stage1_baseline(wrapper=real_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
+        loss2, correct2, mr_y2 = loss_stage2_seed_mrna(wrapper=real_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
+        loss2_2, correct2_2, mi_y2_2 = loss_stage2_seed_mirna(wrapper=real_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
+        loss3, correct3, mr_y3, mi_y3 = loss_stage3_bispan(wrapper=real_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size, evaluate=True)
+        
+        # Accumulate losses
+        local_loss1 += loss1
+        local_loss2 += loss2
+        local_loss2_2 += loss2_2
+        local_loss3 += loss3
+        
+        # Accumulate correct predictions
+        local_correct1 += correct1
+        local_correct2 += correct2
+        local_correct2_2 += correct2_2
+        local_correct3 += correct3
+        
+        # Count masked tokens for each stage
+        local_masked1 += mr_y1.ne(-100).sum() + mi_y1.ne(-100).sum()
+        local_masked2 += mr_y2.ne(-100).sum()
+        local_masked2_2 += mi_y2_2.ne(-100).sum()
+        local_masked3 += mr_y3.ne(-100).sum() + mi_y3.ne(-100).sum()
+    
+    # Reduce across all processes
+    for  t in (local_loss1, local_loss2, local_loss2_2, local_loss3, 
+                local_correct1, local_correct2, local_correct2_2, local_correct3, 
+                local_masked1, local_masked2, local_masked2_2, local_masked3):
+        dist.all_reduce(t, op=dist.ReduceOp.SUM)
+
+    # Convert to Python scalars
+    global_loss1 = local_loss1.item()
+    global_loss2 = local_loss2.item()
+    global_loss2_2 = local_loss2_2.item()
+    global_loss3 = local_loss3.item()
+    global_correct1 = local_correct1.item()
+    global_correct2 = local_correct2.item()
+    global_correct2_2 = local_correct2_2.item()
+    global_correct3 = local_correct3.item()
+    global_masked1 = local_masked1.item()
+    global_masked2 = local_masked2.item()
+    global_masked2_2 = local_masked2_2.item()
+    global_masked3 = local_masked3.item()
+    
+    avg_loss1 = global_loss1 / len(dataloader)
+    avg_loss2 = global_loss2 / len(dataloader)
+    avg_loss2_2 = global_loss2_2 / len(dataloader)
+    avg_loss3 = global_loss3 / len(dataloader)
+    
+    # Calculate accuracies
+    acc1 = global_correct1 / max(global_masked1, 1)  # Avoid division by zero
+    acc2 = global_correct2 / max(global_masked2, 1)
+    acc2_2 = global_correct2_2 / max(global_masked2_2, 1)
+    acc3 = global_correct3 / max(global_masked3, 1)
+    
+    # Overall metrics
+    total_loss = avg_loss1 + avg_loss2 + avg_loss2_2 + avg_loss3
+    total_correct = global_correct1 + global_correct2 + global_correct2_2 + global_correct3
+    total_masked = global_masked1 + global_masked2 + global_masked2_2 + global_masked3
+    overall_acc = total_correct / max(total_masked, 1)
+    
+    if rank == 0:
+        print(f"Evaluation Results:")
+        print(f"  Stage 1 (Baseline): Loss={avg_loss1:.4f}, Accuracy={acc1:.4f}")
+        print(f"  Stage 2 (Seed mRNA): Loss={avg_loss2:.4f}, Accuracy={acc2:.4f}")
+        print(f"  Stage 2 (Seed miRNA): Loss={avg_loss2_2:.4f}, Accuracy={acc2_2:.4f}")
+        print(f"  Stage 3 (Bispan): Loss={avg_loss3:.4f}, Accuracy={acc3:.4f}")
+        print(f"  Overall: Loss={total_loss:.4f}, Accuracy={overall_acc:.4f}")
+    
+    return {
+        'overall_loss': total_loss,
+        'overall_acc': overall_acc,
+        'stage1_acc': acc1,
+        'stage2_acc': acc2,
+        'stage2_2_acc': acc2_2,
+        'stage3_acc': acc3
+    }
+
 def run_ddp(rank, world_size, epochs, 
             accumulation_step=1, 
             mrna_max_len=520, 
@@ -347,13 +454,10 @@ def run_ddp(rank, world_size, epochs,
     
     # Create distributed samplers
     train_sampler = DistributedSampler(ds_train, num_replicas=world_size, rank=rank, shuffle=False)
-    # For validation, only rank 0 should evaluate on full dataset to avoid sharding issues
-    if rank == 0:
-        val_loader = DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    else:
-        val_loader = None
-    
-    train_loader = DataLoader(ds_train, batch_size=batch_size, sampler=train_sampler, num_workers=4, pin_memory=True)
+    # Create validation sampler for distributed evaluation
+    val_sampler = DistributedSampler(ds_val, num_replicas=world_size, rank=rank, shuffle=False)
+    train_loader = DataLoader(ds_train, batch_size=batch_size, sampler=train_sampler, shuffle=False)
+    val_loader = DataLoader(ds_val, batch_size=batch_size, sampler=val_sampler, shuffle=False)
     
     if rank == 0:
         print("Creating model...")
@@ -389,6 +493,16 @@ def run_ddp(rank, world_size, epochs,
 
     # Scale learning rate according to number of GPUs for DDP
     optimizer = AdamW(pretrain_wrapper.parameters(), lr=lr)
+
+    steps_per_epoch = len(train_loader)
+    updates_per_epoch = math.ceil(steps_per_epoch / accumulation_step)
+    total_updates = epochs * updates_per_epoch
+    warmup_updates = int(0.05 * total_updates)
+    eta_min = 3e-5
+
+    warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_updates)
+    cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
+    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
 
     # Initialize wandb only on rank 0
     if rank == 0:
@@ -430,18 +544,6 @@ def run_ddp(rank, world_size, epochs,
     if rank == 0:
         os.makedirs(model_checkpoints_dir, exist_ok=True)
         print(f"Checkpoint directory: {model_checkpoints_dir}")
-    
-    steps_per_epoch = len(train_loader)
-    updates_per_epoch = math.ceil(steps_per_epoch / accumulation_step)
-    total_updates = epochs * updates_per_epoch
-    warmup_updates = int(0.05 * total_updates)
-    eta_min = 3e-5
-
-    warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_updates)
-    cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
-    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
-
-    if rank == 0:
         print(f"Using DDP training with {world_size} GPUs")
         print("Starting training loop...")
     
@@ -470,21 +572,25 @@ def run_ddp(rank, world_size, epochs,
             rank=rank
         )
         
-        # Only evaluate on rank 0 to avoid sharding issues
         if rank == 0:
             print(f"Starting evaluation for epoch {epoch+1}...")
-            eval_results = evaluate_mlm(
-                model=model,
-                pretrain_wrapper=pretrain_wrapper,
-                dataloader=val_loader,
-                device=device,
-                vocab_size=tokenizer.vocab_size,
-                pad_id=tokenizer.pad_token_id,
-                mask_id=tokenizer.mask_token_id,
-                rank=rank
-            )
+            print("Synchronizing all processes...")
+        dist.barrier()
 
-        # Log to wandb only on rank 0
+        eval_results = evaluate_mlm_ddp(
+            model=model,
+            pretrain_wrapper=pretrain_wrapper,
+            dataloader=val_loader,
+            device=device,
+            vocab_size=tokenizer.vocab_size,
+            pad_id=tokenizer.pad_token_id,
+            mask_id=tokenizer.mask_token_id,
+            rank=rank
+        )
+        print("Synchronizing all processes...")
+        dist.barrier()
+        if rank == 0:
+            # Log to wandb
             wandb.log({
                         "epoch": epoch,
                         "train/loss": train_loss["Avg Loss"],
@@ -506,8 +612,8 @@ def run_ddp(rank, world_size, epochs,
                 best_accuracy = eval_results['overall_acc']
                 ckpt_name = f"best_accuracy_{best_accuracy:.4f}_epoch{epoch}.pth"
                 ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                # Save the underlying model state dict (not the DDP wrapper)
-                torch.save(pretrain_wrapper.module.state_dict(), ckpt_path)
+                # save the underlying model state dict (not the DDP wrapper)
+                torch.save(pretrain_wrapper.module.base.state_dict(), ckpt_path) 
 
                 model_art = wandb.Artifact(
                     name="Pretrained-model-ddp",
@@ -529,9 +635,10 @@ def run_ddp(rank, world_size, epochs,
                     print("Max patience reached with no improvement. Early stopping.")
                     break
         
-        elapsed = time() - start
-        remaining = elapsed / (epoch + 1) * (epochs - epoch - 1) / 3600
-        print(f"Still remain: {remaining:.2f} hrs.")
+        if rank == 0:
+            elapsed = time() - start
+            remaining = elapsed / (epoch + 1) * (epochs - epoch - 1) / 3600
+            print(f"Still remain: {remaining:.2f} hrs.")
 
         # Synchronize all processes
         dist.barrier()

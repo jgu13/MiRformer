@@ -351,6 +351,7 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
                  miRNA_col="miRNA sequence",
                  seed_start_col=None,
                  seed_end_col=None,
+                 cleavage_site_col="cleave_site",
                  ):
         self.data = data
         self.mrna_max_len = mrna_max_len
@@ -362,6 +363,7 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
         # self.miRNA_sequences = self.data[[miRNA_col]].values
         self.seed_start_col = seed_start_col
         self.seed_end_col   = seed_end_col
+        self.cleavage_site_col = cleavage_site_col
         # self.seed_starts = self.data[[seed_start_col]].values
         # self.seed_ends = self.data[[seed_end_col]].values
         
@@ -371,14 +373,20 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         mrna_seq = self.data[self.mRNA_col].iat[idx]
         mirna_seq = self.data[self.miRNA_col].iat[idx]
-        label = self.data["label"].iat[idx]
+        label = self.data["label"].iat[idx] if "label" in self.data.columns else 1  # Default to positive if no label
 
         if self.seed_start_col is not None and self.seed_end_col is not None:
             seed_start = torch.tensor(self.data[self.seed_start_col].iat[idx], dtype=torch.long)
             seed_end = torch.tensor(self.data[self.seed_end_col].iat[idx], dtype=torch.long)
         else:
             seed_start = -1
-            seed_end = -1 
+            seed_end = -1
+            
+        # Get cleavage site position
+        if self.cleavage_site_col is not None and self.cleavage_site_col in self.data.columns:
+            cleavage_site = torch.tensor(self.data[self.cleavage_site_col].iat[idx], dtype=torch.long)
+        else:
+            cleavage_site = -1 
         
         # Tokenize mirna
         mirna_seq = mirna_seq.replace("U", "T")
@@ -419,7 +427,8 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
             "mrna_attention_mask": mrna_attn_mask,
             "start_positions": seed_start,  # used as labels
             "end_positions": seed_end,
-            "target": target
+            "target": target,
+            "cleavage_sites": cleavage_site
         }
       
 class TokenClassificationDataset(torch.utils.data.Dataset):
