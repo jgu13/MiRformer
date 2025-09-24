@@ -10,7 +10,7 @@ from sklearn.model_selection import train_test_split
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 ts_data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 deg_data_dir = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data")
-# df = pd.read_csv(os.path.join(ts_data_dir, "Merged_primates_test_500_randomized_start.csv"))
+df = pd.read_csv(os.path.join(ts_data_dir, "TargetScan_train_500_randomized_start_random_samples.csv"))
 # big_df, small_df = train_test_split(df, train_size=20000, test_size=511, random_state=42)
 # df1, df2 = train_test_split(big_df, train_size=10000, test_size=10000, random_state=42)
 # print("big_df: ", len(big_df))
@@ -31,13 +31,12 @@ deg_data_dir = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data")
 # small_df.to_csv(os.path.join(ts_data_dir, "Merged_primates_finetune_test.csv"), index=False)
 
 # sample 20,512 lines from miR_degradome_ago_clip_pairing_data/starBase_degradome_windows_500.tsv
-df = pd.read_csv(os.path.join(deg_data_dir, "starBase_degradome_windows_500.tsv"), sep="\t")
-df = df.sample(n=201000, random_state=42)
-# split into two files: 20k and 512
-df1, df2 = train_test_split(df, train_size=200000, test_size=1000, random_state=42)
-print("df1: ", len(df1))
-print("df2: ", len(df2))
-# save df1 as starbase_degradome_windows_finetune.tsv
-df1.to_csv(os.path.join(deg_data_dir, "starbase_degradome_windows_train.tsv"), index=False, sep="\t")
-# save df2 as starbase_degradome_windows_test.tsv
-df2.to_csv(os.path.join(deg_data_dir, "starbase_degradome_windows_validation.tsv"), index=False, sep="\t")
+# df = pd.read_csv(os.path.join(deg_data_dir, "starBase_degradome_windows_500.tsv"), sep="\t")
+# df = df.sample(n=209000, random_state=42)
+# df1, df2 = train_test_split(df, train_size=208000, test_size=1000, random_state=42)
+# print("df1: ", len(df1))
+# print("df2: ", len(df2))
+# # save df1 as starbase_degradome_windows_finetune.tsv
+# df1.to_csv(os.path.join(deg_data_dir, "starbase_degradome_windows_train.tsv"), index=False, sep="\t")
+# # save df2 as starbase_degradome_windows_test.tsv
+# df2.to_csv(os.path.join(deg_data_dir, "starbase_degradome_windows_validation.tsv"), index=False, sep="\t")

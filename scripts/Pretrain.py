@@ -54,15 +54,7 @@ def cleanup():
 def cosine_decay(total, step, min_factor=0.1):
     """
     Cosine decay from 1.0 at step 0 to min_factor at step total_updates-1.
-    Cosine decay from 1.0 at step 0 to min_factor at step total_updates-1.
     """
-    if total < 1:
-        return 1.0
-    else:
-        # cosine to min_factor
-        progress = step / (total - 1)
-        f = min_factor + 0.5 * (1 - min_factor) * (1 + math.cos(math.pi * progress))
-        return f
     if total < 1:
         return 1.0
     else:

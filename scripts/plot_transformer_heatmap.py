@@ -9,8 +9,8 @@ import matplotlib.patches as patches
 from matplotlib import colors
 from Data_pipeline import CharacterTokenizer
 
-# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
 
 def load_model(
         ckpt_name,
@@ -30,6 +30,37 @@ def load_model(
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data)
     print(f"Loaded checkpoint from {ckpt_path}")
+    return model
+
+def load_model_ckpt(ckpt_path,
+                    **args_dict):
+    model = tm.QuestionAnsweringModel(**args_dict)
+    # Load the pretrained checkpoint (contains wrapper with base model + pretraining heads)
+    pretrain_dict = torch.load(ckpt_path, map_location=model.device)
+    
+    # Create a filtered dict with only base model weights, removing 'base.' prefix
+    model_dict = {key[5:]: value for key, value in pretrain_dict.items() 
+                  if key.startswith('base.')}
+    
+    # Get the current model's state dict to see what keys exist
+    current_model_dict = model.state_dict()
+    
+    # Only load encoder weights (skip predictor heads that have architecture changes)
+    filtered_dict = {}
+    for key, value in model_dict.items():
+        # Skip predictor heads that might have architecture changes
+        if 'predictor.binding' in key or 'predictor.cleavage' in key or 'predictor.qa_outputs' in key:
+            print(f"Skipping predictor head weight: {key}")
+            continue
+            
+        if key in current_model_dict and value.shape == current_model_dict[key].shape:
+            filtered_dict[key] = value
+        else:
+            print(f"Skipping incompatible weight: {key} (shape mismatch or key not found)")
+    
+    # Load the compatible weights, strict=False to ignore missing keys
+    model.load_state_dict(filtered_dict, strict=False)
+    print(f"Loaded {len(filtered_dict)} compatible weights out of {len(model_dict)} total weights")
     return model
 
 def encode_seq(model, 
@@ -84,9 +115,8 @@ def predict(model,
             mrna = mRNA_seq,
             mirna_mask = miRNA_seq_mask,
             mrna_mask = mRNA_seq_mask,
-            use_cls_only=use_cls_only
         )
-        binding_logits, binding_weights, start_logits, end_logits = output
+        binding_logits, binding_weights, start_logits, end_logits, cleavage_logits = output
         if model.predict_binding:
             binding_prob = F.sigmoid(binding_logits)
             binding_prob = binding_prob.detach().cpu().item()
@@ -245,7 +275,7 @@ def plot_heatmap(model,
     if file_name is not None:
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
     else:
-        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_key_LSE_CLS_only.png")
+        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_pretrain_best_accuracy_0.5130_epoch5.png")
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
         print(f"Heatmap is saved to {file_name}")
     return fig, ax
@@ -255,7 +285,7 @@ def main():
     mrna_max_len    = 520
     predict_span    = True
     predict_binding = True
-    device          = "cuda" 
+    device          = "cuda:0" 
     args_dict = {"mirna_max_len": mirna_max_len,
                  "mrna_max_len": mrna_max_len,
                  "device": device,
@@ -270,6 +300,7 @@ def main():
     data_dir = os.path.join(PROJ_HOME, 'TargetScan_dataset')
     test_datapath = os.path.join(PROJ_HOME, data_dir, 
                                  "TargetScan_train_500_randomized_start.csv")
+    # test_datapath = os.path.join("/home/mcb/users/jgu13/projects/mirLM/TargetScan_dataset/Merged_primates_validation_500_randomized_start.csv") 
     test_data  = pd.read_csv(test_datapath, sep=',')
     mRNA_seqs  = test_data[["mRNA sequence"]].values
     miRNA_seqs = test_data[["miRNA sequence"]].values
@@ -279,8 +310,10 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    model = load_model(ckpt_name="best_composite_0.8891_0.6256_epoch7.pth",
-                       **args_dict)
+    # model = load_model(ckpt_name="best_composite_0.8891_0.6256_epoch7.pth",
+    #                    **args_dict)
+    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan+TarBase/TwoTowerTransformer/Longformer/520/Pretrain_DDP/best_accuracy_0.5130_epoch5.pth")
+    model = load_model_ckpt(ckpt_path, **args_dict)
 
     # Testing the first sequence
     i=8 # row number - 2
@@ -314,8 +347,7 @@ def main():
     miRNA_ids = [tokenizer._convert_id_to_token(d.item()) for d in miRNA_tokens_squeezed]
 
     model.to(args_dict["device"])
-    use_cls_only = True
-    print(f"Using CLS only: {use_cls_only}")
+
     print("Model Prediction ...")
     binding_prob, exact_match, f1 = predict(
             model=model,
@@ -325,7 +357,6 @@ def main():
             miRNA_seq_mask=encoded["miRNA_seq_mask"],
             seed_start=seed_start,
             seed_end=seed_end,
-            use_cls_only=use_cls_only,
     )
 
     save_plot_dir = os.path.join(PROJ_HOME, "Performance/TargetScan_test", "TwoTowerTransformer", str(mrna_max_len))
@@ -337,8 +368,8 @@ def main():
                  mRNA_id = mRNA_ID,
                  seed_start = seed_start,
                  seed_end = seed_end,
-                 figsize=(45, 63),
-                 plot_max_only=False,
+                 figsize=(45, 15),
+                 plot_max_only=True,
                  metrics = {"binding_prob": binding_prob, "f1": f1},
                  save_plot_dir=save_plot_dir)
     

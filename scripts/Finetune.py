@@ -29,8 +29,25 @@ def load_model_ckpt(model, ckpt_path):
     model_dict = {key[5:]: value for key, value in pretrain_dict.items() 
                   if key.startswith('base.')}
     
-    # Load the base model weights
-    model.load_state_dict(model_dict)
+    # Get the current model's state dict to see what keys exist
+    current_model_dict = model.state_dict()
+    
+    # Only load encoder weights (skip predictor heads that have architecture changes)
+    filtered_dict = {}
+    for key, value in model_dict.items():
+        # Skip predictor heads that might have architecture changes
+        if 'predictor.binding' in key or 'predictor.cleavage' in key or 'predictor.qa_outputs' in key:
+            print(f"Skipping predictor head weight: {key}")
+            continue
+            
+        if key in current_model_dict and value.shape == current_model_dict[key].shape:
+            filtered_dict[key] = value
+        else:
+            print(f"Skipping incompatible weight: {key} (shape mismatch or key not found)")
+    
+    # Load the compatible weights, strict=False to ignore missing keys
+    model.load_state_dict(filtered_dict, strict=False)
+    print(f"Loaded {len(filtered_dict)} compatible weights out of {len(model_dict)} total weights")
     return model
 
 def seed_everything(seed):
@@ -55,7 +72,6 @@ def run(ckpt_path,
         mirna_max_len,
         predict_span,
         predict_binding,
-        predict_cleavage,
         use_longformer,
         ):
     seed_everything(seed)
@@ -75,6 +91,7 @@ def run(ckpt_path,
                                 seed=seed,
                                 predict_span=predict_span,
                                 predict_binding=predict_binding,
+                                predict_cleavage=False,
                                 use_longformer=use_longformer)
     if ckpt_path is not None:
         model = load_model_ckpt(model, ckpt_path) # load the model checkpoint
@@ -173,13 +190,13 @@ def run(ckpt_path,
     wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
     wandb.init(
         project="mirna-Question-Answering",
-        name=f"CNN_len:{mrna_max_len}-epoch:{epochs}-MLP_hidden:{model.ff_dim}-finetune", 
+        name=f"CNN_len:{mrna_max_len}-epoch:{epochs}-MLP_hidden:{model.ff_dim}-finetune-mean-pooling", 
         config={
             "batch_size": batch_size * accumulation_step,
             "epochs": epochs,
             "learning rate": lr,
         },
-        tags=["binding-span", "longformer", "8-heads-4-layer", "random-initialized", "everything-unfrozen"],
+        tags=["binding-span", "longformer", "8-heads-4-layer", "random-initialized", "finetune", "everything-unfrozen", "mean-pooling", "targetscan"],
         save_code=False,
         job_type="train"
     )
@@ -191,7 +208,7 @@ def run(ckpt_path,
             dataloader=train_loader,
             loss_fn=loss_fn,
             optimizer=optimizer,
-            scheduler=None,
+            scheduler=scheduler,
             device=device,
             epoch=epoch,
             accumulation_step=accumulation_step,
@@ -199,7 +216,7 @@ def run(ckpt_path,
         )
 
         # EVALUATION
-        eval_loss, acc_binding, acc_start, acc_end, exact_match, f1 = model.eval_loop(
+        eval_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage = model.eval_loop(
             model=model,
             dataloader=val_loader,
             device=device,
@@ -269,8 +286,8 @@ if __name__ == "__main__":
     mrna_max_len = 520
     mirna_max_len = 24
     # ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan+TarBase/TwoTowerTransformer/Longformer/520/Pretrain_DDP/best_accuracy_0.5130_epoch5.pth")
-    train_path = os.path.join(data_dir, "Merged_primates_finetune.csv")
-    valid_path = os.path.join(data_dir, "Merged_primates_finetune_test.csv")
+    train_path = os.path.join(data_dir, "TargetScan_finetune_train.csv")
+    valid_path = os.path.join(data_dir, "TargetScan_finetune_validation.csv")
 
     run(ckpt_path=None,
         train_path=train_path,
@@ -279,7 +296,7 @@ if __name__ == "__main__":
         accumulation_step=8,
         mrna_max_len=mrna_max_len,
         mirna_max_len=mirna_max_len,
-        device="cuda:1",
+        device="cuda:3",
         epochs=10,
         batch_size=32,
         lr=3e-5,

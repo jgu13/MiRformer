@@ -714,7 +714,11 @@ class CrossAttentionPredictor(nn.Module):
         self.cleavage_head = nn.Linear(embed_dim, 1) # Linear head instead of one Linear transformation
         
         # Add MIL binding head
-        self.binding_head = BindingHead(embed_dim, output_size=n_classes, hidden_sizes=hidden_sizes, tau=0.1)
+        self.binding_output = LinearHead(
+            input_size=embed_dim, 
+            hidden_sizes=hidden_sizes,
+            output_size=n_classes,
+            dropout=dropout_rate)
         
         self.predict_span = predict_span
         self.predict_binding = predict_binding
@@ -789,8 +793,12 @@ class CrossAttentionPredictor(nn.Module):
         
         # MIL binding head on mRNA positions (including global token at position 0)
         if self.predict_binding:
-            binding_logit, binding_weights = self.binding_head(z_norm, mrna_mask)
-            self.binding_weights = binding_weights # (batch_size, mrna_len) for visualization
+            valid_counts = mrna_mask.sum(dim=1, keepdim=True) # (batch_size)
+            # avg pooling over seq_len
+            z_norm_mean = z_norm.sum(dim=1) / (valid_counts + 1e-8) # (batch_size, embed_dim)
+            # predict binding
+            binding_logit = self.binding_output(z_norm_mean) # (batchsize, 1)
+            binding_weights = None
         else:
             binding_logit, binding_weights = None, None
 
@@ -995,7 +1003,7 @@ class QuestionAnsweringModel(nn.Module):
                 binding_targets = batch["target"]
                 # Use MIL binding predictions instead 
                 binding_loss_fn = nn.BCEWithLogitsLoss()
-                binding_loss    = binding_loss_fn(binding_logit, binding_targets.view(-1).float())
+                binding_loss    = binding_loss_fn(binding_logit.squeeze(-1), binding_targets.view(-1).float())
                 pos_mask        = binding_targets.view(-1).bool()
                 if self.predict_span and pos_mask.any():
                     # only loss of positive pairs are counted
@@ -1105,7 +1113,7 @@ class QuestionAnsweringModel(nn.Module):
                     # Compute binding loss using MIL binding predictions
                     binding_targets = batch["target"] # (batchsize, )
                     binding_loss_fn = nn.BCEWithLogitsLoss()
-                    binding_loss    = binding_loss_fn(binding_logit, binding_targets.view(-1).float())
+                    binding_loss    = binding_loss_fn(binding_logit.squeeze(-1), binding_targets.view(-1).float())
                     loss += binding_loss
                     # binding metric using MIL binding predictions
                     binding_probs = torch.sigmoid(binding_logit)
@@ -1622,6 +1630,7 @@ class QuestionAnsweringModel(nn.Module):
                 best_exact_match = 0
                 best_f1_score    = 0
                 best_composite_metric = 0
+                best_cleavage_acc = 0
                 model_checkpoints_dir = os.path.join(
                     PROJ_HOME, 
                     "checkpoints", 
@@ -1632,6 +1641,10 @@ class QuestionAnsweringModel(nn.Module):
                     "predict_cleavage",
                 )
                 os.makedirs(model_checkpoints_dir, exist_ok=True)
+                if ckpt_name != "":
+                    loaded_data = torch.load(os.path.join(model_checkpoints_dir, ckpt_name), map_location=model.device)
+                    model.load_state_dict(loaded_data)
+                    print(f"Loaded checkpoint from {ckpt_name}")
                 for epoch in range(self.epochs):
                     # TRAINING
                     train_loss = self.train_loop(
@@ -1675,8 +1688,10 @@ class QuestionAnsweringModel(nn.Module):
                         improved = composite > best_composite_metric
                     elif self.predict_binding:
                         improved = acc_binding >= best_binding_acc
-                    else:  # predict_span only
+                    elif self.predict_span:
                         improved = exact_match >= best_exact_match
+                    elif self.predict_cleavage:
+                        improved = acc_cleavage >= best_cleavage_acc
 
                     if improved:
                         # update bests & reset patience
@@ -1684,6 +1699,7 @@ class QuestionAnsweringModel(nn.Module):
                         best_binding_acc      = acc_binding   if self.predict_binding else best_binding_acc
                         best_f1_score         = f1            if self.predict_span    else best_f1_score
                         best_exact_match      = exact_match   if self.predict_span    else best_exact_match
+                        best_cleavage_acc     = acc_cleavage   if self.predict_cleavage else best_cleavage_acc
                         count = 0
 
                         # save checkpoint
@@ -1693,6 +1709,8 @@ class QuestionAnsweringModel(nn.Module):
                             else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
                             if self.predict_binding
                             else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
+                            if self.predict_span
+                            else f"best_cleavage_acc_{best_cleavage_acc:.4f}_epoch{epoch}.pth"
                         )
                         ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
 
@@ -1702,27 +1720,27 @@ class QuestionAnsweringModel(nn.Module):
                         except Exception as e:
                             print(f"[CKPT][ERROR] failed to save {ckpt_path}: {e}", file=sys.stderr, flush=True)
                     
-                        # create and log artifact with alias
-                        model_art = wandb.Artifact(
-                            name=(
-                                "binding-span-model" if (self.predict_binding and self.predict_span)
-                                else "mirna-binding-model" if self.predict_binding
-                                else "mirna-span-model"
-                            ),
-                            type="model",
-                            metadata={
-                                "epoch": epoch,
-                                **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
-                                **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
-                                **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
-                            }
-                        )
-                        model_art.add_file(ckpt_path)
+                        # # create and log artifact with alias
+                        # model_art = wandb.Artifact(
+                        #     name=(
+                        #         "binding-span-model" if (self.predict_binding and self.predict_span)
+                        #         else "mirna-binding-model" if self.predict_binding
+                        #         else "mirna-span-model"
+                        #     ),
+                        #     type="model",
+                        #     metadata={
+                        #         "epoch": epoch,
+                        #         **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                        #         **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                        #         **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                        #     }
+                        # )
+                        # model_art.add_file(ckpt_path)
 
-                        try:
-                            run.log_artifact(model_art, aliases=["bag_pooling_run"])
-                        except Exception as e:
-                            print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+                        # try:
+                        #     run.log_artifact(model_art, aliases=["bag_pooling_run"])
+                        # except Exception as e:
+                        #     print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
 
                     else:
                         count += 1
@@ -1730,10 +1748,10 @@ class QuestionAnsweringModel(nn.Module):
                             print("Max patience reached with no improvement. Early stopping.")
                             break
 
-                        # ETA printout
-                        elapsed = time() - start
-                        remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
-                        print(f"Still remain: {remaining:.2f} hrs.")
+                    # ETA printout
+                    elapsed = time() - start
+                    remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
+                    print(f"Still remain: {remaining:.2f} hrs.")
         else:
             raise ValueError("training_mode must be one of 'QA' or 'BIO'")
 
@@ -1748,7 +1766,7 @@ if __name__ == "__main__":
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    device="cuda:2",
-                                   epochs=1,
+                                   epochs=20,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
@@ -1769,4 +1787,5 @@ if __name__ == "__main__":
               valid_path=valid_datapath,
               accumulation_step=8,
               training_mode="QA",
+              ckpt_name="best_cleavage_acc_0.2330_epoch0.pth"
             )
