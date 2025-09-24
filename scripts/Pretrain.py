@@ -113,21 +113,11 @@ def pretrain_loop(
         loss3 = loss_stage3_bispan(wrapper=real_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)
         loss_mlm = loss1 + loss2 + loss2_2 + loss3
 
-        # === KL regularization on seed rows (positives only) ===
-        loss_reg = kl_diag_seed_loss(
-            attn=attn_weights,
-            seed_q_start=batch["start_positions"],
-            seed_q_end=batch["end_positions"],
-            q_mask=batch["mrna_attention_mask"],
-            k_mask=batch["mirna_attention_mask"],
-            y_pos=batch["target"],
-            sigma=sigma,
-            k_seed_start=1)
         # compute global update index (constant over an accumulation group)
         update_in_epoch = batch_idx // accumulation_step
         global_update = epoch * updates_per_epoch + update_in_epoch
         lamb = cosine_decay(total_updates, global_update, min_factor=0.1)
-        loss = loss_mlm + lamb * loss_reg
+        loss = loss_mlm 
 
         # --- DDP-friendly backward with no_sync() for microbatches ---
         ddp_wrapper = pretrain_wrapper
@@ -144,7 +134,6 @@ def pretrain_loop(
         total_loss2 += loss2.item()
         total_loss2_2 += loss2_2.item()
         total_loss3 += loss3.item()
-        total_loss_reg += loss_reg.item()
         
         if accumulation_step != 1:
             loss_list.append((loss.item() / accumulation_step))
@@ -152,7 +141,6 @@ def pretrain_loop(
             loss2_list.append((loss2.item() / accumulation_step))
             loss2_2_list.append((loss2_2.item() / accumulation_step))
             loss3_list.append((loss3.item() / accumulation_step))
-            loss_reg_list.append((loss_reg.item() / accumulation_step))
             if (batch_idx + 1) % accumulation_step == 0:
                 torch.nn.utils.clip_grad_norm_(ddp_wrapper.parameters(), 5.0)
                 optimizer.step()
@@ -170,7 +158,7 @@ def pretrain_loop(
                     f"Train Epoch: {epoch} "
                     f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
                     f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
-                    f"loss1={sum(loss1_list):.3f} loss2={sum(loss2_list):.3f} loss2_2={sum(loss2_2_list):.3f} loss3={sum(loss3_list):.3f} reg={sum(loss_reg_list):.3f} "
+                    f"loss1={sum(loss1_list):.3f} loss2={sum(loss2_list):.3f} loss2_2={sum(loss2_2_list):.3f} loss3={sum(loss3_list):.3f} "
                     f"Avg loss: {sum(loss_list):.6f}\n",
                     flush=True
                 )
@@ -179,7 +167,6 @@ def pretrain_loop(
                 loss2_list = []
                 loss2_2_list = []
                 loss3_list = []
-                loss_reg_list = []
     
     # After the loop, if gradients remain (for non-divisible number of batches)
     if (batch_idx + 1) % accumulation_step != 0:
@@ -195,14 +182,13 @@ def pretrain_loop(
     avg_loss2 = total_loss2 / num_batches
     avg_loss2_2 = total_loss2_2 / num_batches
     avg_loss3 = total_loss3 / num_batches
-    avg_loss_reg = total_loss_reg / num_batches
     
     return {"Avg Loss": avg_loss, 
             "Loss1": avg_loss1, 
             "Loss2": avg_loss2, 
             "Loss2_2": avg_loss2_2,
             "Loss3": avg_loss3, 
-            "Attn Loss": avg_loss_reg}
+            }
 
 @torch.no_grad()
 def evaluate_mlm(model, 
@@ -423,8 +409,8 @@ def run_ddp(rank, world_size, epochs,
                                 model_max_length=mrna_max_len,
                                 padding_side="right")
     
-    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start.csv")
-    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start.csv")
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start.csv")
 
     if rank == 0:
         print(f"Loading training data from: {train_path}")
@@ -511,7 +497,7 @@ def run_ddp(rank, world_size, epochs,
                 "effective_learning_rate": lr,
                 "world_size": world_size,
             },
-            tags=["Pre-train", "MLM", "Attn_reg", "TarBase+TargetScan", "DDP"],
+            tags=["Pre-train", "MLM", "TargetScan", "DDP"],
             save_code=False,
             job_type="train"
         )
@@ -526,7 +512,7 @@ def run_ddp(rank, world_size, epochs,
     model_checkpoints_dir = os.path.join(
         PROJ_HOME, 
         "checkpoints", 
-        "TargetScan+TarBase", 
+        "TargetScan", 
         "TwoTowerTransformer",
         "Longformer", 
         str(mrna_max_len),
@@ -590,7 +576,6 @@ def run_ddp(rank, world_size, epochs,
                         "train/Seed Loss": train_loss["Loss2"],
                         "train/Seed Loss mirna": train_loss["Loss2_2"],
                         "train/Bispan loss": train_loss["Loss3"],
-                        "train/Attn reg loss": train_loss["Attn Loss"],
                         "eval/loss": eval_results['overall_loss'],
                         "eval/token accuracy": eval_results['overall_acc'],
                         "eval/Token_acc": eval_results['stage1_acc'],
@@ -655,8 +640,8 @@ def run_single_gpu(epochs,
                                 model_max_length=mrna_max_len,
                                 padding_side="right")
     
-    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start.csv")
-    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start.csv")
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start.csv")
 
     print(f"Loading training data from: {train_path}")
     ds_train = QuestionAnswerDataset(data=load_dataset(train_path, sep=','),
@@ -784,7 +769,6 @@ def run_single_gpu(epochs,
                     "train/Seed Loss": train_loss["Loss2"],
                     "train/Seed Loss mirna": train_loss["Loss2_2"],
                     "train/Bispan loss": train_loss["Loss3"],
-                    "train/Attn reg loss": train_loss["Attn Loss"],
                     "eval/loss": eval_results['overall_loss'],
                     "eval/token accuracy": eval_results['overall_acc'],
                     "eval/Token_acc": eval_results['stage1_acc'],
