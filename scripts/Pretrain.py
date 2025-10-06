@@ -21,6 +21,7 @@ from multilevel_masking_pretraining import PairedPretrainWrapper, loss_stage1_ba
 from Attention_regularization import kl_diag_seed_loss
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset
 from utils import load_dataset
+from ckpt_util import save_training_state, load_training_state
 
 import contextlib
 
@@ -147,12 +148,11 @@ def pretrain_loop(
                 if scheduler is not None: scheduler.step()
                 optimizer.zero_grad()
                 
-                # Log to wandb during training (only on rank 0)
-                if rank == 0:
-                    wandb.log({
-                        "train/learning_rate": optimizer.param_groups[0]['lr'],
-                        "train/lambda": lamb,
-                    })
+                # # Log to wandb during training (only on rank 0)
+                # if rank == 0:
+                #     wandb.log({
+                #         "train/learning_rate": optimizer.param_groups[0]['lr'],
+                #     })
                 
                 print(
                     f"Train Epoch: {epoch} "
@@ -395,7 +395,9 @@ def run_ddp(rank, world_size, epochs,
             ff_dim=1024, 
             dropout_rate=0.1, 
             batch_size=32,
-            lr=1e-4):
+            lr=1e-4,
+            checkpoint_path=None,
+            ):
     """Run distributed training on a single process."""
     
     # Setup distributed training with synchronized random seed
@@ -481,11 +483,28 @@ def run_ddp(rank, world_size, epochs,
     warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_updates)
     cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
+    
+    # Load checkpoint if provided
+    if checkpoint_path:
+        if rank == 0:
+            print(f"Loading checkpoint from {checkpoint_path}")
+        # load model, optimizer, scheduler
+        resume_data = load_training_state(ckpt_path=checkpoint_path, 
+                            model=pretrain_wrapper, 
+                            optimizer=optimizer, 
+                            scheduler=scheduler, 
+                            map_location=device)
+
+        if rank == 0:
+            print(f"Resuming training from epoch {resume_data['epoch']}")
+            resume_epoch = resume_data['epoch']
+    else:
+        resume_epoch = 0
 
     # Initialize wandb only on rank 0
     if rank == 0:
         wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-        run = wandb.init(
+        wandb.init(
             project="mirna-pretraining",
             name=f"Pretrain_DDP:{mrna_max_len}-epoch:{epochs}-gpus:{world_size}", 
             config={
@@ -525,7 +544,7 @@ def run_ddp(rank, world_size, epochs,
         print(f"Using DDP training with {world_size} GPUs")
         print("Starting training loop...")
     
-    for epoch in range(epochs):
+    for epoch in range(resume_epoch, epochs):
         # Set epoch for distributed sampler
         train_sampler.set_epoch(epoch)
         
@@ -583,34 +602,50 @@ def run_ddp(rank, world_size, epochs,
                         "eval/Seed_acc_mirna": eval_results['stage2_2_acc'],
                         "eval/Bispan_acc": eval_results['stage3_acc'],
                     })
+            # save checkpoint
+            ckpt_name = f"overall_accuracy_{eval_results['overall_acc']:.4f}_epoch{epoch}.pth"
+            ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+            # save the underlying model state dict (not the DDP wrapper)
+            # also save the optimizer and scheduler states
+            save_training_state(model=pretrain_wrapper.module.base, 
+                                optimizer=optimizer, 
+                                scheduler=scheduler, 
+                                epoch=epoch, 
+                                best_metrics={"overall_accuracy": eval_results['overall_acc']}, 
+                                ckpt_path=ckpt_path)
         
-            # Save checkpoint
-            if eval_results['overall_acc'] > best_accuracy:
-                best_accuracy = eval_results['overall_acc']
-                ckpt_name = f"best_accuracy_{best_accuracy:.4f}_epoch{epoch}.pth"
-                ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-                # save the underlying model state dict (not the DDP wrapper)
-                torch.save(pretrain_wrapper.module.base.state_dict(), ckpt_path) 
+            # if eval_results['overall_acc'] > best_accuracy:
+            #     best_accuracy = eval_results['overall_acc']
+                # ckpt_name = f"best_accuracy_{eval_results['overall_acc']:.4f}_epoch{epoch}.pth"
+                # ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                # # save the underlying model state dict (not the DDP wrapper)
+                # # also save the optimizer and scheduler states
+                # save_training_state(model=pretrain_wrapper.module.base, 
+                #                     optimizer=optimizer, 
+                #                     scheduler=scheduler, 
+                #                     epoch=epoch, 
+                #                     best_metrics={"overall_accuracy": eval_results['overall_acc']}, 
+                #                     ckpt_path=ckpt_path)
 
-                model_art = wandb.Artifact(
-                    name="Pretrained-model-ddp",
-                    type="model",
-                    metadata={
-                        "epoch": epoch,
-                        "accuracy": best_accuracy,
-                        "world_size": world_size
-                    }
-                )
-                model_art.add_file(ckpt_path)
-                try:
-                    run.log_artifact(model_art, aliases=["best-pretrain-ddp"])
-                except Exception as e:
-                    print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
-            else:
-                count += 1
-                if count >= patience:
-                    print("Max patience reached with no improvement. Early stopping.")
-                    break
+                # model_art = wandb.Artifact(
+                #     name="Pretrained-model-ddp",
+                #     type="model",
+                #     metadata={
+                #         "epoch": epoch,
+                #         "accuracy": best_accuracy,
+                #         "world_size": world_size
+                #     }
+                # )
+                # model_art.add_file(ckpt_path)
+                # try:
+                #     run.log_artifact(model_art, aliases=["best-pretrain-ddp"])
+                # except Exception as e:
+                #     print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+            # else:
+            #     count += 1
+            #     if count >= patience:
+            #         print("Max patience reached with no improvement. Early stopping.")
+            #         break
         
         if rank == 0:
             elapsed = time() - start
@@ -811,7 +846,7 @@ def main():
     
     # Training parameters - modify these as needed
     use_ddp = True  # Set to True for DDP training, False for single GPU
-    epochs = 25
+    epochs = 20
     batch_size = 32
     accumulation_step = 8
     embed_dim = 1024
@@ -822,7 +857,8 @@ def main():
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    
+    checkpoint_path = None
+
     if use_ddp:
         if not torch.cuda.is_available():
             print("CUDA is not available. DDP requires CUDA.")
@@ -842,7 +878,9 @@ def main():
             ff_dim=ff_dim,
             dropout_rate=0.1,
             batch_size=batch_size,
-            lr=lr)
+            lr=lr,
+            checkpoint_path=checkpoint_path,
+            )
     else:
         # Single GPU training
         if torch.backends.mps.is_available():

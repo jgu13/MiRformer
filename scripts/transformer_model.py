@@ -18,6 +18,7 @@ from itertools import chain
 from wandb.sdk.wandb_settings import Settings
 
 from utils import load_dataset
+from ckpt_util import load_training_state, save_training_state
 from Data_pipeline import QuestionAnswerDataset, BatchStratifiedSampler, TokenClassificationDataset
 from Data_pipeline import CharacterTokenizer
 
@@ -1370,7 +1371,7 @@ class QuestionAnsweringModel(nn.Module):
             test_path="",
             evaluation=False,
             accumulation_step=1,
-            ckpt_name="",
+            ckpt_path="",
             training_mode="QA"):
         """
         model: nn.Module
@@ -1385,8 +1386,8 @@ class QuestionAnsweringModel(nn.Module):
             If True, evaluate the model on the test data.
         accumulation_step: int
             The number of steps to accumulate the gradients.
-        ckpt_name: str
-            The name of the checkpoint file.
+        ckpt_path: str
+            The path of the checkpoint file.
         training_mode: str
             "BIO": BIO tagging
             "QA": Question Answering
@@ -1603,18 +1604,8 @@ class QuestionAnsweringModel(nn.Module):
                     for p in model.predictor.binding_head.parameters():
                         p.requires_grad = False
 
-                decay, no_decay = [], []
-                for n,p in model.named_parameters():
-                    if not p.requires_grad:
-                        continue
-                    (no_decay if ('tau' in n) else decay).append(p)
-
-                params_group = [{'params': decay, 'weight_decay': 1e-2},
-                                {'params': no_decay, 'weight_decay': 0.0}]
-
-                optimizer = AdamW(params_group, lr=self.lr)
-                trainable_params = list(chain.from_iterable(g['params'] for g in optimizer.param_groups))
-
+                optimizer = AdamW(model.parameters(), lr=self.lr)
+                
                 total_steps   = math.ceil(len(train_loader) * self.epochs / accumulation_step)
                 warmup_steps  = int(0.05 * total_steps)  # 5% warmup (3–5% is typical)
                 eta_min       = 3e-5                     # final floor  
@@ -1641,10 +1632,14 @@ class QuestionAnsweringModel(nn.Module):
                     "predict_cleavage",
                 )
                 os.makedirs(model_checkpoints_dir, exist_ok=True)
-                if ckpt_name != "":
-                    loaded_data = torch.load(os.path.join(model_checkpoints_dir, ckpt_name), map_location=model.device)
-                    model.load_state_dict(loaded_data)
-                    print(f"Loaded checkpoint from {ckpt_name}")
+
+                if ckpt_path != "":
+                    load_training_state(
+                        ckpt_path=ckpt_path, 
+                        model=model, optimizer=optimizer, scheduler=scheduler, 
+                        map_location=model.device)
+                    print(f"Loaded checkpoint from {ckpt_path}")
+
                 for epoch in range(self.epochs):
                     # TRAINING
                     train_loss = self.train_loop(
@@ -1656,7 +1651,7 @@ class QuestionAnsweringModel(nn.Module):
                         device=self.device,
                         epoch=epoch,
                         accumulation_step=accumulation_step,
-                        trainable_params=trainable_params,
+                        trainable_params=None,
                     )
 
                     # EVALUATION
@@ -1762,10 +1757,10 @@ if __name__ == "__main__":
     train_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_train.tsv")
     valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_validation.tsv")
     test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_test.tsv")
-
+    ckpt_path = "/home/mcb/users/jgu13/projects/mirLM/checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/Pretrain_DDP/overall_accuracy_0.5110_epoch2.pth"
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device="cuda:2",
+                                   device="cuda:0",
                                    epochs=20,
                                    embed_dim=1024,
                                    num_heads=8,
@@ -1787,5 +1782,5 @@ if __name__ == "__main__":
               valid_path=valid_datapath,
               accumulation_step=8,
               training_mode="QA",
-              ckpt_name="best_cleavage_acc_0.2330_epoch0.pth"
+              ckpt_path=ckpt_path
             )

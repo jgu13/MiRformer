@@ -15,40 +15,42 @@ from time import time
 from itertools import chain
 
 from utils import load_dataset
+from ckpt_util import load_training_state
 from Data_pipeline import QuestionAnswerDataset, BatchStratifiedSampler, CharacterTokenizer
 from transformer_model import QuestionAnsweringModel
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
-def load_model_ckpt(model, ckpt_path):
-    # Load the pretrained checkpoint (contains wrapper with base model + pretraining heads)
-    pretrain_dict = torch.load(ckpt_path, map_location=model.device)
+# def load_model_ckpt(model, ckpt_path):
+#     # Load the pretrained checkpoint (contains wrapper with base model + pretraining heads)
+#     pretrain_dict = torch.load(ckpt_path, map_location=model.device)
     
-    # Create a filtered dict with only base model weights, removing 'base.' prefix
-    model_dict = {key[5:]: value for key, value in pretrain_dict.items() 
-                  if key.startswith('base.')}
+#     # Create a filtered dict with only base model weights, removing 'base.' prefix
+#     model_dict = {key[5:]: value for key, value in pretrain_dict.items() 
+#                   if key.startswith('base.')}
     
-    # Get the current model's state dict to see what keys exist
-    current_model_dict = model.state_dict()
+#     # Get the current model's state dict to see what keys exist
+#     current_model_dict = model.state_dict()
     
-    # Only load encoder weights (skip predictor heads that have architecture changes)
-    filtered_dict = {}
-    for key, value in model_dict.items():
-        # Skip predictor heads that might have architecture changes
-        if 'predictor.binding' in key or 'predictor.cleavage' in key or 'predictor.qa_outputs' in key:
-            print(f"Skipping predictor head weight: {key}")
-            continue
+#     # Only load encoder weights (skip predictor heads that have architecture changes)
+#     filtered_dict = {}
+#     for key, value in model_dict.items():
+#         # Skip predictor heads that might have architecture changes
+#         if 'predictor.binding' in key or 'predictor.cleavage' in key or 'predictor.qa_outputs' in key:
+#             print(f"Skipping predictor head weight: {key}")
+#             continue
             
-        if key in current_model_dict and value.shape == current_model_dict[key].shape:
-            filtered_dict[key] = value
-        else:
-            print(f"Skipping incompatible weight: {key} (shape mismatch or key not found)")
+#         if key in current_model_dict and value.shape == current_model_dict[key].shape:
+#             filtered_dict[key] = value
+#         else:
+#             print(f"Skipping incompatible weight: {key} (shape mismatch or key not found)")
     
-    # Load the compatible weights, strict=False to ignore missing keys
-    model.load_state_dict(filtered_dict, strict=False)
-    print(f"Loaded {len(filtered_dict)} compatible weights out of {len(model_dict)} total weights")
-    return model
+#     # Load the compatible weights, strict=False to ignore missing keys
+#     model.load_state_dict(filtered_dict, strict=False)
+#     print(f"Loaded {len(filtered_dict)} compatible weights out of {len(model_dict)} total weights")
+#     return model
+
 
 def seed_everything(seed):
     random.seed(seed)
@@ -93,10 +95,6 @@ def run(ckpt_path,
                                 predict_binding=predict_binding,
                                 predict_cleavage=False,
                                 use_longformer=use_longformer)
-    if ckpt_path is not None:
-        model = load_model_ckpt(model, ckpt_path) # load the model checkpoint
-        print(f"Loaded checkpoint from {ckpt_path}")
-
     # load dataset
     D_train  = load_dataset(train_path, sep=',')
     D_val    = load_dataset(valid_path, sep=',')
@@ -123,9 +121,9 @@ def run(ckpt_path,
     loss_fn   = nn.CrossEntropyLoss()
     model.to(device)
     
-    def set_requires_grad(m, flag):
-        for p in m.parameters():
-            p.requires_grad = flag
+    # def set_requires_grad(m, flag):
+    #     for p in m.parameters():
+    #         p.requires_grad = flag
 
     # # Freeze everything first
     # set_requires_grad(model, False)
@@ -168,6 +166,14 @@ def run(ckpt_path,
     cosine = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps, eta_min=eta_min)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps])
 
+    if ckpt_path is not None:
+        resume_data = load_training_state(
+                            ckpt_path=ckpt_path, 
+                            model=model, 
+                            optimizer=optimizer, 
+                            scheduler=scheduler, 
+                            map_location=device)
+
     start    = time()
     count    = 0
     patience = 10
@@ -196,7 +202,7 @@ def run(ckpt_path,
             "epochs": epochs,
             "learning rate": lr,
         },
-        tags=["binding-span", "longformer", "8-heads-4-layer", "random-initialized", "finetune", "everything-unfrozen", "mean-pooling", "targetscan"],
+        tags=["binding-span", "longformer", "8-heads-4-layer", "finetune", "everything-unfrozen", "mean-pooling", "targetscan", "260k-targetscan-pretrained"],
         save_code=False,
         job_type="train"
     )
@@ -285,7 +291,7 @@ def run(ckpt_path,
 if __name__ == "__main__":
     mrna_max_len = 520
     mirna_max_len = 24
-    # ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan+TarBase/TwoTowerTransformer/Longformer/520/Pretrain_DDP/best_accuracy_0.5130_epoch5.pth")
+    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/Pretrain_DDP/overall_accuracy_0.5110_epoch2.pth")
     train_path = os.path.join(data_dir, "TargetScan_finetune_train.csv")
     valid_path = os.path.join(data_dir, "TargetScan_finetune_validation.csv")
 
@@ -296,7 +302,7 @@ if __name__ == "__main__":
         accumulation_step=8,
         mrna_max_len=mrna_max_len,
         mirna_max_len=mirna_max_len,
-        device="cuda:3",
+        device="cuda:1",
         epochs=10,
         batch_size=32,
         lr=3e-5,
