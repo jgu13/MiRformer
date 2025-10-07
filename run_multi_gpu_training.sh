@@ -4,9 +4,9 @@
 # This script demonstrates how to launch distributed training
 
 # Run the training script
-CUDA_VISIBLE_DEVICES=1,2,3 nohup \
+CUDA_VISIBLE_DEVICES=2,3 nohup \
     torchrun \
-    --nproc_per_node=3 \
+    --nproc_per_node=2 \
     --master_port=29500 \
     scripts/Pretrain.py \
-    > train_Merged_500_randomized_start_DDP.out 2>&1 &
+    > train_Positive_Primates_500_randomized_start_DDP.out 2>&1 &

@@ -21,6 +21,8 @@ from multilevel_masking_pretraining import PairedPretrainWrapper, loss_stage1_ba
 from Attention_regularization import kl_diag_seed_loss
 from Data_pipeline import CharacterTokenizer, QuestionAnswerDataset
 from utils import load_dataset
+from ckpt_util import save_training_state, load_training_state
+
 import contextlib
 from wandb.sdk.wandb_settings import Settings
 
@@ -83,6 +85,7 @@ def pretrain_loop(
             vocab_size: int,
             accumulation_step=1, 
             sigma=1.0,
+            global_step=0,
             rank=0):
     model.train()
     total_loss = 0.0
@@ -118,21 +121,11 @@ def pretrain_loop(
         loss3 = loss_stage3_bispan(wrapper=real_wrapper, batch=batch, pad_id=pad_id, mask_id=mask_id, vocab_size=vocab_size)
         loss_mlm = loss1 + loss2 + loss2_2 + loss3
 
-        # === KL regularization on seed rows (positives only) ===
-        loss_reg = kl_diag_seed_loss(
-            attn=attn_weights,
-            seed_q_start=batch["start_positions"],
-            seed_q_end=batch["end_positions"],
-            q_mask=batch["mrna_attention_mask"],
-            k_mask=batch["mirna_attention_mask"],
-            y_pos=batch["target"],
-            sigma=sigma,
-            k_seed_start=1)
         # compute global update index (constant over an accumulation group)
         update_in_epoch = batch_idx // accumulation_step
         global_update = epoch * updates_per_epoch + update_in_epoch
         lamb = cosine_decay(total_updates, global_update, min_factor=0.1)
-        loss = loss_mlm + lamb * loss_reg
+        loss = loss_mlm 
 
         # --- DDP-friendly backward with no_sync() for microbatches ---
         ddp_wrapper = pretrain_wrapper
@@ -149,7 +142,6 @@ def pretrain_loop(
         total_loss2 += loss2.item()
         total_loss2_2 += loss2_2.item()
         total_loss3 += loss3.item()
-        total_loss_reg += loss_reg.item()
         
         if accumulation_step != 1:
             loss_list.append((loss.item() / accumulation_step))
@@ -157,25 +149,18 @@ def pretrain_loop(
             loss2_list.append((loss2.item() / accumulation_step))
             loss2_2_list.append((loss2_2.item() / accumulation_step))
             loss3_list.append((loss3.item() / accumulation_step))
-            loss_reg_list.append((loss_reg.item() / accumulation_step))
             if (batch_idx + 1) % accumulation_step == 0:
                 torch.nn.utils.clip_grad_norm_(ddp_wrapper.parameters(), 5.0)
                 optimizer.step()
                 if scheduler is not None: scheduler.step()
+                global_step += 1
                 optimizer.zero_grad()
-                
-                # Log to wandb during training (only on rank 0)
-                if rank == 0:
-                    wandb.log({
-                        "train/learning_rate": optimizer.param_groups[0]['lr'],
-                        "train/lambda": lamb,
-                    })
                 
                 print(
                     f"Train Epoch: {epoch} "
                     f"[{(batch_idx + 1) * bs}/{len(dataloader.dataset)} "
                     f"({(batch_idx + 1) * bs / len(dataloader.dataset) * 100:.0f}%)] "
-                    f"loss1={sum(loss1_list):.3f} loss2={sum(loss2_list):.3f} loss2_2={sum(loss2_2_list):.3f} loss3={sum(loss3_list):.3f} reg={sum(loss_reg_list):.3f} "
+                    f"loss1={sum(loss1_list):.3f} loss2={sum(loss2_list):.3f} loss2_2={sum(loss2_2_list):.3f} loss3={sum(loss3_list):.3f} "
                     f"Avg loss: {sum(loss_list):.6f}\n",
                     flush=True
                 )
@@ -184,13 +169,13 @@ def pretrain_loop(
                 loss2_list = []
                 loss2_2_list = []
                 loss3_list = []
-                loss_reg_list = []
     
     # After the loop, if gradients remain (for non-divisible number of batches)
     if (batch_idx + 1) % accumulation_step != 0:
         torch.nn.utils.clip_grad_norm_(pretrain_wrapper.parameters(), 5.0)
         optimizer.step()
-        scheduler.step()
+        if scheduler is not None: scheduler.step()
+        global_step += 1
         optimizer.zero_grad()
     
     # Calculate epoch averages
@@ -200,14 +185,14 @@ def pretrain_loop(
     avg_loss2 = total_loss2 / num_batches
     avg_loss2_2 = total_loss2_2 / num_batches
     avg_loss3 = total_loss3 / num_batches
-    avg_loss_reg = total_loss_reg / num_batches
     
     return {"Avg Loss": avg_loss, 
             "Loss1": avg_loss1, 
             "Loss2": avg_loss2, 
             "Loss2_2": avg_loss2_2,
             "Loss3": avg_loss3, 
-            "Attn Loss": avg_loss_reg}
+            "global_step": global_step,
+            }
 
 @torch.no_grad()
 def evaluate_mlm(model, 
@@ -401,7 +386,7 @@ def evaluate_mlm_ddp(model,
         'stage1_acc': acc1,
         'stage2_acc': acc2,
         'stage2_2_acc': acc2_2,
-        'stage3_acc': acc3
+        'stage3_acc': acc3,
     }
 
 def run_ddp(rank, world_size, epochs, 
@@ -414,7 +399,9 @@ def run_ddp(rank, world_size, epochs,
             ff_dim=1024, 
             dropout_rate=0.1, 
             batch_size=32,
-            lr=1e-4):
+            lr=1e-4,
+            checkpoint_path=None,
+            ):
     """Run distributed training on a single process."""
     
     # Setup distributed training with synchronized random seed
@@ -428,8 +415,8 @@ def run_ddp(rank, world_size, epochs,
                                 model_max_length=mrna_max_len,
                                 padding_side="right")
     
-    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start.csv")
-    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start.csv")
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start.csv")
 
     if rank == 0:
         print(f"Loading training data from: {train_path}")
@@ -497,15 +484,34 @@ def run_ddp(rank, world_size, epochs,
     total_updates = epochs * updates_per_epoch
     warmup_updates = int(0.05 * total_updates)
     eta_min = 3e-5
+    global_step = 0
 
     warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_updates)
     cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
+    
+    # Load checkpoint if provided
+    if checkpoint_path:
+        if rank == 0:
+            print(f"Loading checkpoint from {checkpoint_path}")
+        # load model, optimizer, scheduler
+        resume_data = load_training_state(ckpt_path=checkpoint_path, 
+                            model=pretrain_wrapper.module.base, 
+                            optimizer=optimizer, 
+                            scheduler=scheduler, 
+                            map_location=device)
+        global_step = resume_data['global_step']
+
+        if rank == 0:
+            print(f"Resuming training from epoch {resume_data['epoch']}")
+            resume_epoch = resume_data['epoch']
+    else:
+        resume_epoch = 0
 
     # Initialize wandb only on rank 0
     if rank == 0:
-        # wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-        run = wandb.init(
+        wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
+        wandb.init(
             project="mirna-pretraining",
             name=f"Pretrain_DDP:{mrna_max_len}-epoch:{epochs}-gpus:{world_size}", 
             config={
@@ -517,7 +523,7 @@ def run_ddp(rank, world_size, epochs,
                 "effective_learning_rate": lr,
                 "world_size": world_size,
             },
-            tags=["Pre-train", "MLM", "Attn_reg", "TarBase+TargetScan", "DDP"],
+            tags=["Pre-train", "MLM", "TargetScan", "DDP"],
             save_code=False,
             job_type="train",
             mode="offline",
@@ -532,7 +538,7 @@ def run_ddp(rank, world_size, epochs,
     model_checkpoints_dir = os.path.join(
         PROJ_HOME, 
         "checkpoints", 
-        "TargetScan+TarBase", 
+        "TargetScan", 
         "TwoTowerTransformer",
         "Longformer", 
         str(mrna_max_len),
@@ -545,7 +551,7 @@ def run_ddp(rank, world_size, epochs,
         print(f"Using DDP training with {world_size} GPUs")
         print("Starting training loop...")
     
-    for epoch in range(start_epoch, epochs):
+    for epoch in range(resume_epoch, epochs):
         # Set epoch for distributed sampler
         train_sampler.set_epoch(epoch)
         
@@ -567,7 +573,8 @@ def run_ddp(rank, world_size, epochs,
             vocab_size=tokenizer.vocab_size,
             accumulation_step=accumulation_step,
             sigma=0.5,
-            rank=rank
+            rank=rank,
+            global_step=global_step,
         )
         
         if rank == 0:
@@ -583,10 +590,11 @@ def run_ddp(rank, world_size, epochs,
             vocab_size=tokenizer.vocab_size,
             pad_id=tokenizer.pad_token_id,
             mask_id=tokenizer.mask_token_id,
-            rank=rank
+            rank=rank,
         )
         print("Synchronizing all processes...")
         dist.barrier()
+
         if rank == 0:
             # Log to wandb
             wandb.log({
@@ -596,7 +604,6 @@ def run_ddp(rank, world_size, epochs,
                         "train/Seed Loss": train_loss["Loss2"],
                         "train/Seed Loss mirna": train_loss["Loss2_2"],
                         "train/Bispan loss": train_loss["Loss3"],
-                        "train/Attn reg loss": train_loss["Attn Loss"],
                         "eval/loss": eval_results['overall_loss'],
                         "eval/token accuracy": eval_results['overall_acc'],
                         "eval/Token_acc": eval_results['stage1_acc'],
@@ -608,6 +615,7 @@ def run_ddp(rank, world_size, epochs,
             # Update best metrics
             if eval_results['overall_acc'] > best_accuracy:
                 best_accuracy = eval_results['overall_acc']
+                global_step = train_loss['global_step']
                 count = 0  # Reset patience counter
                 
                 # Save best model checkpoint
@@ -619,28 +627,9 @@ def run_ddp(rank, world_size, epochs,
                                     optimizer=optimizer, 
                                     scheduler=scheduler, 
                                     epoch=epoch, 
+                                    global_step=global_step,
                                     best_metrics={"overall_accuracy": eval_results['overall_acc']}, 
                                     ckpt_path=ckpt_path)
-
-                model_art = wandb.Artifact(
-                    name="Pretrained-model-ddp",
-                    type="model",
-                    metadata={
-                        "epoch": epoch,
-                        "accuracy": best_accuracy,
-                        "world_size": world_size
-                    }
-                )
-                model_art.add_file(ckpt_path)
-                try:
-                    run.log_artifact(model_art, aliases=["best-pretrain-ddp"])
-                except Exception as e:
-                    print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
-            else:
-                count += 1
-                if count >= patience:
-                    print("Max patience reached with no improvement. Early stopping.")
-                    break
         
         if rank == 0:
             elapsed = time() - start
@@ -652,16 +641,18 @@ def run_ddp(rank, world_size, epochs,
 
     # Final checkpoint save
     if rank == 0:
-        bm = {"overall_acc": best_accuracy}
+        accuracy = eval_results['overall_acc']
+        global_step = train_loss['global_step']
+        ckpt_path = os.path.join(model_checkpoints_dir, f"best_accuracy_{accuracy:.4f}_epoch{epochs-1}.pth")
+        bm = {"overall_accuracy": accuracy}
         save_training_state(
-            model=pretrain_wrapper.module,
+            model=pretrain_wrapper.module.base,
             optimizer=optimizer,
             scheduler=scheduler,
             epoch=epochs-1,
-            step=global_step,
+            global_step=global_step,
             best_metrics=bm,
-            ckpt_dir=model_checkpoints_dir,
-            tag="final"
+            ckpt_path=ckpt_path,
         )
         print(f"[CKPT] Final checkpoint saved")
 
@@ -685,8 +676,8 @@ def run_single_gpu(epochs,
                                 model_max_length=mrna_max_len,
                                 padding_side="right")
     
-    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_train_500_randomized_start.csv")
-    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Merged_primates_validation_500_randomized_start.csv")
+    train_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_train_500_randomized_start.csv")
+    valid_path = os.path.join(PROJ_HOME, "TargetScan_dataset/Positive_primates_validation_500_randomized_start.csv")
 
     print(f"Loading training data from: {train_path}")
     ds_train = QuestionAnswerDataset(data=load_dataset(train_path, sep=','),
@@ -767,6 +758,7 @@ def run_single_gpu(epochs,
     best_accuracy = 0
     count = 0  # Initialize count variable for early stopping
     start_epoch = 0
+    global_step = 0
     model_checkpoints_dir = os.path.join(
         PROJ_HOME, 
         "checkpoints", 
@@ -798,6 +790,7 @@ def run_single_gpu(epochs,
             vocab_size=tokenizer.vocab_size,
             accumulation_step=accumulation_step,
             sigma=0.5,  
+            global_step=global_step,
             )
         
         print(f"Starting evaluation for epoch {epoch+1}...")
@@ -818,7 +811,6 @@ def run_single_gpu(epochs,
                     "train/Seed Loss": train_loss["Loss2"],
                     "train/Seed Loss mirna": train_loss["Loss2_2"],
                     "train/Bispan loss": train_loss["Loss3"],
-                    "train/Attn reg loss": train_loss["Attn Loss"],
                     "eval/loss": eval_results['overall_loss'],
                     "eval/token accuracy": eval_results['overall_acc'],
                     "eval/Token_acc": eval_results['stage1_acc'],
@@ -864,7 +856,7 @@ def main():
     
     # Training parameters - modify these as needed
     use_ddp = True  # Set to True for DDP training, False for single GPU
-    epochs = 25
+    epochs = 20
     batch_size = 32
     accumulation_step = 8
     embed_dim = 1024
@@ -875,7 +867,8 @@ def main():
     rank = int(os.environ["RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    
+    checkpoint_path = None
+
     if use_ddp:
         if not torch.cuda.is_available():
             print("CUDA is not available. DDP requires CUDA.")
@@ -895,7 +888,9 @@ def main():
             ff_dim=ff_dim,
             dropout_rate=0.1,
             batch_size=batch_size,
-            lr=lr)
+            lr=lr,
+            checkpoint_path=checkpoint_path,
+            )
     else:
         # Single GPU training
         if torch.backends.mps.is_available():
