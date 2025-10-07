@@ -524,13 +524,11 @@ def run_ddp(rank, world_size, epochs,
             settings=Settings(start_method="thread")  # HPC-friendly launcher
         )
     
-    if rank == 0:
-        print("Setting up training...")
-    
     start = time()
     patience = 10
     best_accuracy = 0
     count = 0  # Initialize count variable for early stopping
+    start_epoch = 0
     model_checkpoints_dir = os.path.join(
         PROJ_HOME, 
         "checkpoints", 
@@ -544,18 +542,6 @@ def run_ddp(rank, world_size, epochs,
     if rank == 0:
         os.makedirs(model_checkpoints_dir, exist_ok=True)
         print(f"Checkpoint directory: {model_checkpoints_dir}")
-    
-    steps_per_epoch = len(train_loader)
-    updates_per_epoch = math.ceil(steps_per_epoch / accumulation_step)
-    total_updates = epochs * updates_per_epoch
-    warmup_updates = int(0.05 * total_updates)
-    eta_min = 3e-5
-
-    warmup = LinearLR(optimizer, start_factor=1e-2, end_factor=1.0, total_iters=warmup_updates)
-    cosine = CosineAnnealingLR(optimizer, T_max=total_updates - warmup_updates, eta_min=eta_min)
-    scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_updates])
-
-    if rank == 0:
         print(f"Using DDP training with {world_size} GPUs")
         print("Starting training loop...")
     
@@ -628,7 +614,13 @@ def run_ddp(rank, world_size, epochs,
                 ckpt_name = f"best_accuracy_{best_accuracy:.4f}_epoch{epoch}.pth"
                 ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
                 # save the underlying model state dict (not the DDP wrapper)
-                torch.save(pretrain_wrapper.module.base.state_dict(), ckpt_path) 
+                # torch.save(pretrain_wrapper.module.base.state_dict(), ckpt_path) 
+                save_training_state(model=pretrain_wrapper.module.base, 
+                                    optimizer=optimizer, 
+                                    scheduler=scheduler, 
+                                    epoch=epoch, 
+                                    best_metrics={"overall_accuracy": eval_results['overall_acc']}, 
+                                    ckpt_path=ckpt_path)
 
                 model_art = wandb.Artifact(
                     name="Pretrained-model-ddp",
@@ -774,6 +766,7 @@ def run_single_gpu(epochs,
     patience = 10
     best_accuracy = 0
     count = 0  # Initialize count variable for early stopping
+    start_epoch = 0
     model_checkpoints_dir = os.path.join(
         PROJ_HOME, 
         "checkpoints", 
@@ -785,36 +778,7 @@ def run_single_gpu(epochs,
     )
     os.makedirs(model_checkpoints_dir, exist_ok=True)
     print(f"Checkpoint directory: {model_checkpoints_dir}")
-    
-    # --- RESUME ---
-    resume_path = latest_checkpoint(model_checkpoints_dir)
-    state = load_training_state(resume_path, model=model, optimizer=optimizer, scheduler=scheduler, map_location="cpu")
-    start_epoch = state["epoch"]
-    global_step = state["step"]
-    best_metrics = state["best_metrics"]
-    best_accuracy = best_metrics.get("overall_acc", 0.0)
 
-    if resume_path:
-        print(f"Resuming from checkpoint: {resume_path}")
-        print(f"Resuming from epoch {start_epoch}, step {global_step}")
-        print(f"Best accuracy so far: {best_accuracy:.4f}")
-
-    # Save on SIGTERM
-    def save_now():
-        bm = {"overall_acc": best_accuracy}
-        save_training_state(
-                model=model,
-                optimizer=optimizer, 
-                scheduler=scheduler, 
-                epoch=epoch, 
-                step=global_step, 
-                best_metrics=bm, 
-                ckpt_dir=model_checkpoints_dir, 
-                tag="latest")
-
-    killer = GracefulKiller(on_kill=save_now)
-    save_every_minutes = 20
-    next_save_time = time.time() + save_every_minutes * 60
 
     print("Starting training loop...")
     for epoch in range(start_epoch, epochs):
@@ -891,40 +855,9 @@ def run_single_gpu(epochs,
                 print("Max patience reached with no improvement. Early stopping.")
                 break
         
-        # Periodic checkpoint saving
-        current_time = time.time()
-        if current_time >= next_save_time:
-            bm = {"overall_acc": best_accuracy}
-            save_training_state(
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                epoch=epoch,
-                step=global_step,
-                best_metrics=bm,
-                ckpt_dir=model_checkpoints_dir,
-                tag="periodic"
-            )
-            next_save_time = current_time + save_every_minutes * 60
-            print(f"[CKPT] Periodic checkpoint saved at epoch {epoch}")
-        
         elapsed = time() - start
         remaining = elapsed / (epoch + 1) * (epochs - epoch - 1) / 3600
         print(f"Still remain: {remaining:.2f} hrs.")
-    
-    # Final checkpoint save
-    bm = {"overall_acc": best_accuracy}
-    save_training_state(
-        model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        epoch=epochs-1,
-        step=global_step,
-        best_metrics=bm,
-        ckpt_dir=model_checkpoints_dir,
-        tag="final"
-    )
-    print(f"[CKPT] Final checkpoint saved")
 
 def main():
     """Main function to launch training (single GPU or DDP)."""
