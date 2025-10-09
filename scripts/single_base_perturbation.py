@@ -320,6 +320,7 @@ def main():
     seed_end = test_data[["seed end"]].iloc[i,0]
     print(f"miRNA id = {mRNA_id}", flush=True)
     print(f"mRNA id = {miRNA_id}", flush=True)
+    
     # replace U with T and reverse miRNA to 3' to 5' 
     miRNA_seq = miRNA_seq.replace("U", "T")[::-1]
     
