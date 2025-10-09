@@ -297,7 +297,7 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer":True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.8902_0.9773_epoch7.pth",
+    model = load_model(ckpt_name="best_composite_0.8974_0.9812_epoch9.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 

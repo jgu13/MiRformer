@@ -31,7 +31,7 @@ from Attention_regularization import kl_diag_seed_loss
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
-
+data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 class CNNTokenization(nn.Module):
     def __init__(self, embed_dim):
@@ -1542,24 +1542,17 @@ class QuestionAnsweringModel(nn.Module):
                 print(f"Prediction saved to {pred_df_path}")
             else:
                 # weights and bias initialization
-                # HPC compute nodes don't have internet access, so we need to use offline mode
-                # wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-                settings = Settings(
-                    start_method="thread",   # avoid fork issues on HPC
-                    init_timeout=180,        # give it more time
-                )
                 run = wandb.init(
-                    project="mirna-cleavage-prediction",
+                    project="mirna-Question-Answering",
                     name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-MLP_hidden:{self.ff_dim}", 
                     config={
                         "batch_size": self.batch_size * accumulation_step,
                         "epochs": self.epochs,
                         "learning rate": self.lr,
                     },
-                    tags=["cleavage-prediction", "longformer"],
-                    save_code=False,
+                    tags=["binding-span", "longformer", "mean_unchunk", "8-heads-4-layer","norm_by_key","continued_training"],
+                    save_code=True,
                     job_type="train",
-                    settings=settings
                 )
                 self.seed_everything(seed=self.seed)
                 # load dataset
@@ -1596,13 +1589,17 @@ class QuestionAnsweringModel(nn.Module):
                 loss_fn   = nn.CrossEntropyLoss()
                 model.to(self.device)
                 
-                if self.predict_binding and not self.predict_span:
+                if not self.predict_span:
                     # freeze update of params in the span prediction head
                     for p in model.predictor.qa_outputs.parameters():
                         p.requires_grad = False
-                elif self.predict_span and not self.predict_binding:
+                elif not self.predict_binding:
                     # freeze update of params in the binding prediction head
                     for p in model.predictor.binding_head.parameters():
+                        p.requires_grad = False
+                elif not self.predict_cleavage:
+                    # freeze update of params in the cleavage prediction head
+                    for p in model.predictor.cleavage_head.parameters():
                         p.requires_grad = False
 
                 optimizer = AdamW(model.parameters(), lr=self.lr)
@@ -1630,14 +1627,14 @@ class QuestionAnsweringModel(nn.Module):
                     "TwoTowerTransformer", 
                     "Longformer",
                     str(self.mrna_max_len),
-                    "predict_cleavage",
+                    "continue_training",
                 )
                 os.makedirs(model_checkpoints_dir, exist_ok=True)
 
                 if ckpt_path != "":
-                    load_training_state(
+                    resumed_data = load_training_state(
                         ckpt_path=ckpt_path, 
-                        model=model, optimizer=optimizer, scheduler=scheduler, 
+                        model=model, optimizer=None, scheduler=None, # do not load optimizer and scheduler
                         map_location=model.device)
                     print(f"Loaded checkpoint from {ckpt_path}")
 
@@ -1716,27 +1713,27 @@ class QuestionAnsweringModel(nn.Module):
                         except Exception as e:
                             print(f"[CKPT][ERROR] failed to save {ckpt_path}: {e}", file=sys.stderr, flush=True)
                     
-                        # # create and log artifact with alias
-                        # model_art = wandb.Artifact(
-                        #     name=(
-                        #         "binding-span-model" if (self.predict_binding and self.predict_span)
-                        #         else "mirna-binding-model" if self.predict_binding
-                        #         else "mirna-span-model"
-                        #     ),
-                        #     type="model",
-                        #     metadata={
-                        #         "epoch": epoch,
-                        #         **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
-                        #         **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
-                        #         **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
-                        #     }
-                        # )
-                        # model_art.add_file(ckpt_path)
+                        # create and log artifact with alias
+                        model_art = wandb.Artifact(
+                            name=(
+                                "binding-span-model" if (self.predict_binding and self.predict_span)
+                                else "mirna-binding-model" if self.predict_binding
+                                else "mirna-span-model"
+                            ),
+                            type="model",
+                            metadata={
+                                "epoch": epoch,
+                                **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                                **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                                **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                            }
+                        )
+                        model_art.add_file(ckpt_path)
 
-                        # try:
-                        #     run.log_artifact(model_art, aliases=["bag_pooling_run"])
-                        # except Exception as e:
-                        #     print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+                        try:
+                            run.log_artifact(model_art, aliases=["continued_training_run"])
+                        except Exception as e:
+                            print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
 
                     else:
                         count += 1
@@ -1755,14 +1752,14 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_train.tsv")
-    valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_validation.tsv")
-    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_test.tsv")
-    ckpt_path = "/home/mcb/users/jgu13/projects/mirLM/checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/Pretrain_DDP/overall_accuracy_0.5110_epoch2.pth"
+    train_datapath = os.path.join(PROJ_HOME, data_dir, "TargetScan_train_500_randomized_start.csv")
+    valid_datapath = os.path.join(PROJ_HOME, data_dir, "TargetScan_validation_500_randomized_start.csv")
+    test_datapath  = os.path.join(PROJ_HOME, data_dir, "TargetScan_test_500_randomized_start.csv")
+    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/Pretrain_DDP/overall_accuracy_0.5110_epoch2.pth")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
                                    device="cuda:0",
-                                   epochs=20,
+                                   epochs=100,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
@@ -1770,9 +1767,9 @@ if __name__ == "__main__":
                                    batch_size=32,
                                    lr=3e-5,
                                    seed=10020,
-                                   predict_span=False,
-                                   predict_binding=False,
-                                   predict_cleavage=True,
+                                   predict_span=True,
+                                   predict_binding=True,
+                                   predict_cleavage=False,
                                    use_longformer=True)
     # total_params = sum(param.numel() for param in model.parameters())
     # print(f"Total Parameters: {total_params}")
