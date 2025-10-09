@@ -660,6 +660,7 @@ class CrossAttentionPredictor(nn.Module):
         # Create embedding table with correct size
         self.sn_embedding = nn.Embedding(vocab_size, embed_dim)
         self.cnn_embedding = CNNTokenization(embed_dim)
+        self.ln_merge = nn.LayerNorm(embed_dim)
         self.mirna_encoder = TransformerEncoder(
             num_layers=num_layers,
             embed_dim=embed_dim,

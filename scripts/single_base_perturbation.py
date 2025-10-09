@@ -12,12 +12,11 @@ from Data_pipeline import CharacterTokenizer
 from plot_transformer_heatmap import plot_heatmap
 
 # PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt"
-# PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
+PROJ_HOME = os.path.expanduser("~/projects/mirLM")
+# PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 def predict(model, 
-            use_cls_only=False,
             **kwargs
             ):
     model.eval()
@@ -26,12 +25,11 @@ def predict(model,
         miRNA_seq = kwargs["miRNA_seq"]
         mRNA_seq_mask = kwargs["mRNA_seq_mask"]
         miRNA_seq_mask = kwargs["miRNA_seq_mask"] # (B, L)
-        binding_logit, binding_weights, start_logits, end_logits = model(
+        binding_logit, binding_weights, start_logits, end_logits, cleavage_logits = model(
                                 mirna = miRNA_seq,
                                 mrna = mRNA_seq,
                                 mirna_mask = miRNA_seq_mask,
                                 mrna_mask = mRNA_seq_mask,
-                                use_cls_only=use_cls_only
                             )
         # predicted embedding
         # layer norm
@@ -97,18 +95,17 @@ def load_model(ckpt_name,
     model = tm.QuestionAnsweringModel(**args_dict)
     ckpt_path = os.path.join(PROJ_HOME, 
                             "checkpoints", 
-                            # "TargetScan",
-                            "TargetScan/TwoTowerTransformer",
+                            "TargetScan",
+                            "TwoTowerTransformer",
                             # "TokenClassification",
                             "Longformer",
                             str(args_dict["mrna_max_len"]),
                             f"embed={args_dict['embed_dim']}d",
                             "norm_by_key",
                             "LSE",
-                            "bag_pooling", 
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
-    model.load_state_dict(loaded_data)
+    model.load_state_dict(loaded_data, strict=False)
     print(f"Loaded checkpoint from {ckpt_path}", flush=True)
     return model
 
@@ -284,7 +281,7 @@ def main():
     predict_span    = True
     predict_binding = True
     if torch.cuda.is_available():
-        device = "cuda"
+        device = "cuda:3"
     elif torch.backends.mps.is_available():
         device = "mps"
     else:
@@ -300,7 +297,7 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer":True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.8925_0.6329_epoch9.pth",
+    model = load_model(ckpt_name="best_composite_0.8902_0.9773_epoch7.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
@@ -341,8 +338,7 @@ def main():
 
     print("WT prediction ...", flush=True)
     model.to(args_dict["device"])
-    use_cls_only = False
-    wt_attn_score, wt_binding_prob, wt_binding_weights = predict(model, use_cls_only=use_cls_only, **encoded)
+    wt_attn_score, wt_binding_prob, wt_binding_weights = predict(model, **encoded)
     # print("Wild-type prediction = ", wt_prob)
     
     # convert mRNA seq tokens to mRNA ids
@@ -388,7 +384,7 @@ def main():
                 mRNA_seq=perturbed_mRNA,
                 miRNA_seq=miRNA_seq,
             )
-            attn_score, binding_prob, _ = predict(model, use_cls_only=use_cls_only, **encoded)  # Ignore binding_weights from perturbation
+            attn_score, binding_prob, _ = predict(model, **encoded)  # Ignore binding_weights from perturbation
             attn_score_delta = abs(wt_attn_score - attn_score) # (L,)
             binding_prob_delta = abs(wt_binding_prob - binding_prob)  # Both are scalars
             attn_score_delta_list.append(attn_score_delta)
@@ -410,7 +406,7 @@ def main():
     
     # print("Max in delta = ", max(deltas))
     print("plot changes on base logos ...", flush=True)
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_key_LSE_bag_pooling.png")
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_key_LSE(2).png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
                  weights_changes=weights_deltas,
