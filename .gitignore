@@ -1,5 +1,7 @@
 # checkpoints
 checkpoints/
+50k_checkpoints/
+best_checkpoints/
 
 # data
 data/
