@@ -1,19 +1,26 @@
 """
-Build 500-nt mRNA windows centered on degradome cleavage sites.
+Build 30-nt mRNA windows around degradome cleavage sites with randomized positioning.
 
 Inputs:
-  - Degradome TSV with at least: transcript, cleaveLocus, miRNAid, miRNAseq
+  - Degradome TSV with at least: transcript, cleaveLocus, miRNAname, miRNAseq, 
+      region, fdr, degraIDnum
       e.g., cleaveLocus like "chr10:90767475:+"
   - GENCODE v19 GTF (GRCh37/hg19)
   - transcripts FASTA (from: gffread GTF -g genome.fa -w transcripts.fa)
   - (optional) transcripts.fa.fai and samtools for fast random access
 
+Filters applied:
+  * Only 3'UTR regions
+  * fdr <= 0.01
+  * degraIDnum >= 2
+  * Drops miRNA-transcript pairs with multiple peaks <50 nt apart
+
 Output TSV columns:
-  miRNAid   transcript   cleave_site_tx0   mrna_window_500nt   miRNAseq
+  miRNAid   transcript   cleave_site   mrna_window   miRNAseq
 
 Notes:
-  * cleave_site_tx0 is 0-based index on the spliced transcript sequence.
-  * mrna_window_500nt has length 500; cleavage base is at index 250.
+  * cleave_site is 0-based index within the window (randomized 0 to window_size-1).
+  * mrna_window has length 30 by default; cleavage base position is randomized.
   * If the cleavage maps to intron (mismatch / bad row), the row is skipped.
 """
 
@@ -205,7 +212,7 @@ def main():
     ap.add_argument("--degradome-tsv", required=True, help="input degradome TSV")
     ap.add_argument("--out-tsv", required=True, help="output TSV path")
     ap.add_argument("--samtools", type=str, required=False,default=None, help="use samtools faidx to fetch sequences")
-    ap.add_argument("--window", type=int, default=500, help="window length (even recommended, default 500)")
+    ap.add_argument("--window", type=int, default=30, help="window length (default 30)")
     ap.add_argument("--skip-header", action="store_true", help="set if degradome TSV has no header row")
     ap.add_argument("--report-every", type=int, default=50000, help="progress report frequency")
     args = ap.parse_args()
@@ -215,29 +222,80 @@ def main():
     tx_models, base_to_full = load_gtf_min(args.gtf)
     sys.stderr.write(f"[info] transcripts in GTF: {len(tx_models)}\n")
 
-    # 2) Determine transcripts used by degradome (to limit FASTA loading if needed)
-    sys.stderr.write("[info] scanning degradome to collect transcript IDs...\n")
+    # 2) First pass: filter degradome rows and collect data
+    sys.stderr.write("[info] scanning degradome and applying filters (3'UTR, fdr<=0.01, degraIDnum>=2)...\n")
     needed = set()
+    filtered_rows = []
+    peak_data = []  # For close peak filtering
+    n_total = 0
+    n_region_filter = 0
+    n_fdr_filter = 0
+    n_degra_filter = 0
+    
     with smart_open(args.degradome_tsv, "rt") as fin:
         reader = csv.reader(fin, delimiter="\t")
         header = next(reader)
         header_map = {h: i for i, h in enumerate(header)}
         if args.skip_header:
-            # if no header, we can't map by names; expect fixed indices — not recommended
             sys.stderr.write("[warn] --skip-header given; expecting named columns present.\n")
+        
         for row in reader:
+            n_total += 1
             if not row or len(row) < 1:
                 continue
+            
+            # Apply filters
+            region = row[header_map.get("region", "")] if "region" in header_map else ""
+            if region != "3'UTR":
+                n_region_filter += 1
+                continue
+            
+            fdr_val = float(row[header_map.get("fdr", "1.0")]) if "fdr" in header_map else 1.0
+            if fdr_val > 0.01:
+                n_fdr_filter += 1
+                continue
+            
+            degra_num = int(row[header_map.get("degraIDnum", "0")]) if "degraIDnum" in header_map else 0
+            if degra_num < 2:
+                n_degra_filter += 1
+                continue
+            
             raw_tx = row[header_map["transcript"]]
-            # canonicalize to a full versioned ID present in GTF
             tx_key = raw_tx
             if tx_key not in tx_models:
-                tx_key = base_to_full.get(raw_tx.split(".")[0])  # e.g., ENST00000494410 -> ENST00000494410.1
+                tx_key = base_to_full.get(raw_tx.split(".")[0])
             if tx_key is None or tx_key not in tx_models:
                 continue
+            
             needed.add(tx_key)
+            filtered_rows.append(row)
+            
+            # Extract position for close peak filtering
+            miRNAid = row[header_map.get("miRNAname", "")] if "miRNAname" in header_map else ""
+            cleaveLocus = row[header_map["cleaveLocus"]]
+            try:
+                chrom, pos_str, strand = cleaveLocus.split(":")
+                pos1 = int(pos_str)
+                peak_data.append((miRNAid, tx_key, pos1, row))
+            except:
+                pass
 
-    sys.stderr.write(f"[info] unique transcripts in degradome: {len(needed)}\n")
+    sys.stderr.write(f"[info] total rows: {n_total}\n")
+    sys.stderr.write(f"[info] filtered by region (not 3'UTR): {n_region_filter}\n")
+    sys.stderr.write(f"[info] filtered by fdr (>0.01): {n_fdr_filter}\n")
+    sys.stderr.write(f"[info] filtered by degraIDnum (<2): {n_degra_filter}\n")
+    sys.stderr.write(f"[info] rows passing initial filters: {len(filtered_rows)}\n")
+    
+    # Final filtered set
+    final_rows = []
+    for row in filtered_rows:
+        miRNAid = row[header_map.get("miRNAname", "")] if "miRNAname" in header_map else ""
+        raw_tx = row[header_map["transcript"]]
+        tx_key = raw_tx if raw_tx in tx_models else base_to_full.get(raw_tx.split(".")[0])
+        final_rows.append(row)
+    
+    sys.stderr.write(f"[info] final rows after all filters: {len(final_rows)}\n")
+    sys.stderr.write(f"[info] unique transcripts needed: {len(needed)}\n")
 
     # 3) Prepare sequence access
     tx_lengths = {}
@@ -262,21 +320,15 @@ def main():
                         tx_lengths[tid] = len(tx_seqs[k])
                         break
 
-    # 4) Process degradome and write output
-    left = args.window // 2       # upstream count
-    right = args.window - left - 1  # downstream count so total = left + 1 + right
-
+    # 4) Process filtered degradome rows and write output
     n_in = 0
     n_ok = 0
     n_skip = 0
-    with smart_open(args.degradome_tsv, "rt") as fin, open(args.out_tsv, "wt", newline="") as fout:
-        reader = csv.reader(fin, delimiter="\t")
-        header = next(reader)
-        header_map = {h: i for i, h in enumerate(header)}
+    with open(args.out_tsv, "wt", newline="") as fout:
         w = csv.writer(fout, delimiter="\t")
         w.writerow(["miRNA", "Transcript_ID", "cleave_site", "mRNA sequence", "miRNA sequence"])
 
-        for row in reader:
+        for row in final_rows:
             n_in += 1
             # parse required fields
             transcript = row[header_map["transcript"]]
@@ -329,19 +381,24 @@ def main():
                 w.writerow([miRNAid, tx_key, cleave_site, tx_seqs[tx_key], miRNAseq])
                 n_ok += 1
             else:  
-                # window bounds and padding with left and right jitter
-                # choose a random offset so cleavage isn't always centered
-                jitter = 150                      # e.g., allow ±150 nt shift
-                off = np.random.randint(-jitter, jitter+1)
-
-                # propose a start around (tx_idx - left + off), then clamp to transcript bounds
-                proposed = tx_idx - left + off
-                win_start = max(0, min(tlen - args.window, proposed))
-                win_end   = min(win_start + args.window, tlen)
-
-                # label inside the window
-                cleave_site = tx_idx - win_start
-
+                # Place window around cleave site with random positioning
+                # Cleave site can be at any position from 0 to (window-1) within the window
+                cleave_site_in_window = np.random.randint(0, args.window)
+                
+                # Calculate window bounds
+                win_start = tx_idx - cleave_site_in_window
+                win_end = win_start + args.window
+                
+                # Clamp to transcript bounds
+                if win_start < 0:
+                    win_start = 0
+                    win_end = min(args.window, tlen)
+                    cleave_site_in_window = tx_idx  # recalculate position in clamped window
+                elif win_end > tlen:
+                    win_end = tlen
+                    win_start = max(0, tlen - args.window)
+                    cleave_site_in_window = tx_idx - win_start  # recalculate position in clamped window
+                
                 # fetch sequence slice
                 if args.samtools is not None:
                     # which name to use in FAI? prefer exact; else try versionless
@@ -363,7 +420,7 @@ def main():
                     slice_seq = s[win_start:win_end]
 
                 # write row
-                w.writerow([miRNAid, tx_key, cleave_site, slice_seq, miRNAseq])
+                w.writerow([miRNAid, tx_key, cleave_site_in_window, slice_seq, miRNAseq])
                 n_ok += 1
 
             if args.report_every and (n_in % args.report_every == 0):

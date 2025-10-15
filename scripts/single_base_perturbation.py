@@ -100,9 +100,10 @@ def load_model(ckpt_name,
                             # "TokenClassification",
                             "Longformer",
                             str(args_dict["mrna_max_len"]),
-                            f"embed={args_dict['embed_dim']}d",
-                            "norm_by_key",
-                            "LSE",
+                            # f"embed={args_dict['embed_dim']}d",
+                            # "norm_by_key",
+                            # "LSE",
+                            "continue_training",
                             ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data, strict=False)
@@ -281,7 +282,7 @@ def main():
     predict_span    = True
     predict_binding = True
     if torch.cuda.is_available():
-        device = "cuda:3"
+        device = "cuda:7"
     elif torch.backends.mps.is_available():
         device = "mps"
     else:
@@ -297,7 +298,7 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer":True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.8974_0.9812_epoch9.pth",
+    model = load_model(ckpt_name="best_composite_0.8351_0.9227_epoch3.pth",
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
@@ -407,7 +408,7 @@ def main():
     
     # print("Max in delta = ", max(deltas))
     print("plot changes on base logos ...", flush=True)
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_norm_by_key_LSE(2).png")
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_continued_training_0.8351_0.9227_epoch3.png")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
                  weights_changes=weights_deltas,

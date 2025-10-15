@@ -793,7 +793,7 @@ class CrossAttentionPredictor(nn.Module):
         z_norm = self.cross_norm(z_res)
         z_norm = z_norm.masked_fill(mrna_mask.unsqueeze(-1)==0, 0) # (batch_size, mrna_len, embed_dim)
         
-        # MIL binding head on mRNA positions (including global token at position 0)
+        # mean-pooled binding head on mRNA positions (including global token at position 0)
         if self.predict_binding:
             valid_counts = mrna_mask.sum(dim=1, keepdim=True) # (batch_size)
             # avg pooling over seq_len
@@ -1543,14 +1543,14 @@ class QuestionAnsweringModel(nn.Module):
             else:
                 # weights and bias initialization
                 run = wandb.init(
-                    project="mirna-Question-Answering",
+                    project="mirna-cleavage-prediction",
                     name=f"CNN_len:{self.mrna_max_len}-epoch:{self.epochs}-MLP_hidden:{self.ff_dim}", 
                     config={
                         "batch_size": self.batch_size * accumulation_step,
                         "epochs": self.epochs,
                         "learning rate": self.lr,
                     },
-                    tags=["binding-span", "longformer", "mean_unchunk", "8-heads-4-layer","norm_by_key","continued_training"],
+                    tags=["cleavage-prediction", "continue-training", "50k-checkpoint"],
                     save_code=True,
                     job_type="train",
                 )
@@ -1589,18 +1589,18 @@ class QuestionAnsweringModel(nn.Module):
                 loss_fn   = nn.CrossEntropyLoss()
                 model.to(self.device)
                 
-                if not self.predict_span:
-                    # freeze update of params in the span prediction head
-                    for p in model.predictor.qa_outputs.parameters():
-                        p.requires_grad = False
-                elif not self.predict_binding:
-                    # freeze update of params in the binding prediction head
-                    for p in model.predictor.binding_head.parameters():
-                        p.requires_grad = False
-                elif not self.predict_cleavage:
-                    # freeze update of params in the cleavage prediction head
-                    for p in model.predictor.cleavage_head.parameters():
-                        p.requires_grad = False
+                # if not self.predict_span:
+                #     # freeze update of params in the span prediction head
+                #     for p in model.predictor.qa_outputs.parameters():
+                #         p.requires_grad = False
+                # elif not self.predict_binding:
+                #     # freeze update of params in the binding prediction head
+                #     for p in model.predictor.binding_head.parameters():
+                #         p.requires_grad = False
+                # elif not self.predict_cleavage:
+                #     # freeze update of params in the cleavage prediction head
+                #     for p in model.predictor.cleavage_head.parameters():
+                #         p.requires_grad = False
 
                 optimizer = AdamW(model.parameters(), lr=self.lr)
                 
@@ -1627,16 +1627,18 @@ class QuestionAnsweringModel(nn.Module):
                     "TwoTowerTransformer", 
                     "Longformer",
                     str(self.mrna_max_len),
+                    "predict_cleavage",
                     "continue_training",
                 )
                 os.makedirs(model_checkpoints_dir, exist_ok=True)
 
                 if ckpt_path != "":
-                    resumed_data = load_training_state(
-                        ckpt_path=ckpt_path, 
-                        model=model, optimizer=None, scheduler=None, # do not load optimizer and scheduler
-                        map_location=model.device)
-                    print(f"Loaded checkpoint from {ckpt_path}")
+                    # resumed_data = load_training_state(
+                    #     ckpt_path=ckpt_path, 
+                    #     model=model, optimizer=None, scheduler=None, # do not load optimizer and scheduler
+                    #     map_location=model.device)
+                    model.load_state_dict(torch.load(ckpt_path, map_location=model.device), strict=False)
+                    print(f"Loaded checkpoint from {ckpt_path}", flush=True)
 
                 for epoch in range(self.epochs):
                     # TRAINING
@@ -1697,13 +1699,13 @@ class QuestionAnsweringModel(nn.Module):
 
                         # save checkpoint
                         ckpt_name = (
-                            f"best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                            f"50k_0.6753_0.7152_epoch3_continue_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
                             if (self.predict_binding and self.predict_span)
-                            else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                            else f"50k_0.6753_0.7152_epoch3_continue_best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
                             if self.predict_binding
-                            else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
+                            else f"50k_0.6753_0.7152_epoch3_continue_best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
                             if self.predict_span
-                            else f"best_cleavage_acc_{best_cleavage_acc:.4f}_epoch{epoch}.pth"
+                            else f"50k_0.6753_0.7152_epoch3_continue_best_cleavage_acc_{best_cleavage_acc:.4f}_epoch{epoch}.pth"
                         )
                         ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
 
@@ -1716,22 +1718,22 @@ class QuestionAnsweringModel(nn.Module):
                         # create and log artifact with alias
                         model_art = wandb.Artifact(
                             name=(
-                                "binding-span-model" if (self.predict_binding and self.predict_span)
-                                else "mirna-binding-model" if self.predict_binding
-                                else "mirna-span-model"
+                                "50k_0.6753_0.7152_epoch3_continue_binding-span-model" if (self.predict_binding and self.predict_span)
+                                else "50k_0.6753_0.7152_epoch3_continue_mirna-binding-model" if self.predict_binding
+                                else "50k_0.6753_0.7152_epoch3_continue_mirna-span-model"
                             ),
                             type="model",
                             metadata={
                                 "epoch": epoch,
-                                **({"f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
-                                **({"binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
-                                **({"exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                                **({"50k_0.6753_0.7152_epoch3_continue_f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                                **({"50k_0.6753_0.7152_epoch3_continue_binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                                **({"50k_0.6753_0.7152_epoch3_continue_exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
                             }
                         )
                         model_art.add_file(ckpt_path)
 
                         try:
-                            run.log_artifact(model_art, aliases=["continued_training_run"])
+                            run.log_artifact(model_art, aliases=["50k_0.6753_0.7152_epoch3_continue_continued_training_run"])
                         except Exception as e:
                             print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
 
@@ -1752,14 +1754,14 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, data_dir, "TargetScan_train_500_randomized_start.csv")
-    valid_datapath = os.path.join(PROJ_HOME, data_dir, "TargetScan_validation_500_randomized_start.csv")
-    test_datapath  = os.path.join(PROJ_HOME, data_dir, "TargetScan_test_500_randomized_start.csv")
-    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/Pretrain_DDP/overall_accuracy_0.5110_epoch2.pth")
+    train_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_train.tsv")
+    valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_validation.tsv")
+    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_test.tsv")
+    ckpt_path = os.path.join(PROJ_HOME, "50k_checkpoints/50k_best_composite_0.6753_0.7152_epoch3.pth")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device="cuda:0",
-                                   epochs=100,
+                                   device="cuda:2",
+                                   epochs=50,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
@@ -1767,9 +1769,9 @@ if __name__ == "__main__":
                                    batch_size=32,
                                    lr=3e-5,
                                    seed=10020,
-                                   predict_span=True,
-                                   predict_binding=True,
-                                   predict_cleavage=False,
+                                   predict_span=False,
+                                   predict_binding=False,
+                                   predict_cleavage=True,
                                    use_longformer=True)
     # total_params = sum(param.numel() for param in model.parameters())
     # print(f"Total Parameters: {total_params}")

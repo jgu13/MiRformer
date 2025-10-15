@@ -128,7 +128,7 @@ def run(ckpt_path,
     # # Freeze everything first
     # set_requires_grad(model, False)
 
-    # # Train heads + last block + norms (keep cross-attn frozen initially)
+    # # Train heads + last block + norms
     # train_modules = [
     #     model.predictor.binding_head,    # MIL binding
     #     model.predictor.qa_outputs,      # span start/end
