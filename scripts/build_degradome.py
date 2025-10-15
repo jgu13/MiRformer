@@ -336,6 +336,7 @@ def main():
             miRNAid = row[header_map.get("miRNAname","miRNAname")] if "miRNAname" in header_map else ""
             miRNAseq = row[header_map.get("miRNAseq","miRNAseq")] if "miRNAseq" in header_map else ""
             tx_key = base_to_full.get(transcript.split(".")[0])
+            miRNAseq = miRNAseq.replace("-", "")
 
             try:
                 chrom, pos_str, strand = cleaveLocus.split(":")
@@ -377,7 +378,7 @@ def main():
                 n_skip += 1
                 continue
             if tlen < args.window:
-                cleave_site = tx_idx
+                cleave_site = tx_idx -1 # cleave site is 0-based index
                 w.writerow([miRNAid, tx_key, cleave_site, tx_seqs[tx_key], miRNAseq])
                 n_ok += 1
             else:  
@@ -386,18 +387,18 @@ def main():
                 cleave_site_in_window = np.random.randint(0, args.window)
                 
                 # Calculate window bounds
-                win_start = tx_idx - cleave_site_in_window
+                win_start = tx_idx - cleave_site_in_window -1 # cleave site is 0-based index
                 win_end = win_start + args.window
                 
                 # Clamp to transcript bounds
                 if win_start < 0:
                     win_start = 0
                     win_end = min(args.window, tlen)
-                    cleave_site_in_window = tx_idx  # recalculate position in clamped window
+                    cleave_site_in_window = tx_idx -1  # recalculate position in clamped window
                 elif win_end > tlen:
                     win_end = tlen
                     win_start = max(0, tlen - args.window)
-                    cleave_site_in_window = tx_idx - win_start  # recalculate position in clamped window
+                    cleave_site_in_window = tx_idx - win_start -1  # recalculate position in clamped window
                 
                 # fetch sequence slice
                 if args.samtools is not None:
