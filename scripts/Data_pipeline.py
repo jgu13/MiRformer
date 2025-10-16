@@ -384,9 +384,11 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
             
         # Get cleavage site position
         if self.cleavage_site_col is not None and self.cleavage_site_col in self.data.columns:
-            cleavage_site = torch.tensor(self.data[self.cleavage_site_col].iat[idx], dtype=torch.long)
+            cleavage_sites = torch.tensor(self.data[self.cleavage_site_col].iat[idx], dtype=torch.long)
+            cleavage_soft_targets = self.gaussian_targets(L=self.mrna_max_len, pos=cleavage_sites) # (mrna_max_len, )
         else:
-            cleavage_site = -1 
+            cleavage_soft_targets = float(-1)
+            cleavage_sites = -1 # no cleavage site
         
         # Tokenize mirna
         mirna_seq = mirna_seq.replace("U", "T")
@@ -428,8 +430,22 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
             "start_positions": seed_start,  # used as labels
             "end_positions": seed_end,
             "target": target,
-            "cleavage_sites": cleavage_site
+            "cleavage_sites": cleavage_sites,
+            "cleavage_soft_targets": cleavage_soft_targets
         }
+    
+    def gaussian_targets(self, L: int, pos: int, sigma: float = 3.0):
+        """
+        L: Window length
+        pos: True cleavage site index (0..L-1)
+        sigma: Gaussian width, 30nt suggested 2~3
+        Returns: shape [L] float tensor, peak=1
+        """
+        idx = torch.arange(L, dtype=torch.float32)
+        y = torch.exp(-0.5 * ((idx - float(pos)) / float(sigma)) ** 2)
+        # peak normalization, make max value=1 
+        y = y / y.max()
+        return y
       
 class TokenClassificationDataset(torch.utils.data.Dataset):
     def __init__(self, 
