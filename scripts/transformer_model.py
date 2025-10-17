@@ -105,7 +105,6 @@ class LongformerAttention(nn.Module):
         self.embed_dim = embed_dim
         self.num_heads = num_heads
         self.head_dim = embed_dim // num_heads
-        print(f"head_dim: {self.head_dim}, num_heads: {num_heads}, embed_dim: {embed_dim}")
         assert (
             self.head_dim * num_heads == embed_dim
         ), "Embedding dimension must be divisible by number of heads"
@@ -1594,7 +1593,7 @@ class QuestionAnsweringModel(nn.Module):
                         "epochs": self.epochs,
                         "learning rate": self.lr,
                     },
-                    tags=["cleavage-prediction", "continue-training", "best_checkpoint_0.9911_0.9977_epoch11"],
+                    tags=["cleavage-prediction", "continue-training", "best_composite_0.9042_0.9871_epoch12"],
                     save_code=True,
                     job_type="train",
                 )
@@ -1673,6 +1672,7 @@ class QuestionAnsweringModel(nn.Module):
                     str(self.mrna_max_len),
                     "predict_cleavage",
                     "continue_training",
+                    "UTR_windows_500",
                 )
                 os.makedirs(model_checkpoints_dir, exist_ok=True)
 
@@ -1770,13 +1770,13 @@ class QuestionAnsweringModel(nn.Module):
 
                             # save checkpoint
                             ckpt_name = (
-                                f"best_composite_0.9911_0.9977_epoch11_continue_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                                f"best_composite_0.9042_0.9871_epoch12_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
                                 if (self.predict_binding and self.predict_span)
-                                else f"best_composite_0.9911_0.9977_epoch11_continue_best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                                else f"best_composite_0.9042_0.9871_epoch12_best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
                                 if self.predict_binding
-                                else f"best_composite_0.9911_0.9977_epoch11_continue_best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
+                                else f"best_composite_0.9042_0.9871_epoch12_best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
                                 if self.predict_span
-                                else f"best_composite_0.9911_0.9977_epoch11_continue_best_acc_and_hit_{best_acc_and_hit:.4f}_epoch{epoch}.pth"
+                                else f"continue_training_best_composite_0.9042_0.9871_epoch12_best_acc_and_hit_{best_acc_and_hit:.4f}_epoch{epoch}.pth"
                             )
                             ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
 
@@ -1789,22 +1789,22 @@ class QuestionAnsweringModel(nn.Module):
                             # create and log artifact with alias
                             model_art = wandb.Artifact(
                                 name=(
-                                    "best_composite_0.9911_0.9977_epoch11_continue_binding-span-model" if (self.predict_binding and self.predict_span)
-                                    else "best_composite_0.9911_0.9977_epoch11_continue_mirna-binding-model" if self.predict_binding
-                                    else "best_composite_0.9911_0.9977_epoch11_continue_mirna-span-model"
+                                    "best_composite_0.9042_0.9871_epoch12_binding-span-model" if (self.predict_binding and self.predict_span)
+                                    else "best_composite_0.9042_0.9871_epoch12_mirna-binding-model" if self.predict_binding
+                                    else "best_composite_0.9042_0.9871_epoch12_mirna-span-model"
                                 ),
                                 type="model",
                                 metadata={
                                     "epoch": epoch,
-                                    **({"best_composite_0.9911_0.9977_epoch11_continue_f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
-                                    **({"best_composite_0.9911_0.9977_epoch11_continue_binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
-                                    **({"best_composite_0.9911_0.9977_epoch11_continue_exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                                    **({"best_composite_0.9042_0.9871_epoch12_f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                                    **({"best_composite_0.9042_0.9871_epoch12_binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                                    **({"best_composite_0.9042_0.9871_epoch12_exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
                                 }
                             )
                             model_art.add_file(ckpt_path)
 
                             try:
-                                run.log_artifact(model_art, aliases=["predict_cleavage_run_30nt_continued_training_best_composite_0.9911_0.9977_epoch11"])
+                                run.log_artifact(model_art, aliases=["predict_cleavage_best_composite_0.9042_0.9871_epoch12_500nt"])
                             except Exception as e:
                                 print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
 
@@ -1823,15 +1823,15 @@ class QuestionAnsweringModel(nn.Module):
 
 if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
-    mrna_max_len = 100
+    mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_100_train.csv")
-    valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_100_validation.csv")
-    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_100_test.csv")
-    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/CNN-tokenized/30/best_composite_0.9911_0.9977_epoch11.pth")
+    train_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_train.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_validation.csv")
+    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_test.csv")
+    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/embed=1024d/norm_by_key/LSE/best_composite_0.9042_0.9871_epoch12.pth")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device="cuda:0",
+                                   device="cuda:5",
                                    epochs=100,
                                    embed_dim=1024,
                                    num_heads=8,
