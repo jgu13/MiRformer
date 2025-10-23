@@ -4,7 +4,7 @@ checkpoints/
 best_checkpoints/
 
 # data
-data/
+miRaw_data/
 TargetScan_dataset/
 Degradome_dataset/
 TarBase_dataset/
