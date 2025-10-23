@@ -598,6 +598,13 @@ class BindingHead(nn.Module):
         w = w / (w.sum(dim=-1, keepdim=True) + 1e-9)
         return binding_logit, w
 
+class CleavageHead(nn.Module):
+    def __init__(self, input_size, hidden_sizes, output_size, dropout):
+        super(CleavageHead, self).__init__()
+        self.transform = LinearHead(input_size=input_size, hidden_sizes=hidden_sizes, output_size=output_size, dropout=dropout)
+    def forward(self, x):
+        return self.transform(x).squeeze(-1) # (batchsize, mrna_len)
+
 class LinearHead(nn.Module):
     def __init__(self,
                  input_size, 
@@ -713,7 +720,11 @@ class CrossAttentionPredictor(nn.Module):
         self.dropout = nn.Dropout(dropout_rate)
         self.cross_norm = nn.LayerNorm(embed_dim) # normalize over embedding dimension
         self.qa_outputs = nn.Linear(embed_dim, 2) # Linear head instead of one Linear transformation
-        self.cleavage_head = nn.Linear(embed_dim, 1) # Linear head instead of one Linear transformation
+        self.cleavage_head = CleavageHead(
+            input_size=embed_dim, 
+            hidden_sizes=hidden_sizes, 
+            output_size=1,
+            dropout=dropout_rate) # Linear head instead of one Linear transformation
         
         # Add MIL binding head
         self.binding_output = LinearHead(
@@ -793,7 +804,7 @@ class CrossAttentionPredictor(nn.Module):
         z_norm = self.cross_norm(z_res)
         z_norm = z_norm.masked_fill(mrna_mask.unsqueeze(-1)==0, 0) # (batch_size, mrna_len, embed_dim)
         
-        # mean-pooled binding head on mRNA positions (including global token at position 0)
+        # mean-pooled binding head on mRNA positions
         if self.predict_binding:
             valid_counts = mrna_mask.sum(dim=1, keepdim=True) # (batch_size)
             # avg pooling over seq_len
@@ -1077,7 +1088,8 @@ class QuestionAnsweringModel(nn.Module):
                   device,
                   alpha1=1,
                   alpha2=0.75,
-                  evaluation=False):
+                  evaluation=False,
+                  W_list=[3,5]):
         model.eval()
         total_loss = 0.0 
         all_start_preds, all_end_preds        = [], []
@@ -1214,17 +1226,18 @@ class QuestionAnsweringModel(nn.Module):
             all_cleavage_preds  = torch.tensor(all_cleavage_preds, dtype=torch.long)
             all_cleavage_labels = torch.tensor(all_cleavage_labels, dtype=torch.long)
             acc_cleavage        = (all_cleavage_preds == all_cleavage_labels).float().mean().item()
+            if W_list is not None:
+                hit_at_w_list = {}
+                for w in W_list:
+                    hit_at_w = ((all_cleavage_preds - all_cleavage_labels).abs() <= w).float().mean().item()
+                    hit_at_w_list[f"Hit at {w}"] = hit_at_w
+            else:
+                hit_at_w_list   = None
         else:
             acc_cleavage        = 0.0
+            hit_at_w_list       = None
 
         avg_loss = total_loss / len(dataloader)
-        
-        print(f"Start Acc:   {acc_start*100}%\n"
-              f"End Acc:     {acc_end*100}%\n"
-              f"Span Exact Match: {exact_match*100}%\n"
-              f"F1 Score:    {f1}\n"
-              f"Binding Acc: {acc_binding*100}\n"
-              f"Cleavage Acc: {acc_cleavage*100}")
         
         if evaluation:
             if self.predict_binding:
@@ -1235,8 +1248,18 @@ class QuestionAnsweringModel(nn.Module):
                 self.all_end_preds = all_end_preds.numpy()
             if len(all_cleavage_preds) > 0:
                 self.all_cleavage_preds = all_cleavage_preds.numpy()
+        
+        print(f"Start Acc:   {acc_start*100}%\n"
+              f"End Acc:     {acc_end*100}%\n"
+              f"Span Exact Match: {exact_match*100}%\n"
+              f"F1 Score:    {f1}\n"
+              f"Binding Acc: {acc_binding*100}\n"
+              f"Cleavage Acc: {acc_cleavage*100}")
+        if hit_at_w_list is not None:
+            for w, hit_at_w in hit_at_w_list.items():
+                print(f"{w}: {hit_at_w*100}%")
 
-        return avg_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage     
+        return avg_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage, hit_at_w_list     
 
     @staticmethod 
     def seed_everything(seed):
@@ -1550,7 +1573,7 @@ class QuestionAnsweringModel(nn.Module):
                         "epochs": self.epochs,
                         "learning rate": self.lr,
                     },
-                    tags=["cleavage-prediction", "continue-training", "50k-checkpoint"],
+                    tags=["cleavage-prediction", "continue-training", "best_composite_0.9042_0.9871_epoch12"],
                     save_code=True,
                     job_type="train",
                 )
@@ -1620,17 +1643,20 @@ class QuestionAnsweringModel(nn.Module):
                 best_f1_score    = 0
                 best_composite_metric = 0
                 best_cleavage_acc = 0
-                model_checkpoints_dir = os.path.join(
-                    PROJ_HOME, 
-                    "checkpoints", 
-                    "TargetScan", 
-                    "TwoTowerTransformer", 
-                    "Longformer",
-                    str(self.mrna_max_len),
-                    "predict_cleavage",
-                    "continue_training",
-                )
-                os.makedirs(model_checkpoints_dir, exist_ok=True)
+                best_acc_and_hit = 0
+                # model_checkpoints_dir = os.path.join(
+                #     PROJ_HOME, 
+                #     "checkpoints", 
+                #     "TargetScan", 
+                #     "TwoTowerTransformer", 
+                #     "Longformer",
+                #     str(self.mrna_max_len),
+                #     "predict_cleavage",
+                #     "continue_training",
+                #     "UTR_windows_500",
+                #     "not_gaussian_smoothed"
+                # )
+                # os.makedirs(model_checkpoints_dir, exist_ok=True)
 
                 if ckpt_path != "":
                     # resumed_data = load_training_state(
@@ -1655,27 +1681,26 @@ class QuestionAnsweringModel(nn.Module):
                     )
 
                     # EVALUATION
-                    eval_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage = self.eval_loop(
+                    eval_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage, hit_at_w_list = self.eval_loop(
                         model=model,
                         dataloader=val_loader,
                         device=self.device,
+                        W_list=[3,5],
                     )
 
-                    # SAFE METRIC LOGGING
-                    try:
-                        wandb.log({
-                            "epoch": epoch,
-                            "train/loss": train_loss,
-                            "eval/loss": eval_loss,
-                            "eval/binding accuracy": acc_binding,
-                            "eval/start accuracy": acc_start,
-                            "eval/end accuracy": acc_end,
-                            "eval/exact match": exact_match,
-                            "eval/F1 score": f1,
-                            "eval/cleavage accuracy": acc_cleavage,
-                        }, step=epoch)
-                    except Exception as e:
-                        print(f"[W&B] log failed at epoch {epoch}: {e}")
+                    # log the evaluation results
+                    log_dict = {
+                        "eval/loss": eval_loss,
+                        "eval/binding accuracy": acc_binding,
+                        "eval/start accuracy": acc_start,
+                        "eval/end accuracy": acc_end,
+                        "eval/exact match": exact_match,
+                        "eval/F1 score": f1,
+                        "eval/cleavage accuracy": acc_cleavage,
+                    }
+                    if hit_at_w_list is not None:
+                        log_dict.update({f"eval/{w}": hit_at_w for w, hit_at_w in hit_at_w_list.items()})
+                    wandb.log(log_dict, step=epoch)
 
                     # CHECK FOR IMPROVEMENT
                     if self.predict_binding and self.predict_span:
@@ -1686,7 +1711,8 @@ class QuestionAnsweringModel(nn.Module):
                     elif self.predict_span:
                         improved = exact_match >= best_exact_match
                     elif self.predict_cleavage:
-                        improved = acc_cleavage >= best_cleavage_acc
+                        acc_and_hit = acc_cleavage + sum([hit_at_w for w, hit_at_w in hit_at_w_list.items()])
+                        improved = acc_and_hit > best_acc_and_hit
 
                     if improved:
                         # update bests & reset patience
@@ -1698,44 +1724,46 @@ class QuestionAnsweringModel(nn.Module):
                         count = 0
 
                         # save checkpoint
-                        ckpt_name = (
-                            f"50k_0.6753_0.7152_epoch3_continue_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
-                            if (self.predict_binding and self.predict_span)
-                            else f"50k_0.6753_0.7152_epoch3_continue_best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
-                            if self.predict_binding
-                            else f"50k_0.6753_0.7152_epoch3_continue_best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
-                            if self.predict_span
-                            else f"50k_0.6753_0.7152_epoch3_continue_best_cleavage_acc_{best_cleavage_acc:.4f}_epoch{epoch}.pth"
-                        )
-                        ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+                        # ckpt_name = (
+                        #     f"best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                        #     if (self.predict_binding and self.predict_span)
+                        #     else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                        #     if self.predict_binding
+                        #     else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
+                        #     if self.predict_span
+                        #     else f"random_init_best_acc_and_hit_{best_acc_and_hit:.4f}_epoch{epoch}.pth"
+                        # )
+                        # ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
 
-                        try:
-                            torch.save(model.state_dict(), ckpt_path)
-                            print(f"[CKPT] saved to {ckpt_path}", flush=True)
-                        except Exception as e:
-                            print(f"[CKPT][ERROR] failed to save {ckpt_path}: {e}", file=sys.stderr, flush=True)
+                        # try:
+                        #     torch.save(model.state_dict(), ckpt_path)
+                        #     print(f"[CKPT] saved to {ckpt_path}", flush=True)
+                        # except Exception as e:
+                        #     print(f"[CKPT][ERROR] failed to save {ckpt_path}: {e}", file=sys.stderr, flush=True)
                     
                         # create and log artifact with alias
-                        model_art = wandb.Artifact(
-                            name=(
-                                "50k_0.6753_0.7152_epoch3_continue_binding-span-model" if (self.predict_binding and self.predict_span)
-                                else "50k_0.6753_0.7152_epoch3_continue_mirna-binding-model" if self.predict_binding
-                                else "50k_0.6753_0.7152_epoch3_continue_mirna-span-model"
-                            ),
-                            type="model",
-                            metadata={
-                                "epoch": epoch,
-                                **({"50k_0.6753_0.7152_epoch3_continue_f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
-                                **({"50k_0.6753_0.7152_epoch3_continue_binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
-                                **({"50k_0.6753_0.7152_epoch3_continue_exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
-                            }
-                        )
-                        model_art.add_file(ckpt_path)
+                        # model_art = wandb.Artifact(
+                        #     name=(
+                        #         "random_init_binding-span-model" if (self.predict_binding and self.predict_span)
+                        #         else "random_init_mirna-binding-model" if self.predict_binding
+                        #         else "random_init_mirna-span-model" if self.predict_span
+                        #         else "random_init_mirna-cleavage-model"
+                        #     ),
+                        #     type="model",
+                        #     metadata={
+                        #         "epoch": epoch,
+                        #         **({"random_init_f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                        #         **({"random_init_binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                        #         **({"random_init_exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                        #         **({"random_init_acc_and_hit": acc_and_hit} if self.predict_cleavage else {}),
+                        #     }
+                        # )
+                        # model_art.add_file(ckpt_path)
 
-                        try:
-                            run.log_artifact(model_art, aliases=["50k_0.6753_0.7152_epoch3_continue_continued_training_run"])
-                        except Exception as e:
-                            print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+                        # try:
+                        #     run.log_artifact(model_art, aliases=["random_init_continued_training_run"])
+                        # except Exception as e:
+                        #     print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
 
                     else:
                         count += 1
@@ -1754,13 +1782,13 @@ if __name__ == "__main__":
     torch.cuda.empty_cache() # clear crashed cache
     mrna_max_len = 520
     mirna_max_len = 24
-    train_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_train.tsv")
-    valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_validation.tsv")
-    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_windows_test.tsv")
-    ckpt_path = os.path.join(PROJ_HOME, "50k_checkpoints/50k_best_composite_0.6753_0.7152_epoch3.pth")
+    train_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_train.csv")
+    valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_validation.csv")
+    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_test.csv")
+    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/embed=1024d/norm_by_key/LSE/best_composite_0.9042_0.9871_epoch12.pth")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device="cuda:2",
+                                   device="cuda:4",
                                    epochs=50,
                                    embed_dim=1024,
                                    num_heads=8,
