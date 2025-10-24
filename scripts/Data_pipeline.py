@@ -344,8 +344,8 @@ class miRawDataset(torch.utils.data.Dataset):
 class QuestionAnswerDataset(torch.utils.data.Dataset):
     def __init__(self,
                  data,
-                 mrna_max_len,
-                 mirna_max_len,
+                #  mrna_max_len,
+                #  mirna_max_len,
                  tokenizer,
                  mRNA_col="mRNA sequence",
                  miRNA_col="miRNA sequence",
@@ -354,8 +354,8 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
                  cleavage_site_col="cleave_site",
                  ):
         self.data = data
-        self.mrna_max_len = mrna_max_len
-        self.mirna_max_len = mirna_max_len
+        # self.mrna_max_len = mrna_max_len
+        # self.mirna_max_len = mirna_max_len
         self.tokenizer = tokenizer
         self.mRNA_col = mRNA_col
         self.miRNA_col = miRNA_col
@@ -394,37 +394,36 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
         mirna_encoded = self.tokenizer(
             mirna_seq,
             add_special_tokens=False,
-            padding="max_length",
-            truncation=True,
-            max_length=self.mirna_max_len, 
-            return_attention_mask=True,
+            padding=False,
+            truncation=False,
+            # max_length=self.mirna_max_len,
+            return_attention_mask=False,
         )
 
         # Tokenize mrna
         mrna_encoded = self.tokenizer(
             mrna_seq,
             add_special_tokens=False,
-            padding="max_length",
-            truncation=True,
-            max_length=self.mrna_max_len,  
-            return_attention_mask=True,
+            padding=False,
+            truncation=False,
+            # max_length=self.mrna_max_len,  
+            return_attention_mask=False,
         )
         
         # Convert mRNA tokenization results to tensors
-        mrna_ids = mrna_encoded["input_ids"]
-        mrna_attn_mask = mrna_encoded["attention_mask"]
+        # mrna_attn_mask = mrna_encoded["attention_mask"]
 
         mirna_ids = torch.tensor(mirna_encoded["input_ids"], dtype=torch.long)
-        mirna_attn_mask = torch.tensor(mirna_encoded["attention_mask"], dtype=torch.long)
-        mrna_ids = torch.tensor(mrna_ids, dtype=torch.long)  # Use modified list with global token
-        mrna_attn_mask = torch.tensor(mrna_attn_mask, dtype=torch.long)  # Use modified list with global token
+        # mirna_attn_mask = torch.tensor(mirna_encoded["attention_mask"], dtype=torch.long)
+        mrna_ids = torch.tensor(mrna_encoded["input_ids"], dtype=torch.long)  # Use modified list with global token
+        # mrna_attn_mask = torch.tensor(mrna_attn_mask, dtype=torch.long)  # Use modified list with global token
         target = torch.tensor([label], dtype=torch.long)
 
         return {
             "mirna_input_ids": mirna_ids,
-            "mirna_attention_mask": mirna_attn_mask,
+            # "mirna_attention_mask": mirna_attn_mask,
             "mrna_input_ids": mrna_ids,
-            "mrna_attention_mask": mrna_attn_mask,
+            # "mrna_attention_mask": mrna_attn_mask,
             "start_positions": seed_start,  # used as labels
             "end_positions": seed_end,
             "target": target,

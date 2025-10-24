@@ -26,7 +26,6 @@ from diagonaled_mm_tvm import mask_invalid_locations
 from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
 from sliding_chunks import sliding_window_cross_attention, check_key_mask_rows
-from Attention_regularization import kl_diag_seed_loss
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 # PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
@@ -1690,6 +1689,7 @@ class QuestionAnsweringModel(nn.Module):
 
                     # log the evaluation results
                     log_dict = {
+                        "train/loss": train_loss,
                         "eval/loss": eval_loss,
                         "eval/binding accuracy": acc_binding,
                         "eval/start accuracy": acc_start,
