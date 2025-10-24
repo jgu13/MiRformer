@@ -1,3 +1,4 @@
+from multiprocessing import reduction
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -957,7 +958,26 @@ class QuestionAnsweringModel(nn.Module):
             "exact_match": exact_matches / n,
             "f1": f1_total / n,
         }
-    
+
+    def bce_with_soft_gaussian_loss(self, logits:torch.Tensor, soft_targets:torch.Tensor, pos_boost:float=1.5):
+        '''
+        logits: (batch_size, mrna_len)
+        soft_targets: (batch_size, mrna_len)
+        pos_boost: float, boost the loss at positive locations by this factor
+        '''
+        base = nn.BCEWithLogitsLoss(reduction='none')(logits, soft_targets) # (batch_size, mrna_len)
+        if pos_boost != 1.0:
+            # if pos_boost is greater than 1.0, boost the loss at positive locations
+            # weights are multiplied to the base loss and normalized by the sum of weights
+            # this way the loss is unaffected by the gaussian distributions between batches
+            weights = 1.0 + (pos_boost - 1.0) * soft_targets
+            weights_sum = weights.sum(dim=1, keepdim=True).clamp(min=1e-8)
+            loss = (weights * base).sum(dim=1, keepdim=True) / weights_sum # (batch_size, 1)
+            return loss.squeeze(-1).mean()  # (batch_size,) -> scalar
+        else:
+            loss = base.mean().squeeze(-1) # (batch_size, )
+            return loss.mean()
+        
     def train_loop(self, 
               model, 
               dataloader, 
@@ -1006,9 +1026,8 @@ class QuestionAnsweringModel(nn.Module):
             
             # Cleavage site prediction loss (if cleavage positions are provided)
             if self.predict_cleavage:
-                cleavage_targets = batch["cleavage_sites"]  # (batchsize,)
-                cleavage_loss_fn = nn.CrossEntropyLoss()
-                cleavage_loss = cleavage_loss_fn(cleavage_logits, cleavage_targets)
+                cleavage_targets = batch["cleavage_soft_targets"]  # (batchsize,mrna_len)
+                cleavage_loss = self.bce_with_soft_gaussian_loss(logits=cleavage_logits, soft_targets=cleavage_targets, pos_boost=1.5)
                 loss          += cleavage_loss
                 
             if self.predict_binding:
@@ -1139,15 +1158,16 @@ class QuestionAnsweringModel(nn.Module):
                 # Cleavage site prediction loss and metrics
                 cleavage_loss = torch.tensor(0.0, device=device)
                 if self.predict_cleavage: 
-                    cleavage_targets = batch["cleavage_sites"]  # (batchsize,)
-                    cleavage_loss_fn = nn.CrossEntropyLoss()
-                    cleavage_loss = cleavage_loss_fn(cleavage_logits, cleavage_targets)
+                    cleavage_sites = batch["cleavage_sites"] # (batchsize, )
+                    cleavage_targets = batch["cleavage_soft_targets"]  # (batchsize, mrna_len) - soft targets
+                    cleavage_loss = self.bce_with_soft_gaussian_loss(
+                        logits=cleavage_logits, soft_targets=cleavage_targets, pos_boost=1.5)
                     loss += cleavage_loss
                     
                     # Cleavage predictions
                     cleavage_preds = torch.argmax(cleavage_logits, dim=-1)
                     all_cleavage_preds.extend(cleavage_preds.cpu())
-                    all_cleavage_labels.extend(cleavage_targets.cpu())
+                    all_cleavage_labels.extend(cleavage_sites.cpu())
 
                 # span loss and predictions
                 if self.predict_span and start_logits is not None and end_logits is not None:
@@ -1252,8 +1272,8 @@ class QuestionAnsweringModel(nn.Module):
               f"End Acc:     {acc_end*100}%\n"
               f"Span Exact Match: {exact_match*100}%\n"
               f"F1 Score:    {f1}\n"
-              f"Binding Acc: {acc_binding*100}\n"
-              f"Cleavage Acc: {acc_cleavage*100}")
+              f"Binding Acc: {acc_binding*100}%\n"
+              f"Cleavage Exact Match: {acc_cleavage*100}%")
         if hit_at_w_list is not None:
             for w, hit_at_w in hit_at_w_list.items():
                 print(f"{w}: {hit_at_w*100}%")
@@ -1641,21 +1661,19 @@ class QuestionAnsweringModel(nn.Module):
                 best_exact_match = 0
                 best_f1_score    = 0
                 best_composite_metric = 0
-                best_cleavage_acc = 0
                 best_acc_and_hit = 0
-                # model_checkpoints_dir = os.path.join(
-                #     PROJ_HOME, 
-                #     "checkpoints", 
-                #     "TargetScan", 
-                #     "TwoTowerTransformer", 
-                #     "Longformer",
-                #     str(self.mrna_max_len),
-                #     "predict_cleavage",
-                #     "continue_training",
-                #     "UTR_windows_500",
-                #     "not_gaussian_smoothed"
-                # )
-                # os.makedirs(model_checkpoints_dir, exist_ok=True)
+                model_checkpoints_dir = os.path.join(
+                    PROJ_HOME, 
+                    "checkpoints", 
+                    "TargetScan", 
+                    "TwoTowerTransformer", 
+                    "Longformer",
+                    str(self.mrna_max_len),
+                    "predict_cleavage",
+                    "continue_training",
+                    "UTR_windows_500",
+                )
+                os.makedirs(model_checkpoints_dir, exist_ok=True)
 
                 if ckpt_path != "":
                     # resumed_data = load_training_state(
@@ -1666,115 +1684,139 @@ class QuestionAnsweringModel(nn.Module):
                     print(f"Loaded checkpoint from {ckpt_path}", flush=True)
 
                 for epoch in range(self.epochs):
-                    # TRAINING
-                    train_loss = self.train_loop(
-                        model=model,
-                        dataloader=train_loader,
-                        loss_fn=loss_fn,
-                        optimizer=optimizer,
-                        scheduler=scheduler,
-                        device=self.device,
-                        epoch=epoch,
-                        accumulation_step=accumulation_step,
-                        trainable_params=None,
-                    )
-
-                    # EVALUATION
-                    eval_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage, hit_at_w_list = self.eval_loop(
-                        model=model,
-                        dataloader=val_loader,
-                        device=self.device,
-                        W_list=[3,5],
-                    )
-
-                    # log the evaluation results
-                    log_dict = {
-                        "train/loss": train_loss,
-                        "eval/loss": eval_loss,
-                        "eval/binding accuracy": acc_binding,
-                        "eval/start accuracy": acc_start,
-                        "eval/end accuracy": acc_end,
-                        "eval/exact match": exact_match,
-                        "eval/F1 score": f1,
-                        "eval/cleavage accuracy": acc_cleavage,
-                    }
-                    if hit_at_w_list is not None:
-                        log_dict.update({f"eval/{w}": hit_at_w for w, hit_at_w in hit_at_w_list.items()})
-                    wandb.log(log_dict, step=epoch)
-
-                    # CHECK FOR IMPROVEMENT
-                    if self.predict_binding and self.predict_span:
-                        composite = f1 + acc_binding
-                        improved = composite > best_composite_metric
-                    elif self.predict_binding:
-                        improved = acc_binding >= best_binding_acc
-                    elif self.predict_span:
-                        improved = exact_match >= best_exact_match
-                    elif self.predict_cleavage:
-                        acc_and_hit = acc_cleavage + sum([hit_at_w for w, hit_at_w in hit_at_w_list.items()])
-                        improved = acc_and_hit > best_acc_and_hit
-
-                    if improved:
-                        # update bests & reset patience
-                        best_composite_metric = composite if self.predict_binding and self.predict_span else best_composite_metric
-                        best_binding_acc      = acc_binding   if self.predict_binding else best_binding_acc
-                        best_f1_score         = f1            if self.predict_span    else best_f1_score
-                        best_exact_match      = exact_match   if self.predict_span    else best_exact_match
-                        best_cleavage_acc     = acc_cleavage   if self.predict_cleavage else best_cleavage_acc
-                        count = 0
-
-                        # save checkpoint
-                        # ckpt_name = (
-                        #     f"best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
-                        #     if (self.predict_binding and self.predict_span)
-                        #     else f"best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
-                        #     if self.predict_binding
-                        #     else f"best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
-                        #     if self.predict_span
-                        #     else f"random_init_best_acc_and_hit_{best_acc_and_hit:.4f}_epoch{epoch}.pth"
-                        # )
-                        # ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
-
-                        # try:
-                        #     torch.save(model.state_dict(), ckpt_path)
-                        #     print(f"[CKPT] saved to {ckpt_path}", flush=True)
-                        # except Exception as e:
-                        #     print(f"[CKPT][ERROR] failed to save {ckpt_path}: {e}", file=sys.stderr, flush=True)
-                    
-                        # create and log artifact with alias
-                        # model_art = wandb.Artifact(
-                        #     name=(
-                        #         "random_init_binding-span-model" if (self.predict_binding and self.predict_span)
-                        #         else "random_init_mirna-binding-model" if self.predict_binding
-                        #         else "random_init_mirna-span-model" if self.predict_span
-                        #         else "random_init_mirna-cleavage-model"
-                        #     ),
-                        #     type="model",
-                        #     metadata={
-                        #         "epoch": epoch,
-                        #         **({"random_init_f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
-                        #         **({"random_init_binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
-                        #         **({"random_init_exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
-                        #         **({"random_init_acc_and_hit": acc_and_hit} if self.predict_cleavage else {}),
-                        #     }
-                        # )
-                        # model_art.add_file(ckpt_path)
-
-                        # try:
-                        #     run.log_artifact(model_art, aliases=["random_init_continued_training_run"])
-                        # except Exception as e:
-                        #     print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
-
+                    if epoch == 0:
+                        # evaluate once on the validation set before training
+                        eval_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage, hit_at_w_list = self.eval_loop(
+                            model=model,
+                            dataloader=val_loader,
+                            device=self.device,
+                            W_list=[3,5],
+                        )
+                        # log the evaluation results
+                        log_dict = {
+                            "eval/loss": eval_loss,
+                            "eval/binding accuracy": acc_binding,
+                            "eval/start accuracy": acc_start,
+                            "eval/end accuracy": acc_end,
+                            "eval/exact match": exact_match,
+                            "eval/F1 score": f1,
+                            "eval/cleavage accuracy": acc_cleavage,
+                        }
+                        if hit_at_w_list is not None:
+                            log_dict.update({f"eval/{w}": hit_at_w for w, hit_at_w in hit_at_w_list.items()})
+                        wandb.log(log_dict, step=epoch)
                     else:
-                        count += 1
-                        if count >= patience:
-                            print("Max patience reached with no improvement. Early stopping.")
-                            break
+                        # TRAINING
+                        train_loss = self.train_loop(
+                            model=model,
+                            dataloader=train_loader,
+                            loss_fn=loss_fn,
+                            optimizer=optimizer,
+                            scheduler=scheduler,
+                            device=self.device,
+                            epoch=epoch,
+                            accumulation_step=accumulation_step,
+                            trainable_params=None,
+                        )
 
-                    # ETA printout
-                    elapsed = time() - start
-                    remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
-                    print(f"Still remain: {remaining:.2f} hrs.")
+                        # EVALUATION
+                        eval_loss, acc_binding, acc_start, acc_end, exact_match, f1, acc_cleavage, hit_at_w_list = self.eval_loop(
+                            model=model,
+                            dataloader=val_loader,
+                            device=self.device,
+                            W_list=[3,5],
+                        )
+
+                        # SAFE METRIC LOGGING
+                        try:
+                            log_dict = {
+                                "epoch": epoch,
+                                "train/loss": train_loss,
+                                "eval/loss": eval_loss,
+                                "eval/binding accuracy": acc_binding,
+                                "eval/start accuracy": acc_start,
+                                "eval/end accuracy": acc_end,
+                                "eval/exact match": exact_match,
+                                "eval/F1 score": f1,
+                                "eval/cleavage accuracy": acc_cleavage,
+                            }
+                            if hit_at_w_list is not None:
+                                log_dict.update({f"eval/{w}": hit_at_w for w, hit_at_w in hit_at_w_list.items()})
+                            wandb.log(log_dict, step=epoch)
+                        except Exception as e:
+                            print(f"[W&B] log failed at epoch {epoch}: {e}")
+
+                        # CHECK FOR IMPROVEMENT
+                        if self.predict_binding and self.predict_span:
+                            composite = f1 + acc_binding
+                            improved = composite > best_composite_metric
+                        elif self.predict_binding:
+                            improved = acc_binding >= best_binding_acc
+                        elif self.predict_span:
+                            improved = exact_match >= best_exact_match
+                        elif self.predict_cleavage:
+                            acc_and_hit = acc_cleavage + sum([hit_at_w for w, hit_at_w in hit_at_w_list.items()])
+                            improved = acc_and_hit > best_acc_and_hit
+
+                        if improved:
+                            # update bests & reset patience
+                            best_composite_metric = composite if self.predict_binding and self.predict_span else best_composite_metric
+                            best_binding_acc      = acc_binding   if self.predict_binding else best_binding_acc
+                            best_f1_score         = f1            if self.predict_span    else best_f1_score
+                            best_exact_match      = exact_match   if self.predict_span    else best_exact_match
+                            best_acc_and_hit      = acc_cleavage + sum([hit_at_w for w, hit_at_w in hit_at_w_list.items()]) if self.predict_cleavage else best_acc_and_hit
+                            count = 0
+
+                            # save checkpoint
+                            ckpt_name = (
+                                f"best_composite_0.9042_0.9871_epoch12_best_composite_{best_f1_score:.4f}_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                                if (self.predict_binding and self.predict_span)
+                                else f"best_composite_0.9042_0.9871_epoch12_best_binding_acc_{best_binding_acc:.4f}_epoch{epoch}.pth"
+                                if self.predict_binding
+                                else f"best_composite_0.9042_0.9871_epoch12_best_exact_match_{best_exact_match:.4f}_epoch{epoch}.pth"
+                                if self.predict_span
+                                else f"continue_training_best_composite_0.9042_0.9871_epoch12_best_acc_and_hit_{best_acc_and_hit:.4f}_epoch{epoch}.pth"
+                            )
+                            ckpt_path = os.path.join(model_checkpoints_dir, ckpt_name)
+
+                            try:
+                                torch.save(model.state_dict(), ckpt_path)
+                                print(f"[CKPT] saved to {ckpt_path}", flush=True)
+                            except Exception as e:
+                                print(f"[CKPT][ERROR] failed to save {ckpt_path}: {e}", file=sys.stderr, flush=True)
+                        
+                            # create and log artifact with alias
+                            model_art = wandb.Artifact(
+                                name=(
+                                    "best_composite_0.9042_0.9871_epoch12_binding-span-model" if (self.predict_binding and self.predict_span)
+                                    else "best_composite_0.9042_0.9871_epoch12_mirna-binding-model" if self.predict_binding
+                                    else "best_composite_0.9042_0.9871_epoch12_mirna-span-model"
+                                ),
+                                type="model",
+                                metadata={
+                                    "epoch": epoch,
+                                    **({"best_composite_0.9042_0.9871_epoch12_f1+acc_binding": composite} if (self.predict_binding and self.predict_span) else {}),
+                                    **({"best_composite_0.9042_0.9871_epoch12_binding_acc": acc_binding} if self.predict_binding and not self.predict_span else {}),
+                                    **({"best_composite_0.9042_0.9871_epoch12_exact_match": exact_match} if self.predict_span and not self.predict_binding else {}),
+                                }
+                            )
+                            model_art.add_file(ckpt_path)
+
+                            try:
+                                run.log_artifact(model_art, aliases=["predict_cleavage_best_composite_0.9042_0.9871_epoch12_500nt"])
+                            except Exception as e:
+                                print(f"[W&B] artifact log failed at epoch {epoch}: {e}")
+
+                        else:
+                            count += 1
+                            if count >= patience:
+                                print("Max patience reached with no improvement. Early stopping.")
+                                break
+
+                        # ETA printout
+                        elapsed = time() - start
+                        remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
+                        print(f"Still remain: {remaining:.2f} hrs.")
         else:
             raise ValueError("training_mode must be one of 'QA' or 'BIO'")
 
@@ -1788,8 +1830,8 @@ if __name__ == "__main__":
     ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/embed=1024d/norm_by_key/LSE/best_composite_0.9042_0.9871_epoch12.pth")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device="cuda:4",
-                                   epochs=50,
+                                   device="cuda:5",
+                                   epochs=100,
                                    embed_dim=1024,
                                    num_heads=8,
                                    num_layers=4,
