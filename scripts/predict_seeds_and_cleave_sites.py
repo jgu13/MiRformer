@@ -16,7 +16,7 @@ data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 from torch.nn.utils.rnn import pad_sequence
 
-def make_qa_collate(tokenizer):
+def make_qa_collate(tokenizer, dataset):
     # pick a pad id. Since you added "N" to the alphabet, use it.
     # This is robust even for custom tokenizers:
     pad_id = tokenizer._convert_token_to_id("[PAD]")
@@ -54,6 +54,7 @@ def make_qa_collate(tokenizer):
         end_pos   = torch.stack([torch.as_tensor(b["end_positions"],   dtype=torch.long) for b in batch])
         targets   = torch.stack([torch.as_tensor(b["target"],          dtype=torch.long) for b in batch]).view(-1)
         cleaves   = torch.stack([torch.as_tensor(b["cleavage_sites"],  dtype=torch.long) for b in batch])
+        cleavage_soft_targets = torch.stack([dataset.gaussian_targets(L=mrna_padded.shape[1], pos=b["cleavage_sites"]) for b in batch]) # (batch_size, mrna_max_len)
 
         return {
             "mrna_input_ids": mrna_padded,
@@ -63,7 +64,8 @@ def make_qa_collate(tokenizer):
             "start_positions": start_pos,
             "end_positions": end_pos,
             "target": targets,            # shape [B]
-            "cleavage_sites": cleaves
+            "cleavage_sites": cleaves,
+            "cleavage_soft_targets": cleavage_soft_targets
         }
     return collate_fn
 
@@ -82,7 +84,7 @@ def prepare_dataset(model, data_path):
     ds_loader   = DataLoader(ds, 
                         batch_size=model.batch_size,
                         shuffle=False,
-                        collate_fn=make_qa_collate(tokenizer))  # <-- important)
+                        collate_fn=make_qa_collate(tokenizer, ds))  # <-- important)
     return ds_loader
 
 def load_model(model,ckpt_path):
@@ -138,18 +140,18 @@ def predict_loop(model, dataloader, device, W_list=[3,5]):
                     all_end_preds.extend(end_preds.cpu())
                 
                 # save per batch predictions
-                if model.predict_span:
-                    model.all_start_preds = np.array(all_start_preds)
-                    model.all_end_preds = np.array(all_end_preds)
-                if len(all_cleavage_preds) > 0:
-                    model.all_cleavage_preds = np.array(all_cleavage_preds)
-                # save as pandas dataframe where columns are "pred start", "pred end", "pred cleavage"    
-                df = pd.DataFrame({
-                    "pred start": model.all_start_preds,
-                    "pred end": model.all_end_preds,
-                    "pred cleavage": model.all_cleavage_preds
-                })
-                df.to_csv(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data", f"predicted_seeds_and_cleave_sites_predictions_batch_{batch_idx}.csv"), index=False)
+                # if model.predict_span:
+                #     model.all_start_preds = np.array(all_start_preds)
+                #     model.all_end_preds = np.array(all_end_preds)
+                # if len(all_cleavage_preds) > 0:
+                #     model.all_cleavage_preds = np.array(all_cleavage_preds)
+                # # save as pandas dataframe where columns are "pred start", "pred end", "pred cleavage"    
+                # df = pd.DataFrame({
+                #     "pred start": model.all_start_preds,
+                #     "pred end": model.all_end_preds,
+                #     "pred cleavage": model.all_cleavage_preds
+                # })
+                # df.to_csv(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data", f"predicted_seeds_and_cleave_sites_predictions_batch_{batch_idx}.csv"), index=False)
 
         # if there are positive examples
         if len(all_start_preds) > 0:
@@ -184,7 +186,7 @@ def predict_loop(model, dataloader, device, W_list=[3,5]):
             "pred end": model.all_end_preds,
             "pred cleavage": model.all_cleavage_preds
         })
-        df.to_csv(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data", "predicted_seeds_and_cleave_sites_predictions.csv"), index=False)
+        df.to_csv(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data", "predicted_seeds_and_cleave_sites_predictions_500_test.csv"), index=False)
         
         print(f"Cleavage Acc: {acc_cleavage*100}")
         if hit_at_w_list is not None:
@@ -201,7 +203,7 @@ def predict_seeds_and_cleave_sites(model, dataloader, save_path=None):
     
     if save_path is not None:
         os.makedirs(save_path, exist_ok=True)
-        with open(os.path.join(save_path, "predicted_seeds_and_cleave_sites_metrics.txt"), "w") as f:
+        with open(os.path.join(save_path, "predicted_seeds_and_cleave_sites_metrics_500_test.txt"), "w") as f:
             f.write(f"Cleavage accuracy: {acc_cleavage}\n")
             if hit_at_w_list is not None:
                 for w, hit_at_w in hit_at_w_list.items():
@@ -216,7 +218,7 @@ def save_results(model, prediction_path=None):
     if model.predict_cleavage:
         D_test_positive["pred cleavage"] = model.all_cleavage_preds
     
-    pred_df_path = os.path.join(os.path.join(prediction_path, "seed_span_predictions.csv"))
+    pred_df_path = os.path.join(os.path.join(prediction_path, "seed_span_predictions_500_test.csv"))
     os.makedirs(prediction_path, exist_ok=True)
     D_test_positive.to_csv(pred_df_path, index=False)
     print(f"Prediction saved to {prediction_path}")
@@ -224,9 +226,9 @@ def save_results(model, prediction_path=None):
 
 def main():
     torch.cuda.empty_cache() # clear crashed cache
-    mrna_max_len = 25000 # max length of UTR sequence
+    mrna_max_len = 520 # max length of UTR sequence
     mirna_max_len = 30
-    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR.tsv")
+    test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_test.csv")
     ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/predict_cleavage/continue_training/UTR_windows_500/gaussian_smoothed/continue_training_best_composite_0.9042_0.9871_epoch12_best_acc_and_hit_1.3789_epoch42.pth")
     metrics_path = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data")
     prediction_path = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data")
@@ -238,7 +240,7 @@ def main():
                                    num_heads=8,
                                    num_layers=4,
                                    ff_dim=4096,
-                                   batch_size=2,
+                                   batch_size=32,
                                    lr=3e-5,
                                    seed=10020,
                                    predict_span=True,

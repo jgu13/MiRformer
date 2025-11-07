@@ -385,7 +385,7 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
         # Get cleavage site position
         if self.cleavage_site_col is not None and self.cleavage_site_col in self.data.columns:
             cleavage_sites = torch.tensor(self.data[self.cleavage_site_col].iat[idx], dtype=torch.long)
-            cleavage_soft_targets = self.gaussian_targets(L=self.mrna_max_len, pos=cleavage_sites) # (mrna_max_len, )
+            # cleavage_soft_targets = self.gaussian_targets(L=self.mrna_max_len, pos=cleavage_sites) # (mrna_max_len, )
         else:
             cleavage_soft_targets = float(-1)
             cleavage_sites = -1 # no cleavage site
@@ -430,7 +430,7 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
             "end_positions": seed_end,
             "target": target,
             "cleavage_sites": cleavage_sites,
-            "cleavage_soft_targets": cleavage_soft_targets
+            # "cleavage_soft_targets": cleavage_soft_targets
         }
     
     def gaussian_targets(self, L: int, pos: int, sigma: float = 3.0):
