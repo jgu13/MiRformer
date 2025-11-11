@@ -344,8 +344,8 @@ class miRawDataset(torch.utils.data.Dataset):
 class QuestionAnswerDataset(torch.utils.data.Dataset):
     def __init__(self,
                  data,
-                #  mrna_max_len,
-                #  mirna_max_len,
+                 mrna_max_len,
+                 mirna_max_len,
                  tokenizer,
                  mRNA_col="mRNA sequence",
                  miRNA_col="miRNA sequence",
@@ -354,18 +354,18 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
                  cleavage_site_col="cleave_site",
                  ):
         self.data = data
-        # self.mrna_max_len = mrna_max_len
-        # self.mirna_max_len = mirna_max_len
+        self.mrna_max_len = mrna_max_len
+        self.mirna_max_len = mirna_max_len
         self.tokenizer = tokenizer
         self.mRNA_col = mRNA_col
         self.miRNA_col = miRNA_col
-        # self.mRNA_sequences = self.data[[mRNA_col]].values
-        # self.miRNA_sequences = self.data[[miRNA_col]].values
+        self.mRNA_sequences = self.data[[mRNA_col]].values
+        self.miRNA_sequences = self.data[[miRNA_col]].values
         self.seed_start_col = seed_start_col
         self.seed_end_col   = seed_end_col
         self.cleavage_site_col = cleavage_site_col
-        # self.seed_starts = self.data[[seed_start_col]].values
-        # self.seed_ends = self.data[[seed_end_col]].values
+        self.seed_starts = self.data[[seed_start_col]].values
+        self.seed_ends = self.data[[seed_end_col]].values
         
     def __len__(self):
         return len(self.data)
@@ -385,7 +385,7 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
         # Get cleavage site position
         if self.cleavage_site_col is not None and self.cleavage_site_col in self.data.columns:
             cleavage_sites = torch.tensor(self.data[self.cleavage_site_col].iat[idx], dtype=torch.long)
-            # cleavage_soft_targets = self.gaussian_targets(L=self.mrna_max_len, pos=cleavage_sites) # (mrna_max_len, )
+            cleavage_soft_targets = self.gaussian_targets(L=self.mrna_max_len, pos=cleavage_sites) # (mrna_max_len, )
         else:
             cleavage_soft_targets = float(-1)
             cleavage_sites = -1 # no cleavage site
@@ -396,41 +396,39 @@ class QuestionAnswerDataset(torch.utils.data.Dataset):
         mirna_encoded = self.tokenizer(
             mirna_seq,
             add_special_tokens=False,
-            padding=False,
-            truncation=False,
-            # max_length=self.mirna_max_len,
-            return_attention_mask=False,
+            padding="max_length",
+            truncation=True,
+            max_length=self.mirna_max_len,
+            return_attention_mask=True,
         )
 
         # Tokenize mrna
         mrna_encoded = self.tokenizer(
             mrna_seq,
             add_special_tokens=False,
-            padding=False,
-            truncation=False,
-            # max_length=self.mrna_max_len,  
-            return_attention_mask=False,
+            padding="max_length",
+            truncation=True,
+            max_length=self.mrna_max_len,  
+            return_attention_mask=True,
         )
         
         # Convert mRNA tokenization results to tensors
-        # mrna_attn_mask = mrna_encoded["attention_mask"]
-
         mirna_ids = torch.tensor(mirna_encoded["input_ids"], dtype=torch.long)
-        # mirna_attn_mask = torch.tensor(mirna_encoded["attention_mask"], dtype=torch.long)
+        mirna_attn_mask = torch.tensor(mirna_encoded["attention_mask"], dtype=torch.long)
         mrna_ids = torch.tensor(mrna_encoded["input_ids"], dtype=torch.long)  # Use modified list with global token
-        # mrna_attn_mask = torch.tensor(mrna_attn_mask, dtype=torch.long)  # Use modified list with global token
+        mrna_attn_mask = torch.tensor(mrna_encoded["attention_mask"], dtype=torch.long)  # Use modified list with global token
         target = torch.tensor([label], dtype=torch.long)
 
         return {
             "mirna_input_ids": mirna_ids,
-            # "mirna_attention_mask": mirna_attn_mask,
+            "mirna_attention_mask": mirna_attn_mask,
             "mrna_input_ids": mrna_ids,
-            # "mrna_attention_mask": mrna_attn_mask,
+            "mrna_attention_mask": mrna_attn_mask,
             "start_positions": seed_start,  # used as labels
             "end_positions": seed_end,
             "target": target,
             "cleavage_sites": cleavage_sites,
-            # "cleavage_soft_targets": cleavage_soft_targets
+            "cleavage_soft_targets": cleavage_soft_targets
         }
     
     def gaussian_targets(self, L: int, pos: int, sigma: float = 3.0):

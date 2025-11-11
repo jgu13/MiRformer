@@ -20,6 +20,7 @@ Performance/
 optuna_logs/
 *.log
 *.err
+*.pid
 
 # database
 optuna_database/
