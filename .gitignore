@@ -37,6 +37,7 @@ wandb/
 #other
 build_dataset_output.txt
 dmiso_pairs.txt
+span_metrics.txt
 *.out
 unused_data.tar.gz
 
