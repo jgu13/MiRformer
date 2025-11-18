@@ -30,9 +30,14 @@ scripts/__pycache__/
 
 # images
 *.png
+*.svg
 
 # training data
 wandb/
+Pooling_Method_Binding_Accuracy.csv
+Pooling_Method_Exact_match_rate.csv
+Pooling_Method_F1_score.csv
+Pooling_Method_Eval_loss.csv
 
 #other
 build_dataset_output.txt

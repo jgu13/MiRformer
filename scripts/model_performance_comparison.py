@@ -4,18 +4,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import matplotlib.font_manager as font_manager
 from typing import List
-
+from Global_parameters import PROJ_HOME, AXIS_FONT_SIZE, TICK_FONT_SIZE, TITLE_FONT_SIZE, LEGEND_FONT_SIZE
 # ======================
 # Config & Fonts
 # ======================
 gill_sans_font = font_manager.FontProperties(family='Gill Sans')
 plt.rcParams['font.family'] = gill_sans_font.get_name()
-plt.rcParams['font.size'] = 15
-
-TITLE_FONTSIZE = 18
-AXIS_LABEL_FONTSIZE = 15
-TICK_LABEL_FONTSIZE = 13
-LEGEND_FONTSIZE = 13
 
 Performance_dir = os.path.join(os.path.expanduser("~/projects/mirLM"),
                                "Performance/TargetScan_test")
