@@ -4,19 +4,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 import matplotlib.font_manager as font_manager
+from Global_parameters import PROJ_HOME, AXIS_FONT_SIZE, TICK_FONT_SIZE, TITLE_FONT_SIZE, LEGEND_FONT_SIZE
+
 # ======================
 # Config & Fonts
 # ======================
 gill_sans_font = font_manager.FontProperties(family='Gill Sans')
 plt.rcParams['font.family'] = gill_sans_font.get_name()
-plt.rcParams['font.size'] = 15
 
-TITLE_FONTSIZE = 12
-AXIS_LABEL_FONTSIZE = 10
-TICK_LABEL_FONTSIZE = 8
-LEGEND_FONTSIZE = 8
-
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 test_500_data_path = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/predicted_seeds_and_cleave_sites_predictions_500_test.csv")
 utr_data_path = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/predicted_seeds_and_cleave_sites_predictions.csv")
 seed_type_data_path = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/predicted_seeds_and_cleave_sites_predictions_seed_type.csv")
@@ -96,47 +91,47 @@ color_test_500 = 'hotpink'
 color_utr = 'slateblue'
 
 # plot the seed length as histogram
-fig, ax = plt.subplots(figsize=(6.88/2.54, 6.56/2.54), dpi=500)
+fig, ax = plt.subplots(figsize=(8/2.54, 8/2.54), dpi=500)
 ax.hist(test_500_data['seed_length'], bins=range(0,50), alpha=0.5, label='Seed Length', density=True, color=color_test_500)
-ax.tick_params(labelsize=TICK_LABEL_FONTSIZE-2)  # set x-tick label font size
-ax.set_xlabel('Seed Length', fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.set_ylabel('Ratio', fontsize=AXIS_LABEL_FONTSIZE-2)
+ax.tick_params(labelsize=TICK_FONT_SIZE-2)  # set x-tick label font size
+ax.set_xlabel('Seed Length', fontsize=AXIS_FONT_SIZE-2)
+ax.set_ylabel('Ratio', fontsize=AXIS_FONT_SIZE-2)
 fig.tight_layout(pad=0.1)
-fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_length_distribution_500_test.png"), dpi=500)
-print("Seed length distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_length_distribution_500_test.png"))
+fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_length_distribution_500_test.svg"), dpi=500)
+print("Seed length distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_length_distribution_500_test.svg"))
 
 # plot the seed length as histogram
-fig, ax = plt.subplots(figsize=(6.88/2.54, 6.56/2.54), dpi=500)
+fig, ax = plt.subplots(figsize=(8/2.54, 8/2.54), dpi=500)
 # draw y axis as percentage instead of count
 ax.hist(utr_data['seed_length'], bins=range(0,50), alpha=0.5, label='Seed Length', density=True, color=color_utr)
-ax.tick_params(labelsize=TICK_LABEL_FONTSIZE-2)  # set x-tick label font size
-ax.set_xlabel('Seed Length', fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.set_ylabel('Ratio', fontsize=AXIS_LABEL_FONTSIZE-2)
+ax.tick_params(labelsize=TICK_FONT_SIZE-2)  # set x-tick label font size
+ax.set_xlabel('Seed Length', fontsize=AXIS_FONT_SIZE-2)
+ax.set_ylabel('Ratio', fontsize=AXIS_FONT_SIZE-2)
 fig.tight_layout(pad=0.1)
-fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_length_distribution_utr.png"), dpi=500)
-print("Seed length distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_length_distribution_utr.png"))
+fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_length_distribution_utr.svg"), dpi=500)
+print("Seed length distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_length_distribution_utr.svg"))
 
 # plot distance to cleavage site as histogram
-fig, ax = plt.subplots(figsize=(6.88/2.54, 6.56/2.54), dpi=500)
+fig, ax = plt.subplots(figsize=(8/2.54, 8/2.54), dpi=500)
 # draw y axis as percentage instead of count
 ax.hist(test_500_data['distance_to_cleavage_site'], bins=range(0,50), alpha=0.5, label='Distance to Cleavage Site', density=True, color=color_test_500)
-ax.tick_params(labelsize=TICK_LABEL_FONTSIZE-2)  # set x-tick label font size
-ax.set_xlabel('Distance to Cleavage Site', fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.set_ylabel('Ratio', fontsize=AXIS_LABEL_FONTSIZE-2)
+ax.tick_params(labelsize=TICK_FONT_SIZE-2)  # set x-tick label font size
+ax.set_xlabel('Distance to Cleavage Site', fontsize=AXIS_FONT_SIZE-2)
+ax.set_ylabel('Ratio', fontsize=AXIS_FONT_SIZE-2)
 fig.tight_layout(pad=0.1)
-fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_distribution_500_test.png"), dpi=500)
-print("Distance to cleavage site distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_distribution_500_test.png"))
+fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_distribution_500_test.svg"), dpi=500)
+print("Distance to cleavage site distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_distribution_500_test.svg"))
 
 # plot distance to cleavage site as histogram
-fig, ax = plt.subplots(figsize=(6.88/2.54, 6.56/2.54), dpi=500)
+fig, ax = plt.subplots(figsize=(8/2.54, 8/2.54), dpi=500)
 # draw y axis as percentage instead of count
 ax.hist(utr_data['distance_to_cleavage_site'], bins=range(0,50), alpha=0.5, label='Distance to Cleavage Site', density=True, color=color_utr)
-ax.tick_params(labelsize=TICK_LABEL_FONTSIZE-2)  # set x-tick label font size
-ax.set_xlabel('Distance to Cleavage Site', fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.set_ylabel('Ratio', fontsize=AXIS_LABEL_FONTSIZE-2)
+ax.tick_params(labelsize=TICK_FONT_SIZE-2)  # set x-tick label font size
+ax.set_xlabel('Distance to Cleavage Site', fontsize=AXIS_FONT_SIZE-2)
+ax.set_ylabel('Ratio', fontsize=AXIS_FONT_SIZE-2)
 fig.tight_layout(pad=0.1)
-fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_distribution_utr.png"), dpi=500)
-print("Distance to cleavage site distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_distribution_utr.png"))
+fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_distribution_utr.svg"), dpi=500)
+print("Distance to cleavage site distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_distribution_utr.svg"))
 
 # Plot boxplot of distance to cleavage site
 # filter seed length to only 6, 7 and 8
@@ -189,10 +184,10 @@ for patch in bp_b['boxes']:
 
 # Center ticks under each pair
 ax.set_xticks(x)
-ax.set_xticklabels(labels, fontsize=TICK_LABEL_FONTSIZE-2)
-ax.tick_params(axis='y', labelsize=TICK_LABEL_FONTSIZE-2)
-ax.set_xlabel("Seed length", fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.set_ylabel("Distance to predicted cleavage site (nt)", fontsize=AXIS_LABEL_FONTSIZE-2)
+ax.set_xticklabels(labels, fontsize=TICK_FONT_SIZE-2)
+ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE-2)
+ax.set_xlabel("Seed length", fontsize=AXIS_FONT_SIZE-2)
+ax.set_ylabel("Distance to predicted\ncleavage site (nt)", fontsize=AXIS_FONT_SIZE-2)
 # ax.set_title("Distance to cleavage vs. seed length (grouped)", fontsize=20)
 ax.grid(True, axis='y', linestyle='--', alpha=0.3)
 
@@ -201,10 +196,10 @@ handles = [
     Patch(facecolor=color_test_500, edgecolor='black', label='Test 500'),
     Patch(facecolor=color_utr, edgecolor='black', label="3'UTR"),
 ]
-ax.legend(handles=handles, loc='best', fontsize=LEGEND_FONTSIZE-2, frameon=False)
+ax.legend(handles=handles, loc='best', fontsize=LEGEND_FONT_SIZE-2, frameon=False)
 fig.tight_layout(pad=0.1)
-fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_boxplot.png"), dpi=500)
-print("Distance to cleavage site boxplot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_boxplot.png"))
+fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_boxplot.svg"), dpi=500)
+print("Distance to cleavage site boxplot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_to_cleavage_site_boxplot.svg"))
 
 # plot bar plot of seed type
 # Metrics / x-axis categories
@@ -218,7 +213,7 @@ color_map = {
 x = np.arange(len(metrics))   # positions for 6/7/8-mer
 width = 0.45                  # bar width
 
-fig, ax = plt.subplots(figsize=(9.93/2.54, 4.6/2.54), dpi=500)  # A4-width friendly
+fig, ax = plt.subplots(figsize=(13.77/2.54, 6.37/2.54), dpi=500)  # A4-width friendly
 
 # Grouped bars
 for i, ds in enumerate(datasets):
@@ -239,22 +234,22 @@ for i, ds in enumerate(datasets):
             textcoords="offset points",
             ha='center',
             va='bottom',
-            fontsize=9
+            fontsize=TICK_FONT_SIZE-2
         )
 
 # Cosmetics
 ax.set_xticks(x)
-ax.set_xticklabels(metrics, fontsize=TICK_LABEL_FONTSIZE-2)
-ax.set_xlabel("Seed length", fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.set_ylabel("Percentage (%)", fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.tick_params(axis='y', labelsize=TICK_LABEL_FONTSIZE-2)
+ax.set_xticklabels(metrics, fontsize=TICK_FONT_SIZE-2)
+ax.set_xlabel("Seed length", fontsize=AXIS_FONT_SIZE-2)
+ax.set_ylabel("Percentage (%)", fontsize=AXIS_FONT_SIZE-2)
+ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE-2)
 ax.grid(axis='y', linestyle='--', alpha=0.3)
-ax.legend(frameon=False, fontsize=LEGEND_FONTSIZE-2)
+ax.legend(frameon=False, fontsize=LEGEND_FONT_SIZE-2)
 ax.margins(y=0.2)
 
 fig.tight_layout(pad=0.1)
-fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_type_distribution.png"), dpi=500)
-print("Seed type distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_type_distribution.png"))
+fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_type_distribution.svg"), dpi=500)
+print("Seed type distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/seed_type_distribution.svg"))
 
 # plot bar plot of distance within 5
 datasets = distance_within_5_data["dataset"].tolist()
@@ -263,7 +258,7 @@ values = distance_within_5_data["distance within 5nt %"].astype(float).to_numpy(
 x = np.arange(len(datasets))
 width = 0.45
 
-fig, ax = plt.subplots(figsize=(4.24 / 2.54, 5.79 / 2.54), dpi=500)
+fig, ax = plt.subplots(figsize=(5.89 / 2.54, 8.03 / 2.54), dpi=500)
 
 color_map = {
     "Test 500": color_test_500,
@@ -284,20 +279,20 @@ for xpos, v in zip(x, values):
         textcoords="offset points",
         ha="center",
         va="bottom",
-        fontsize=7,
+        fontsize=TICK_FONT_SIZE-2,
     )
 
 # Axes labels
 ax.set_xticks(x)
-ax.set_xticklabels(datasets, fontsize=TICK_LABEL_FONTSIZE-2)
-ax.set_xlabel("Dataset", fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.set_ylabel("Distance within 5nt (%)", fontsize=AXIS_LABEL_FONTSIZE-2)
-ax.tick_params(axis='y', labelsize=TICK_LABEL_FONTSIZE-2)
+ax.set_xticklabels(datasets, fontsize=TICK_FONT_SIZE-2)
+ax.set_xlabel("Dataset", fontsize=AXIS_FONT_SIZE-2)
+ax.set_ylabel("Distance within 5nt (%)", fontsize=AXIS_FONT_SIZE-2)
+ax.tick_params(axis='y', labelsize=TICK_FONT_SIZE-2)
 # Light grid on y-axis
 ax.grid(axis="y", linestyle="--", alpha=0.3)
 ax.margins(y=0.2)
 
 # Small margins to reduce whitespace
 fig.tight_layout(pad=0.1)
-fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_within_5nt_distribution.png"), dpi=500)
-print("Seed type distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_within_5nt_distribution.png"))
+fig.savefig(os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_within_5nt_distribution.svg"), dpi=500)
+print("Seed type distribution plot saved to: ", os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/distance_within_5nt_distribution.svg"))

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple, Union
 
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -26,6 +26,8 @@ METRIC_FILES: Tuple[Tuple[str, str], ...] = (
     ("F1 Score", "Pooling_Method_F1_score.csv"),
     ("Evaluation Loss", "Pooling_Method_Eval_loss.csv"),
 )
+
+LineStyleType = Union[str, Tuple[float, Tuple[float, ...]]]
 
 
 def read_metric_csv(csv_path: Path) -> pd.DataFrame:
@@ -43,7 +45,13 @@ def read_metric_csv(csv_path: Path) -> pd.DataFrame:
     return df
 
 
-def plot_metric(ax: plt.Axes, df: pd.DataFrame, title: str, colors: Dict[str, Tuple[float, float, float, float]]) -> Dict[str, plt.Line2D]:
+def plot_metric(
+    ax: plt.Axes,
+    df: pd.DataFrame,
+    title: str,
+    colors: Dict[str, Tuple[float, float, float, float]],
+    line_styles: Dict[str, LineStyleType],
+) -> Dict[str, plt.Line2D]:
     """Plot all metric columns against `Step`."""
     if len(df.columns) <= 1:
         raise ValueError(f"No metric columns found for {title}")
@@ -52,7 +60,13 @@ def plot_metric(ax: plt.Axes, df: pd.DataFrame, title: str, colors: Dict[str, Tu
     for column in df.columns:
         if column == "Step":
             continue
-        line, = ax.plot(df["Step"], df[column], label=column, color=colors[column])
+        line, = ax.plot(
+            df["Step"],
+            df[column],
+            label=column,
+            color=colors[column],
+            linestyle=line_styles.get(column, "-"),
+        )
         lines[column] = line
     # set face color to whitesmoke
     ax.set_facecolor("whitesmoke")
@@ -76,9 +90,27 @@ for df in metric_data.values():
             continue
         metric_columns.append(column)
 
+
+def generate_unique_line_styles(count: int) -> List[LineStyleType]:
+    base_styles: List[LineStyleType] = ["-", "--", "-.", ":"]
+    if count <= len(base_styles):
+        return base_styles[:count]
+    styles: List[LineStyleType] = base_styles.copy()
+    for idx in range(count - len(base_styles)):
+        dash_length = 1.5 + idx * 0.6
+        gap_length = 0.8 + (idx % 3) * 0.3
+        styles.append((0, (dash_length, gap_length)))
+    return styles
+
+
 cmap = plt.get_cmap("Set1", len(metric_columns))
 metric_colors: Dict[str, Tuple[float, float, float, float]] = {
     column: cmap(idx % cmap.N) for idx, column in enumerate(metric_columns)
+}
+line_style_list = generate_unique_line_styles(len(metric_columns))
+metric_line_styles: Dict[str, LineStyleType] = {
+    column: line_style_list[idx]
+    for idx, column in enumerate(metric_columns)
 }
 
 fig, axes = plt.subplots(2, 2, figsize=(30/2.54, 23.87/2.54), sharex=False)
@@ -88,7 +120,13 @@ axes_iter: Iterable[Tuple[str, plt.Axes]] = zip(
 
 legend_handles: Dict[str, plt.Line2D] = {}
 for metric_name, ax in axes_iter:
-    lines = plot_metric(ax, metric_data[metric_name], metric_name, metric_colors)
+    lines = plot_metric(
+        ax,
+        metric_data[metric_name],
+        metric_name,
+        metric_colors,
+        metric_line_styles,
+    )
     for name, line in lines.items():
         if name not in legend_handles:
             legend_handles[name] = line
