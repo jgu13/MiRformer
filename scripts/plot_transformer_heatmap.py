@@ -174,7 +174,7 @@ def plot_heatmap(model,
         # get the Colorbar object
         cbar = im.collections[0].colorbar
         # set its tick‐label fontsize to 12
-        cbar.ax.tick_params(labelsize=12)
+        cbar.ax.tick_params(labelsize=9)
 
         if seed_start != -1 and seed_end != -1:    
             # seed_start and seed_end are indices into the mRNA sequence (0-based)
@@ -197,16 +197,23 @@ def plot_heatmap(model,
                 (xs, ys),  # lower-left corner in data coords
                 seed_len,              # width = number of seed bases
                 seed_len,             # height = number of seed bases
-                linewidth=1,
+                linewidth=0.4,
                 edgecolor="orange",
                 facecolor="none"
             )
             ax.add_patch(rect)
 
-        ax.set_xlabel(mRNA_id, fontsize=15)
-        ax.set_ylabel(miRNA_id, fontsize=15)
-        ax.tick_params(axis='x', labelsize=12)
-        ax.tick_params(axis='y', labelsize=12)
+        ax.set_xlabel(mRNA_id, fontsize=9)
+        ax.set_ylabel(miRNA_id, fontsize=9)
+        ax.tick_params(
+            axis='both',
+            labelsize=3,
+            which='both',
+            length=0,
+            width=0,
+            top=False,
+            right=False
+        )
 
     else: # plot each head
         attn_weights = attn_weights[0]

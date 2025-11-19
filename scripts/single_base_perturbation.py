@@ -11,9 +11,8 @@ import transformer_model as tm
 from Data_pipeline import CharacterTokenizer
 from plot_transformer_heatmap import plot_heatmap
 
-# PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt"
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-# PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
+from Global_parameters import PROJ_HOME, AXIS_FONT_SIZE, TICK_FONT_SIZE, TITLE_FONT_SIZE, LEGEND_FONT_SIZE
+
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 def predict(model, 
@@ -88,23 +87,11 @@ def encode_seq(model,
             "mRNA_seq_mask": mRNA_seq_mask, 
             "miRNA_seq_mask": miRNA_seq_mask}
     
-def load_model(ckpt_name,
+def load_model(ckpt_path,
                **args_dict):
     # load model checkpoint
     # model = mirLM.create_model(**args_dict)
     model = tm.QuestionAnsweringModel(**args_dict)
-    ckpt_path = os.path.join(PROJ_HOME, 
-                            "checkpoints", 
-                            "TargetScan",
-                            "TwoTowerTransformer",
-                            # "TokenClassification",
-                            "Longformer",
-                            str(args_dict["mrna_max_len"]),
-                            # f"embed={args_dict['embed_dim']}d",
-                            # "norm_by_key",
-                            # "LSE",
-                            "continue_training",
-                            ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data, strict=False)
     print(f"Loaded checkpoint from {ckpt_path}", flush=True)
@@ -126,7 +113,7 @@ def viz_sequence(seq,
                  seed_start=None, 
                  seed_end=None,
                  figsize=(20, 8),
-                 logo_height_frac=0.22,
+                 logo_height_frac=0.30,
                  pad_frac=0.1,
                  file_name=None):
     '''
@@ -241,12 +228,20 @@ def viz_sequence(seq,
         # ax.set_ylim(0.0, 1.0)
         # ax.set_ylim(0.0, 1.0)
         ax.set_xticks(range(len(seq)))
-        ax.set_xticklabels(list(seq))
-        ax.tick_params(axis='x', labelsize=12)
-        ax.tick_params(axis='y', labelsize=12)
+        ax.set_xticklabels(list(seq), fontsize=3)
+        ax.tick_params(axis='y', labelsize=6)
+        ax.tick_params(
+            axis='x',
+            labelsize=3,
+            which='both',
+            length=0,
+            width=0,
+            top=False,
+            right=False
+        )
         # logo.ax.set_yscale('log')  # Log-transformed y-axis
         # logo.ax.set_ylim(1e-6, 1e-5)  # Example: 1e-5 to 0.1
-        ax.set_ylabel(ax_title)
+        ax.set_ylabel(ax_title, fontsize=6)
 
         # Add rectangle around specific bases (highlight_region is a tuple: (start, end))
         if seed_start is not None and seed_end is not None:
@@ -255,14 +250,14 @@ def viz_sequence(seq,
                 (seed_start - 0.5, y0),  # (x, y)
                 seed_end - seed_start + 1,  # width
                 y1 - y0, # height
-                linewidth=2,
+                linewidth=0.4,
                 edgecolor='orange',
                 facecolor='none'
             )
             ax.add_patch(rect)
         
     if file_name:
-        fig.savefig(file_name, dpi=500, bbox_inches='tight')  # Save as PNG
+        fig.savefig(file_name, dpi=300, bbox_inches='tight')  # Save as PNG
         print(f"Logo plot saved to {file_name}", flush=True)
     return fig, logo_axes
 
@@ -282,7 +277,7 @@ def main():
     predict_span    = True
     predict_binding = True
     if torch.cuda.is_available():
-        device = "cuda:7"
+        device = "cuda:0"
     elif torch.backends.mps.is_available():
         device = "mps"
     else:
@@ -298,7 +293,8 @@ def main():
                  "predict_binding": predict_binding,
                  "use_longformer":True}
     print("Loading model ... ")
-    model = load_model(ckpt_name="best_composite_0.8351_0.9227_epoch3.pth",
+    model = load_model(ckpt_path=os.path.join(PROJ_HOME, 
+                       "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/embed=1024d/norm_by_query/LSE/best_composite_0.9312_0.9975_epoch19.pth"),
                        **args_dict)
     
     test_data_path = os.path.join(data_dir, 
@@ -357,6 +353,7 @@ def main():
                  mRNA_id = mRNA_id,
                  seed_start = seed_start,
                  seed_end = seed_end,
+                 figsize=(26.4/2.54, 4.9/2.54),
                  plot_max_only=True) 
 
     # perturb mRNA sequence for attention and probability changes
@@ -408,7 +405,7 @@ def main():
     
     # print("Max in delta = ", max(deltas))
     print("plot changes on base logos ...", flush=True)
-    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_continued_training_0.8351_0.9227_epoch3.png")
+    file_path = os.path.join(save_plot_dir, f"{mRNA_id}_{miRNA_id}_attn_perturbed_best_composite_0.9312_0.9975_epoch19.svg")
     fig, ax_viz = viz_sequence(seq=mRNA_seq, # visualize change on the original mRNA seq
                  attn_changes=attn_deltas,
                  weights_changes=weights_deltas,
@@ -417,7 +414,7 @@ def main():
                  seed_start=seed_start,
                  seed_end=seed_end,
                  base_ax=ax_attn,
-                 figsize=(45, 9),
+                 figsize=(26.4/2.54, 7.6/2.54),
                  file_name=file_path)
 
 if __name__ == '__main__':

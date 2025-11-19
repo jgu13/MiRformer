@@ -187,7 +187,7 @@ class LongformerAttention(nn.Module):
                 Q=q, K=k, V=v, 
                 w=self.attention_window, 
                 mask=mask, 
-                norm_by_query=False,
+                norm_by_query=True,
                 use_lse=True,)    # (B, H, L_q, D)
             
             # Reshape to final output format
@@ -1829,7 +1829,7 @@ if __name__ == "__main__":
     ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/embed=1024d/norm_by_key/LSE/best_composite_0.9042_0.9871_epoch12.pth")
     model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
                                    mirna_max_len=mirna_max_len,
-                                   device="cuda:5",
+                                   device="cuda:0",
                                    epochs=100,
                                    embed_dim=1024,
                                    num_heads=8,
