@@ -28,8 +28,6 @@ from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_n
 from sliding_chunks import sliding_window_cross_attention, check_key_mask_rows
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-# PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
-# PROJ_HOME = "/Users/jiayaogu/Documents/Li Lab/mirLM---Micro-RNA-generation-with-mRNA-prompt/"
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 class CNNTokenization(nn.Module):
@@ -187,8 +185,8 @@ class LongformerAttention(nn.Module):
                 Q=q, K=k, V=v, 
                 w=self.attention_window, 
                 mask=mask, 
-                norm_by_query=True,
-                use_lse=True,)    # (B, H, L_q, D)
+                norm_by_query=False,
+                use_lse=False,)    # (B, H, L_q, D)
             
             # Reshape to final output format
             B, H, Lq, D = z.shape
@@ -969,8 +967,8 @@ class QuestionAnsweringModel(nn.Module):
             # if pos_boost is greater than 1.0, boost the loss at positive locations
             # weights are multiplied to the base loss and normalized by the sum of weights
             # this way the loss is unaffected by the gaussian distributions between batches
-            weights = 1.0 + (pos_boost - 1.0) * soft_targets
-            weights_sum = weights.sum(dim=1, keepdim=True).clamp(min=1e-8)
+            weights = 1.0 + (pos_boost - 1.0) * soft_targets # (batch_size, mrna_len)
+            weights_sum = weights.sum(dim=1, keepdim=True).clamp(min=1e-8) # (batch_size, 1)
             loss = (weights * base).sum(dim=1, keepdim=True) / weights_sum # (batch_size, 1)
             return loss.squeeze(-1).mean()  # (batch_size,) -> scalar
         else:

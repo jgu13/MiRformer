@@ -7,29 +7,21 @@ import matplotlib.pyplot as plt
 import transformer_model as tm
 import matplotlib.patches as patches
 from matplotlib import colors
+from scipy.stats import mannwhitneyu
+import mpmath as mp
 from Data_pipeline import CharacterTokenizer
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
-# PROJ_HOME = os.path.expanduser("~/projects/ctb-liyue/claris/projects/mirLM")
+from Global_parameters import PROJ_HOME, TICK_FONT_SIZE, AXIS_FONT_SIZE, LEGEND_FONT_SIZE
+
 
 def load_model(
-        ckpt_name,
+        ckpt_path,
         **args_dict):
     # load model checkpoint
     model = tm.QuestionAnsweringModel(**args_dict)
-    ckpt_path = os.path.join(PROJ_HOME, 
-                            "checkpoints", 
-                            "TargetScan/TwoTowerTransformer",
-                            "Longformer",
-                            str(model.mrna_max_len),
-                            f"embed={model.embed_dim}d",
-                            "norm_by_key", 
-                            "LSE",
-                            "CLS_only",
-                            ckpt_name)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
-    model.load_state_dict(loaded_data)
-    print(f"Loaded checkpoint from {ckpt_path}")
+    model.load_state_dict(loaded_data, strict=False)
+    print(f"Loaded checkpoint from {ckpt_path}", flush=True)
     return model
 
 def load_model_ckpt(ckpt_path,
@@ -282,9 +274,62 @@ def plot_heatmap(model,
     if file_name is not None:
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
     else:
-        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_pretrain_best_accuracy_0.5130_epoch5.png")
+        file_name = os.path.join(save_plot_dir, f"binding_span_{mRNA_id}_{miRNA_id}_heatmap_longformer_norm_by_query_50k_best_composite_0.7424_0.9106_epoch18.png")
         fig.savefig(file_name, dpi=800, bbox_inches='tight')
         print(f"Heatmap is saved to {file_name}")
+    return fig, ax
+
+# plot boxplots showing the distribution of attention weights within seed region and outside the seed region
+def plot_attention_weights_boxplot(model,
+                 miRNA_seq,
+                 mRNA_seq,
+                 miRNA_id,
+                 mRNA_id,
+                 seed_start,
+                 seed_end,
+                 figsize=(5, 6),
+                 save_attention_weights_boxplot_dir=None):
+    attn_weights = model.predictor.cross_attn_layer.last_attention
+    attn_weights = torch.amax(attn_weights[0], dim=0) # (mrna, mirna)
+    # get the attention weights within seed region and outside the seed region
+    seed_weights = attn_weights[seed_start:seed_end, :]
+    non_seed_weights = torch.cat([attn_weights[0:seed_start, :], attn_weights[seed_end+1:, :]], dim=0)
+
+    # # do mann whitney u test
+    # result = mannwhitneyu(seed_weights.flatten(), non_seed_weights.flatten(), method="exact")
+    # log_p = log_p_two_sided(result.statistic, len(seed_weights.flatten()), len(non_seed_weights.flatten()))
+    # log10_p = log_p / mp.log(10)
+    # p_value = mp.exp(log_p)
+    # print(f"Mann-Whitney log10 p-value = {log10_p}")
+    # print(f"Mann-Whitney p-value = {mp.nstr(mp.exp(log_p), 4)}")
+
+    # plot the boxplots
+    fig, ax = plt.subplots(figsize=figsize)
+    positions = [0.25, 0.65]
+    ax.set_yscale("log")
+    boxplots = ax.boxplot(
+        [seed_weights.flatten(), non_seed_weights.flatten()],
+        positions=positions,
+        widths=0.4,
+        patch_artist=True  # allows facecolor customization
+    )
+    ax.set_xticks([])
+    colors = ["#2a9d8f", "#e76f51"]
+    for patch, color in zip(boxplots["boxes"], colors):
+        patch.set(facecolor=color, alpha=0.8)
+    ax.set_ylabel("Attention Weights", fontsize=AXIS_FONT_SIZE)
+
+    # annotate the p value
+    # ax.text(0.45, 1.02, f"Mann-Whitney p = {mp.nstr(p_value, 4)}", transform=ax.transAxes, ha="center", va="top", fontsize=TICK_FONT_SIZE)
+
+    if save_attention_weights_boxplot_dir is not None:
+        file_path = os.path.join(save_attention_weights_boxplot_dir, f"{miRNA_id}_{mRNA_id}_attention_weights_boxplot_norm_by_query_50k_best_composite_0.7424_0.9106_epoch18.svg")     
+        fig.savefig(file_path, dpi=300, bbox_inches='tight')
+        print(f"Attention weights boxplot saved to {file_path}")
+    else:
+        file_path = os.path.join(os.getcwd(), f"{miRNA_id}_{mRNA_id}_attention_weights_boxplot_norm_by_query_50k_best_composite_0.7424_0.9106_epoch18.svg")
+        fig.savefig(file_path, dpi=300, bbox_inches='tight')
+        print(f"Attention weights boxplot saved to {file_path}")
     return fig, ax
 
 def main():
@@ -317,10 +362,8 @@ def main():
     seed_starts = test_data[["seed start"]].values
     seed_ends   = test_data[["seed end"]].values
     
-    # model = load_model(ckpt_name="best_composite_0.8891_0.6256_epoch7.pth",
-    #                    **args_dict)
-    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan+TarBase/TwoTowerTransformer/Longformer/520/Pretrain_DDP/best_accuracy_0.5130_epoch5.pth")
-    model = load_model_ckpt(ckpt_path, **args_dict)
+    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/embed=1024d/norm_by_key/LSE/50k_best_composite_0.7424_0.9106_epoch18.pth")
+    model = load_model(ckpt_path, **args_dict)
 
     # Testing the first sequence
     i=8 # row number - 2
@@ -366,19 +409,30 @@ def main():
             seed_end=seed_end,
     )
 
-    save_plot_dir = os.path.join(PROJ_HOME, "Performance/TargetScan_test", "TwoTowerTransformer", str(mrna_max_len))
-    os.makedirs(save_plot_dir, exist_ok=True)
-    plot_heatmap(model,
+    # save_plot_dir = os.path.join(PROJ_HOME, "Performance/TargetScan_test", "TwoTowerTransformer", str(mrna_max_len))
+    # os.makedirs(save_plot_dir, exist_ok=True)
+    # plot_heatmap(model,
+    #              miRNA_seq=miRNA_ids,
+    #              mRNA_seq=mRNA_ids,
+    #              miRNA_id = miRNA_ID,
+    #              mRNA_id = mRNA_ID,
+    #              seed_start = seed_start,
+    #              seed_end = seed_end,
+    #              figsize=(12, 5),
+    #              plot_max_only=True,
+    #              metrics = {"binding_prob": binding_prob, "f1": f1},
+    #              save_plot_dir=save_plot_dir)
+    
+    # plot boxplots showing the distribution of attention weights within seed region and outside the seed region
+    save_boxplot_dir = os.path.join(PROJ_HOME, "Performance/TargetScan_test", "TwoTowerTransformer", str(mrna_max_len))
+    os.makedirs(save_boxplot_dir, exist_ok=True)
+    plot_attention_weights_boxplot(model,
                  miRNA_seq=miRNA_ids,
                  mRNA_seq=mRNA_ids,
                  miRNA_id = miRNA_ID,
                  mRNA_id = mRNA_ID,
                  seed_start = seed_start,
                  seed_end = seed_end,
-                 figsize=(45, 15),
-                 plot_max_only=True,
-                 metrics = {"binding_prob": binding_prob, "f1": f1},
-                 save_plot_dir=save_plot_dir)
-    
+                 save_attention_weights_boxplot_dir=save_boxplot_dir)
 if __name__ == '__main__':
     main()
