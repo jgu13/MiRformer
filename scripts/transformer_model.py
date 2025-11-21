@@ -185,8 +185,8 @@ class LongformerAttention(nn.Module):
                 Q=q, K=k, V=v, 
                 w=self.attention_window, 
                 mask=mask, 
-                norm_by_query=False,
-                use_lse=False,)    # (B, H, L_q, D)
+                norm_by_query=True,
+                use_lse=True,)    # (B, H, L_q, D)
             
             # Reshape to final output format
             B, H, Lq, D = z.shape
