@@ -53,6 +53,8 @@ def plot_attention_weights_boxplot(
     for patch, color in zip(boxplots["boxes"], colors):
         patch.set(facecolor=color, alpha=0.8)
     ax.set_ylabel("Attention Weights", fontsize=AXIS_FONT_SIZE)
+    ax.grid(axis='y', linestyle='--', alpha=0.3)
+    ax.set_facecolor("whitesmoke")
 
     # annotate the p value
     # expand y-limits to leave vertical space for the text
@@ -193,7 +195,7 @@ def main():
     test_data  = pd.read_csv(test_datapath, sep=',')
     positive_samples = test_data[test_data["label"] == 1]
     np.random.seed(10020)
-    sample_ids = np.random.choice(len(positive_samples), 150, replace=False)
+    sample_ids = np.random.choice(len(positive_samples), 200, replace=False)
     mRNA_seqs  = positive_samples[["mRNA sequence"]].values
     miRNA_seqs = positive_samples[["miRNA sequence"]].values
     miRNA_IDs   = positive_samples[["miRNA ID"]].values
@@ -254,16 +256,16 @@ def main():
         attn_weights = torch.amax(attn_weights[0], dim=0) # (mrna, mirna)
         # get the attention weights within seed region and outside the seed region
         seed_weights = attn_weights[seed_start:seed_end, :]
-        start = max(0, seed_start - 50)
-        end = min(len(mRNA_seq), seed_end + 50)
-        non_seed_weights = torch.cat([attn_weights[start:seed_start, :], attn_weights[seed_end+1:end, :]], dim=0)
-        seed_weights_list.append(seed_weights.flatten())
-        non_seed_weights_list.append(non_seed_weights.flatten())
+        # start = max(0, seed_start - 50)
+        # end = min(len(mRNA_seq), seed_end + 50)
+        non_seed_weights = torch.cat([attn_weights[0:seed_start, :], attn_weights[seed_end+1:, :]], dim=0)
+        seed_weights_list.append(seed_weights.flatten().mean())
+        non_seed_weights_list.append(non_seed_weights.flatten().mean())
         print(f"Seed weights and non-seed weights saved for {miRNA_ID}_{mRNA_ID}")
 
     # flatten all the seed weights
-    seed_weights = torch.cat(seed_weights_list, dim=0)
-    non_seed_weights = torch.cat(non_seed_weights_list, dim=0)
+    seed_weights = torch.tensor(seed_weights_list)
+    non_seed_weights = torch.tensor(non_seed_weights_list)
     save_plot_dir = os.path.join(PROJ_HOME, "Performance/TargetScan_test", "TwoTowerTransformer", str(mrna_max_len))
     seed_weights_path = os.path.join(save_plot_dir, f"norm_by_key_seed_weights.pt")
     non_seed_weights_path = os.path.join(save_plot_dir, f"norm_by_key_non_seed_weights.pt")
