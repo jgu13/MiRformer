@@ -1,4 +1,4 @@
-# Finetune the transformer_model on TargetScan_dataset/Merged_primates_finetune.csv
+# Finetune the DTEA model on TargetScan_dataset/Merged_primates_finetune.csv
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -16,10 +16,10 @@ from itertools import chain
 
 from utils import load_dataset
 from ckpt_util import load_training_state
-from Data_pipeline import QuestionAnswerDataset, BatchStratifiedSampler, CharacterTokenizer
-from transformer_model import QuestionAnsweringModel
+from Data_pipeline import SpanDataset, BatchStratifiedSampler, CharacterTokenizer
+from DTEA_model import DTEA
+from Global_parameters import PROJ_HOME, YOUR_WANDB_API_KEY
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 # def load_model_ckpt(model, ckpt_path):
@@ -80,7 +80,7 @@ def run(ckpt_path,
     tokenizer = CharacterTokenizer(characters=["A", "T", "C", "G", "N"],
                                 model_max_length=mrna_max_len,
                                 padding_side="right")    
-    model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
+    model = DTEA(mrna_max_len=mrna_max_len,
                                 mirna_max_len=mirna_max_len,
                                 device=device,
                                 epochs=epochs,
@@ -98,7 +98,7 @@ def run(ckpt_path,
     # load dataset
     D_train  = load_dataset(train_path, sep=',')
     D_val    = load_dataset(valid_path, sep=',')
-    ds_train = QuestionAnswerDataset(data=D_train,
+    ds_train = SpanDataset(data=D_train,
                                     mrna_max_len=mrna_max_len,
                                     mirna_max_len=mirna_max_len,
                                     tokenizer=tokenizer,
@@ -193,19 +193,20 @@ def run(ckpt_path,
     os.makedirs(model_checkpoints_dir, exist_ok=True)
 
     # weights and bias initialization
-    wandb.login(key="600e5cca820a9fbb7580d052801b3acfd5c92da2")
-    wandb.init(
-        project="mirna-Question-Answering",
-        name=f"CNN_len:{mrna_max_len}-epoch:{epochs}-MLP_hidden:{model.ff_dim}-finetune-mean-pooling", 
-        config={
-            "batch_size": batch_size * accumulation_step,
-            "epochs": epochs,
-            "learning rate": lr,
-        },
-        tags=["binding-span", "longformer", "8-heads-4-layer", "finetune", "everything-unfrozen", "mean-pooling", "targetscan", "260k-targetscan-pretrained"],
-        save_code=False,
-        job_type="train"
-    )
+    # uncomment to use wandb
+    # wandb.login(key=YOUR_WANDB_API_KEY)
+    # wandb.init(
+    #     project="mirna-Span-Prediction",
+    #     name=f"DTEA_len:{mrna_max_len}-epoch:{epochs}-finetune-mean-pooling", 
+    #     config={
+    #         "batch_size": batch_size * accumulation_step,
+    #         "epochs": epochs,
+    #         "learning rate": lr,
+    #     },
+    #     tags=["binding-span", "longformer", "8-heads-4-layer", "finetune"],
+    #     save_code=False,
+    #     job_type="train"
+    # )
 
     for epoch in range(epochs):
         # TRAINING
@@ -228,20 +229,20 @@ def run(ckpt_path,
             device=device,
         )
 
-        # SAFE METRIC LOGGING
-        try:
-            wandb.log({
-                "epoch": epoch,
-                "train/loss": train_loss,
-                "eval/loss": eval_loss,
-                "eval/binding accuracy": acc_binding,
-                "eval/start accuracy": acc_start,
-                "eval/end accuracy": acc_end,
-                "eval/exact match": exact_match,
-                "eval/F1 score": f1,
-            }, step=epoch)
-        except Exception as e:
-            print(f"[W&B] log failed at epoch {epoch}: {e}")
+        # uncomment to use wandb
+        # try:
+        #     wandb.log({
+        #         "epoch": epoch,
+        #         "train/loss": train_loss,
+        #         "eval/loss": eval_loss,
+        #         "eval/binding accuracy": acc_binding,
+        #         "eval/start accuracy": acc_start,
+        #         "eval/end accuracy": acc_end,
+        #         "eval/exact match": exact_match,
+        #         "eval/F1 score": f1,
+        #     }, step=epoch)
+        # except Exception as e:
+        #     print(f"[W&B] log failed at epoch {epoch}: {e}")
 
         # CHECK FOR IMPROVEMENT
         if predict_binding and predict_span:

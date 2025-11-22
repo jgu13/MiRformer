@@ -8,7 +8,7 @@ import pandas as pd
 from single_base_perturbation import predict, encode_seq, single_base_perturbation, viz_sequence
 from plot_transformer_heatmap import plot_heatmap
 from Data_pipeline import CharacterTokenizer
-import transformer_model as tm
+import DTEA_model as dtea
 
 PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
@@ -16,7 +16,7 @@ data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 def load_model(ckpt_path,
                **args_dict):
     # load model checkpoint
-    model = tm.QuestionAnsweringModel(**args_dict)
+    model = dtea.DTEA(**args_dict)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data, strict=False)
     print(f"Loaded checkpoint from {ckpt_path}", flush=True)

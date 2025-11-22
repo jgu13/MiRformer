@@ -1,3 +1,6 @@
+"""
+Test the Attention regularization implementation.
+"""
 import torch
 from Attention_regularization import _row_normalize, kl_diag_seed_loss
 

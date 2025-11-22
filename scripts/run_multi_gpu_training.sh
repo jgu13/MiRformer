@@ -8,5 +8,5 @@ CUDA_VISIBLE_DEVICES=2,3 nohup \
     torchrun \
     --nproc_per_node=2 \
     --master_port=29500 \
-    scripts/Pretrain.py \
+    Pretrain.py \
     > train_Positive_Primates_500_randomized_start_DDP.out 2>&1 &

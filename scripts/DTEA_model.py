@@ -9,25 +9,25 @@ from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 import os
 import sys
 import math
-import wandb
+# import wandb # uncomment to use wandb
 import random
 import numpy as np
 import pandas as pd
 from time import time
 from itertools import chain
-from wandb.sdk.wandb_settings import Settings
+# from wandb.sdk.wandb_settings import Settings # uncomment to use wandb
 
 from utils import load_dataset
 from ckpt_util import load_training_state, save_training_state
-from Data_pipeline import QuestionAnswerDataset, BatchStratifiedSampler, TokenClassificationDataset
+from Data_pipeline import SpanDataset, BatchStratifiedSampler, TokenClassificationDataset
 from Data_pipeline import CharacterTokenizer
 
 from diagonaled_mm_tvm import mask_invalid_locations
 from sliding_chunks import sliding_chunks_matmul_qk, sliding_chunks_matmul_pv
 from sliding_chunks import sliding_chunks_no_overlap_matmul_qk, sliding_chunks_no_overlap_matmul_pv
 from sliding_chunks import sliding_window_cross_attention, check_key_mask_rows
+from Global_parameters import PROJ_HOME
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 class CNNTokenization(nn.Module):
@@ -847,7 +847,7 @@ def create_dataset(train_path, valid_path, tokenizer, mRNA_max_len):
     )
     return ds_train, ds_val
     
-class QuestionAnsweringModel(nn.Module):
+class DTEA(nn.Module):
     def __init__(self,
                 mrna_max_len,
                 mirna_max_len,
@@ -865,7 +865,7 @@ class QuestionAnsweringModel(nn.Module):
                 predict_cleavage=False,
                 use_cross_attn=True,
                 use_longformer=False):
-        super(QuestionAnsweringModel, self).__init__()
+        super(DTEA, self).__init__()
         self.mrna_max_len = mrna_max_len
         self.mirna_max_len = mirna_max_len
         if device is not None:
@@ -1412,7 +1412,7 @@ class QuestionAnsweringModel(nn.Module):
             evaluation=False,
             accumulation_step=1,
             ckpt_path="",
-            training_mode="QA"):
+            training_mode="SPAN"):
         """
         model: nn.Module
             The model to train or evaluate.
@@ -1525,10 +1525,10 @@ class QuestionAnsweringModel(nn.Module):
                 remaining = elapsed / (epoch + 1) * (self.epochs - epoch - 1) / 3600
                 print(f"Still remain: {remaining:.2f} hrs.")
 
-        elif training_mode == "QA":
+        elif training_mode == "SPAN":
             if evaluation:
                 D_test = load_dataset(test_path, sep=',')
-                ds_test = QuestionAnswerDataset(data=D_test,
+                ds_test = SpanDataset(data=D_test,
                                     mrna_max_len=self.mrna_max_len,
                                     mirna_max_len=self.mirna_max_len,
                                     tokenizer=tokenizer,
@@ -1602,14 +1602,14 @@ class QuestionAnsweringModel(nn.Module):
                 if "label" not in D_train.columns:
                     D_train["label"] = 1  # All degradome data is positive
                     
-                ds_train = QuestionAnswerDataset(data=D_train,
+                ds_train = SpanDataset(data=D_train,
                                                 mrna_max_len=self.mrna_max_len,
                                                 mirna_max_len=self.mirna_max_len,
                                                 tokenizer=tokenizer,
                                                 seed_start_col="seed start" if "seed start" in D_train.columns else None,
                                                 seed_end_col="seed end" if "seed end" in D_train.columns else None,
                                                 cleavage_site_col="cleave_site" if "cleave_site" in D_train.columns else None)
-                ds_val = QuestionAnswerDataset(data=D_val,
+                ds_val = SpanDataset(data=D_val,
                                             mrna_max_len=self.mrna_max_len,
                                             mirna_max_len=self.mirna_max_len,
                                             tokenizer=tokenizer, 
@@ -1825,21 +1825,21 @@ if __name__ == "__main__":
     valid_datapath = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_validation.csv")
     test_datapath  = os.path.join(PROJ_HOME, "miR_degradome_ago_clip_pairing_data/starbase_degradome_UTR_windows_500_test.csv")
     ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/embed=1024d/norm_by_key/LSE/best_composite_0.9042_0.9871_epoch12.pth")
-    model = QuestionAnsweringModel(mrna_max_len=mrna_max_len,
-                                   mirna_max_len=mirna_max_len,
-                                   device="cuda:0",
-                                   epochs=100,
-                                   embed_dim=1024,
-                                   num_heads=8,
-                                   num_layers=4,
-                                   ff_dim=4096,
-                                   batch_size=32,
-                                   lr=3e-5,
-                                   seed=10020,
-                                   predict_span=False,
-                                   predict_binding=False,
-                                   predict_cleavage=True,
-                                   use_longformer=True)
+    model = DTEA(mrna_max_len=mrna_max_len,
+                mirna_max_len=mirna_max_len,
+                device="cuda:0",
+                epochs=100,
+                embed_dim=1024,
+                num_heads=8,
+                num_layers=4,
+                ff_dim=4096,
+                batch_size=32,
+                lr=3e-5,
+                seed=10020,
+                predict_span=False,
+                predict_binding=False,
+                predict_cleavage=True,
+                use_longformer=True)
     # total_params = sum(param.numel() for param in model.parameters())
     # print(f"Total Parameters: {total_params}")
     # trainable_params = [p for p in model.parameters() if p.requires_grad]
@@ -1848,6 +1848,6 @@ if __name__ == "__main__":
               train_path=train_datapath,
               valid_path=valid_datapath,
               accumulation_step=8,
-              training_mode="QA",
+              training_mode="SPAN",
               ckpt_path=ckpt_path
             )

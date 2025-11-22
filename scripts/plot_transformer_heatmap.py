@@ -4,7 +4,7 @@ import pandas as pd
 import seaborn as sns
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
-import transformer_model as tm
+import DTEA_model as dtea
 import matplotlib.patches as patches
 from matplotlib import colors
 from scipy.stats import mannwhitneyu
@@ -19,7 +19,7 @@ def load_model(
         ckpt_path,
         **args_dict):
     # load model checkpoint
-    model = tm.QuestionAnsweringModel(**args_dict)
+    model = dtea.DTEA(**args_dict)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data, strict=False)
     print(f"Loaded checkpoint from {ckpt_path}", flush=True)
@@ -27,7 +27,7 @@ def load_model(
 
 def load_model_ckpt(ckpt_path,
                     **args_dict):
-    model = tm.QuestionAnsweringModel(**args_dict)
+    model = dtea.DTEA(**args_dict)
     # Load the pretrained checkpoint (contains wrapper with base model + pretraining heads)
     pretrain_dict = torch.load(ckpt_path, map_location=model.device)
     

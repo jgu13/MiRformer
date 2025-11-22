@@ -10,9 +10,6 @@ Degradome_dataset/
 TarBase_dataset/
 miR_degradome_ago_clip_pairing_data/
 
-# virtual env
-HyenaDNA/
-
 # logs
 output_logs/
 evaluate_logs/
@@ -45,4 +42,4 @@ dmiso_pairs.txt
 span_metrics.txt
 *.out
 unused_data.tar.gz
-
+HyenaDNA_scripts/

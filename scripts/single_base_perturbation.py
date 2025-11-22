@@ -7,7 +7,7 @@ import logomaker as lm
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 # local import
-import transformer_model as tm
+import DTEA_model as dtea
 from Data_pipeline import CharacterTokenizer
 from plot_transformer_heatmap import plot_heatmap
 
@@ -91,7 +91,7 @@ def load_model(ckpt_path,
                **args_dict):
     # load model checkpoint
     # model = mirLM.create_model(**args_dict)
-    model = tm.QuestionAnsweringModel(**args_dict)
+    model = dtea.DTEA(**args_dict)
     loaded_data = torch.load(ckpt_path, map_location=model.device)
     model.load_state_dict(loaded_data, strict=False)
     print(f"Loaded checkpoint from {ckpt_path}", flush=True)

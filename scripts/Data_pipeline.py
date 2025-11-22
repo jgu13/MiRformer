@@ -341,7 +341,7 @@ class miRawDataset(torch.utils.data.Dataset):
             target = torch.tensor([label], dtype=torch.float)
             return mRNA_seq_tokens, miRNA_seq_tokens, mRNA_seq_mask, miRNA_seq_mask, seed_start, seed_end, target
 
-class QuestionAnswerDataset(torch.utils.data.Dataset):
+class SpanDataset(torch.utils.data.Dataset):
     def __init__(self,
                  data,
                  mrna_max_len,

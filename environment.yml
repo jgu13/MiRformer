@@ -1,4 +1,4 @@
-name: HyenaDNA_clone2
+name: MiRformer
 channels:
   - defaults
 dependencies:
@@ -73,4 +73,4 @@ dependencies:
   - defaults/linux-64::numexpr==2.10.1=py310h3c60e43_0
   - defaults/linux-64::scipy==1.15.1=py310h5f9d8c6_0
   - defaults/linux-64::pandas==2.2.3=py310h6a678d5_0
-prefix: /home/mcb/users/jgu13/.conda/envs/HyenaDNA_clone2
+prefix: /home/users/YOUR_USERNAME/.conda/envs/MiRformer

@@ -1,8 +1,11 @@
 import os
 import pandas as pd
+from Global_parameters import PROJ_HOME
 
+"""
+Generate negative samples with seeds for the TargetScan dataset.
+"""
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 data_dir = os.path.join(PROJ_HOME, "TargetScan_dataset")
 
 # ——— 1) Complement / reverse-complement helpers ——————————————————————

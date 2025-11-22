@@ -1,4 +1,3 @@
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -12,9 +11,9 @@ from sklearn.metrics import roc_auc_score
 from sklearn.metrics import average_precision_score, f1_score, precision_score, recall_score
 from utils import load_dataset
 from Data_pipeline import TokenClassificationDataset, CharacterTokenizer
-from transformer_model import QuestionAnsweringModel
+from DTEA_model import DTEA
+from Global_parameters import PROJ_HOME
 
-PROJ_HOME = os.path.expanduser("~/projects/mirLM")
 
 
 def create_ground_truth_labels(start_positions, end_positions, mrna_mask):
@@ -146,7 +145,7 @@ def evaluate_span_metrics(model, dataloader, device):
 
 def main():
     # Configuration
-    ckpt_path = "/home/mcb/users/jgu13/projects/mirLM/checkpoints/TargetScan/TokenClassification/520/best_accuracy_0.9948_epoch23.pth"
+    ckpt_path = os.path.join(PROJ_HOME, "checkpoints/TargetScan/TokenClassification/520/best_accuracy_0.9948_epoch23.pth")
     data_path = os.path.join(PROJ_HOME, "TargetScan_dataset/TargetScan_validation_500_multiseeds_random_samples.csv")
     
     mrna_max_len = 520
@@ -178,7 +177,7 @@ def main():
     
     # Initialize model
     print("Initializing model...")
-    model = QuestionAnsweringModel(
+    model = DTEA(
         mrna_max_len=mrna_max_len,
         mirna_max_len=mirna_max_len,
         device=device,
