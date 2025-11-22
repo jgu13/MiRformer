@@ -6,9 +6,9 @@ This repository contains the code for `MiRformer`, a deep learning model for pre
 
 The main entry point for training and evaluation is `scripts/DTEA_model.py`.
 
-### Training
+### Evaluation
 
-To train a model, use the following command. This example uses the `DTEA` base model with a custom configuration and a minimal test dataset.
+To test MiRformer model, use the following command. This example uses the `DTEA` base model with a custom configuration and a minimal test dataset.
 
 ```bash
 python scripts/eval_DTEA_model.py \
