@@ -53,7 +53,7 @@ def eval_DTEA(args):
         predict_cleavage=predict_cleavage,
         use_longformer=use_longformer
     )
-    model.load_state_dict(torch.load(args.ckpt_path, map_location=device), strict=False)
+    model.load_state_dict(torch.load(args.ckpt_path, map_location=device))
     model.to(device)
     print(f"Loaded checkpoint from {ckpt_path}")
     print("Evaluating model...")
@@ -65,15 +65,7 @@ if __name__ == "__main__":
     parser.add_argument("--mrna_max_len", type=int, default=520)
     parser.add_argument("--ckpt_path", type=str, 
             default=os.path.join(PROJ_HOME, 
-            "checkpoints",
-            "TargetScan",
-            "TwoTowerTransformer",
-            "Longformer",
-            "520",
-            "embed=1024d",
-            "norm_by_query",
-            "LSE",
-            "best_composite_0.9312_0.9975_epoch19.pth"),
+            "checkpoints/TargetScan/TwoTowerTransformer/Longformer/520/embed=1024d/norm_by_key/LSE/best_composite_0.9112_0.9922_epoch28.pth"),
             help="Path to the checkpoint file.")
     parser.add_argument("--test_path", type=str, help="Path to the test data file.")
     parser.add_argument("--device", type=str, default="cuda")
